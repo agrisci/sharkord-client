@@ -56,6 +56,8 @@ jobs:
         if: matrix.dist == 'linux'
         run: |
           sudo apt-get update
+          # The image's libunwind-14-dev (LLVM) conflicts with the libunwind-dev GStreamer needs
+          sudo apt-get remove -y libunwind-14-dev
           sudo apt-get install -y rpm pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-bad gstreamer1.0-pipewire
           echo "SHARKORD_REQUIRE_NATIVE=1" >> "$GITHUB_ENV"
