@@ -14,7 +14,7 @@
 //!   keyframe's SPS profile and level, `stats` every 2 s, `warning`, and `error` before the
 //!   process gives up -- every failure after `start` sends one).
 //!
-//! The graph and its settings follow the native client (`../sharkord-client`), where each
+//! The graph and its settings follow the native client (`../sharkord-native-client`), where each
 //! was measured on an RX 9060 XT: DXGI capture straight into `d3d11convert` and AMF with no
 //! copies, `videorate` holding the declared rate the encoder budgets against, a one-frame
 //! leaky queue so a busy encoder never holds the source back, a keyframe a minute (more on
