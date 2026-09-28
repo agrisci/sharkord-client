@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <title>Share Screen</title>
+  <style>
+    /* Tokens mirror Sharkord's shadcn theme (upstream apps/client/src/index.css) */
+    :root {
+      --radius: 0.625rem;
+      --radius-sm: calc(var(--radius) - 4px);
+      --radius-md: calc(var(--radius) - 2px);
+      --radius-lg: var(--radius);
+    }
+    html.light {
+      --background: oklch(1 0 0);
+      --foreground: oklch(0.145 0 0);
+      --card: oklch(1 0 0);
+      --popover: oklch(1 0 0);
+      --primary: oklch(0.205 0 0);
+      --primary-foreground: oklch(0.985 0 0);
+      --accent: oklch(0.97 0 0);
+      --muted-foreground: oklch(0.556 0 0);
+      --destructive: oklch(0.577 0.245 27.325);
+      --border: oklch(0.922 0 0);
+      --input: oklch(0.922 0 0);
+      --ring: oklch(0.708 0 0);
+      --switch-off: var(--input);
+      --thumb-off: var(--background);
+      --thumb-on: var(--background);
+      --scroll-track: #f1f1f1; --scroll-thumb: #888; --scroll-thumb-hover: #555;
+    }
+    html.dark {
+      --background: oklch(0.145 0 0);
+      --foreground: oklch(0.985 0 0);
+      --card: oklch(0.205 0 0);
+      --popover: oklch(0.205 0 0);
+      --primary: oklch(0.922 0 0);
+      --primary-foreground: oklch(0.205 0 0);
+      --accent: oklch(0.269 0 0);
+      --muted-foreground: oklch(0.708 0 0);
+      --destructive: oklch(0.704 0.191 22.216);
+      --border: oklch(1 0 0 / 10%);
+      --input: oklch(1 0 0 / 15%);
+      --ring: oklch(0.556 0 0);
+      --switch-off: color-mix(in oklab, var(--input) 80%, transparent);
+      --thumb-off: var(--foreground);
+      --thumb-on: var(--primary-foreground);
+      --scroll-track: #2e2e2e; --scroll-thumb: #555; --scroll-thumb-hover: #888;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; border: 0 solid var(--border); }
+    body {
+      background: var(--background); color: var(--foreground);
+      font-family: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+      font-size: 14px; line-height: 20px;
+      -webkit-font-smoothing: antialiased;
+      display: flex; flex-direction: column;
+      height: 100vh; padding: 24px; gap: 16px;
+    }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    svg.icon { width: 16px; height: 16px; flex-shrink: 0; }
+    [hidden] { display: none !important; }
+
+    /* Dialog header / footer */
+    .header { display: flex; flex-direction: column; gap: 8px; }
+    .title { font-size: 18px; line-height: 1; font-weight: 600; }
+    .muted { color: var(--muted-foreground); }
+    .footer { display: flex; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
+    .scroller { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 24px; padding-right: 4px; }
+
+    /* Label / Group */
+    .label { display: flex; align-items: center; gap: 8px; font-weight: 500; line-height: 1; }
+    .group { display: flex; flex-direction: column; gap: 8px; }
+    .group-head { display: flex; flex-direction: column; gap: 4px; }
+    .group-body { display: flex; flex-direction: column; gap: 8px; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      height: 36px; padding: 0 16px; border-radius: var(--radius-md);
+      font-weight: 500; white-space: nowrap; outline: none;
+      transition: background-color .15s, color .15s, box-shadow .15s;
+    }
+    .btn:focus-visible { box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+    .btn:disabled { opacity: .5; pointer-events: none; }
+    .btn-default { background: var(--primary); color: var(--primary-foreground); }
+    .btn-default:hover { background: color-mix(in oklab, var(--primary) 90%, transparent); }
+    .btn-outline {
+      border: 1px solid var(--input); background: color-mix(in oklab, var(--input) 30%, transparent);
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05);
+    }
+    .btn-outline:hover { background: color-mix(in oklab, var(--input) 50%, transparent); }
+    html.light .btn-outline { border-color: var(--border); background: var(--background); }
+    html.light .btn-outline:hover { background: var(--accent); }
+    .btn-sm { height: 32px; padding: 0 12px; gap: 6px; }
+
+    /* Cards */
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius-lg); box-shadow: 0 1px 3px 0 rgb(0 0 0 / .1);
+    }
+
+    /* Step 1 grid */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+    .tile { padding: 8px; display: flex; flex-direction: column; gap: 8px; cursor: pointer; transition: background-color .15s; }
+    .tile:hover { background: var(--accent); }
+    .tile img, .preview img {
+      width: 100%; aspect-ratio: 16/9; object-fit: cover; display: block;
+      border-radius: var(--radius-md); background: #000;
+    }
+    .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    /* Step 2 preview */
+    .preview { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .preview img { width: auto; max-width: 100%; max-height: 170px; aspect-ratio: auto; align-self: center; background: none; }
+
+    /* Select (multi) */
+    .select { position: relative; }
+    .select-trigger {
+      width: 100%; height: 36px; padding: 0 12px; gap: 8px;
+      display: flex; align-items: center; justify-content: space-between;
+      border: 1px solid var(--input); border-radius: var(--radius-md);
+      background: color-mix(in oklab, var(--input) 30%, transparent);
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05); text-align: left; outline: none;
+      transition: background-color .15s, box-shadow .15s;
+    }
+    .select-trigger:hover { background: color-mix(in oklab, var(--input) 50%, transparent); }
+    .select-trigger:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+    html.light .select-trigger { background: transparent; }
+    .select-trigger .val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .select-trigger .icon { color: var(--muted-foreground); opacity: .5; }
+    .select-content {
+      position: absolute; left: 0; right: 0; bottom: calc(100% + 4px); z-index: 10;
+      max-height: 240px; overflow-y: auto; padding: 4px;
+      background: var(--popover); border: 1px solid var(--border); border-radius: var(--radius-md);
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / .1), 0 2px 4px -2px rgb(0 0 0 / .1);
+      animation: pop .1s ease-out;
+    }
+    @keyframes pop { from { opacity: 0; transform: translateY(4px) scale(.98); } }
+    .select-item {
+      position: relative; display: flex; align-items: center;
+      padding: 6px 32px 6px 8px; border-radius: var(--radius-sm); cursor: default; user-select: none;
+    }
+    .select-item:hover { background: var(--accent); }
+    .select-item .check { position: absolute; right: 8px; display: none; }
+    .select-item.on .check { display: flex; }
+
+    /* Switch rows */
+    .settings { padding: 4px 16px; }
+    .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; cursor: pointer; }
+    .switch-row + .switch-row { border-top: 1px solid var(--border); }
+    .switch-row.disabled { opacity: .5; pointer-events: none; }
+    .switch-row .text { display: flex; flex-direction: column; gap: 4px; }
+    .switch {
+      width: 32px; height: 1.15rem; flex-shrink: 0; border-radius: 9999px;
+      border: 1px solid transparent; background: var(--switch-off);
+      display: inline-flex; align-items: center; transition: background-color .15s;
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05);
+    }
+    .switch::after {
+      content: ''; width: 16px; height: 16px; border-radius: 9999px;
+      background: var(--thumb-off); transition: transform .15s;
+    }
+    .switch.on { background: var(--primary); }
+    .switch.on::after { background: var(--thumb-on); transform: translateX(calc(100% - 2px)); }
+
+    .row-btns { display: flex; gap: 8px; }
+    .section { gap: 16px; }
+
+    /* Alert */
+    .alert {
+      display: flex; gap: 12px; align-items: flex-start;
+      padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius-lg);
+      background: var(--card);
+    }
+    .alert.destructive { color: var(--destructive); }
+    .alert.destructive .desc { color: color-mix(in oklab, var(--destructive) 90%, transparent); }
+    .alert .icon { margin-top: 2px; }
+    a.link { color: inherit; text-decoration: underline; text-underline-offset: 4px; cursor: pointer; }
+
+    /* Scrollbars (index.css) */
+    ::-webkit-scrollbar { width: 12px; height: 12px; }
+    ::-webkit-scrollbar-track { background: var(--scroll-track); border-radius: 10px; }
+    ::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 10px; border: 2px solid var(--scroll-track); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h2 class="title" id="title">Choose what to share</h2>
+    <p class="muted" id="subtitle">Select a screen or window</p>
+  </div>
+
+  <!-- Step 1: source grid -->
+  <div class="scroller" id="step1">
+    <p class="muted">Loading sources…</p>
+  </div>
+
+  <!-- Step 2: preview + audio -->
+  <div class="scroller" id="step2" hidden>
+    <div class="group">
+      <div class="label">What you're streaming</div>
+      <div class="card preview">
+        <img id="preview-img" alt="">
+        <div class="name muted" id="preview-name"></div>
+      </div>
+    </div>
+    <div class="group-body section" id="audio-section"></div>
+  </div>
+
+  <div class="footer">
+    <button class="btn btn-outline" id="back" hidden>Back</button>
+    <button class="btn btn-outline" id="cancel">Cancel</button>
+    <button class="btn btn-default" id="golive" hidden>Go Live</button>
+  </div>
+
+  <script>
+    var api = window.pickerAPI
+    var $ = function (id) { return document.getElementById(id) }
+    var el = function (tag, cls, text) {
+      var e = document.createElement(tag)
+      if (cls) e.className = cls
+      if (text != null) e.textContent = text
+      return e
+    }
+
+    // lucide icons (ISC) — same set Sharkord uses via lucide-react
+    var ICONS = {
+      monitor: '<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
+      appWindow: '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/>',
+      refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+      settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+      chevronDown: '<path d="m6 9 6 6 6-6"/>',
+      check: '<path d="M20 6 9 17l-5-5"/>',
+      volume: '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>',
+      alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+    }
+    function icon (name, cls) {
+      var span = document.createElement('span')
+      span.innerHTML = '<svg class="icon' + (cls ? ' ' + cls : '') + '" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + ICONS[name] + '</svg>'
+      return span.firstChild
+    }
+    function label (text, iconName) {
+      var l = el('div', 'label')
+      if (iconName) l.appendChild(icon(iconName))
+      l.appendChild(document.createTextNode(text))
+      return l
+    }
+    function group (title, desc, iconName) {
+      var g = el('div', 'group')
+      var head = el('div', 'group-head')
+      head.appendChild(label(title, iconName))
+      if (desc) head.appendChild(el('span', 'muted', desc))
+      g.appendChild(head)
+      var body = el('div', 'group-body')
+      g.appendChild(body)
+      return { root: g, body: body }
+    }
+    function alertBox (text, destructive) {
+      var a = el('div', 'alert' + (destructive ? ' destructive' : ''))
+      a.appendChild(icon('alert'))
+      var d = el('div', 'desc', text)
+      a.appendChild(d)
+      return { root: a, desc: d }
+    }
+
+    var state = {
+      sources: [], skipPicker: false, platform: '',
+      selected: null,
+      audio: true,              // Windows: stream with audio
+      include: 'None',          // Linux: 'None' | 'Entire System' | Node[]
+      exclude: 'None',
+      settings: null,           // Linux audio settings (persisted in main)
+      audioList: null,          // result of virtmic-list
+      ignorePulseWarning: false,
+    }
+
+    // ── Audio source helpers ───────────────────────────────────────────
+    var SPECIAL = ['None', 'Entire System']
+    var isSpecial = function (v) { return typeof v === 'string' }
+
+    function mapToAudioItem (node) {
+      if (isSpecial(node)) return [{ name: node, value: node }]
+      var cls = node['media.class'] || ''
+      if (cls.indexOf('Video') >= 0 || cls.indexOf('Midi') >= 0) return []
+      if (!state.settings.deviceSelect && node['device.id']) return []
+
+      var prop = ['application.name', 'node.description', 'node.name', 'application.process.binary']
+        .find(function (p) { return node[p] })
+      if (!prop) return []
+
+      var name = node[prop], value = {}
+      value[prop] = name
+      var items = [{ name: name, value: value }]
+      if (!state.settings.granularSelect) return items
+
+      var gName = name, gValue = {}
+      gValue[prop] = name
+      ;[['application.process.id', '<>'], ['application.process.binary', '()'], ['media.name', '[]']]
+        .forEach(function (a) {
+          if (!node[a[0]]) return
+          gName += ' ' + a[1][0] + node[a[0]] + a[1][1]
+          gValue[a[0]] = node[a[0]]
+        })
+      items.push({ name: gName, value: gValue })
+      return items
+    }
+
+    function sameNode (a, b) {
+      var ka = Object.keys(a)
+      return ka.length === Object.keys(b).length && ka.every(function (k) { return a[k] === b[k] })
+    }
+    function isSelected (sel, value) {
+      if (isSpecial(sel) || isSpecial(value)) return sel === value
+      return sel.some(function (s) { return sameNode(s, value) })
+    }
+    function toggle (sel, value) {
+      if (isSpecial(value)) return value
+      if (isSpecial(sel)) return [value]
+      if (isSelected(sel, value)) {
+        var rest = sel.filter(function (s) { return !sameNode(s, value) })
+        return rest.length ? rest : 'None'
+      }
+      return sel.concat([value])
+    }
+    function selLabel (sel, items) {
+      if (isSpecial(sel)) return sel
+      return items.filter(function (i) { return !isSpecial(i.value) && isSelected(sel, i.value) })
+        .map(function (i) { return i.name }).join(', ') || 'None'
+    }
+
+    // ── Multi-select (shadcn Select look; opens upward, stays open) ────
+    var _openList = null
+    document.addEventListener('mousedown', function (e) {
+      if (_openList && !_openList.parentNode.contains(e.target)) { _openList.remove(); _openList = null }
+    })
+    function multiSelect (items, getSel, setSel) {
+      var wrap = el('div', 'select')
+      var btn = el('button', 'select-trigger')
+      var val = el('span', 'val', selLabel(getSel(), items))
+      btn.appendChild(val)
+      btn.appendChild(icon('chevronDown'))
+      btn.addEventListener('click', function () {
+        if (_openList) {
+          var own = _openList.parentNode === wrap
+          _openList.remove(); _openList = null
+          if (own) return   // second click on the same trigger closes it
+        }
+        var list = el('div', 'select-content')
+        items.forEach(function (it) {
+          var opt = el('div', 'select-item' + (isSelected(getSel(), it.value) ? ' on' : ''))
+          opt.appendChild(el('span', 'name', it.name))
+          var chk = el('span', 'check')
+          chk.appendChild(icon('check'))
+          opt.appendChild(chk)
+          opt.addEventListener('click', function () {
+            setSel(toggle(getSel(), it.value))
+            val.textContent = selLabel(getSel(), items)
+            list.querySelectorAll('.select-item').forEach(function (o, i) {
+              o.classList.toggle('on', isSelected(getSel(), items[i].value))
+            })
+          })
+          list.appendChild(opt)
+        })
+        wrap.appendChild(list)
+        _openList = list
+      })
+      wrap.appendChild(btn)
+      return wrap
+    }
+
+    function switchRow (title, desc, on, onChange, disabled) {
+      var row = el('div', 'switch-row' + (disabled ? ' disabled' : ''))
+      var txt = el('div', 'text')
+      txt.appendChild(el('div', 'label', title))
+      if (desc) txt.appendChild(el('span', 'muted', desc))
+      row.appendChild(txt)
+      var sw = el('button', 'switch' + (on ? ' on' : ''))
+      sw.setAttribute('role', 'switch')
+      sw.setAttribute('aria-checked', String(!!on))
+      row.appendChild(sw)
+      row.addEventListener('click', function () { onChange(!sw.classList.contains('on')) })
+      return row
+    }
+
+    // ── Audio section ──────────────────────────────────────────────────
+    function renderAudio () {
+      var section = $('audio-section')
+      section.innerHTML = ''
+
+      if (state.platform === 'win32') {
+        var wg = group('Audio', null, 'volume')
+        var wc = el('div', 'card settings')
+        wc.appendChild(switchRow('Stream With Audio', 'Share your system audio. Sharkord itself is excluded.',
+          state.audio, function (v) { state.audio = v; renderAudio() }))
+        wg.body.appendChild(wc)
+        section.appendChild(wg.root)
+        return
+      }
+
+      var g = { body: section }
+
+      if (state.platform !== 'linux') {
+        g.body.appendChild(alertBox('Audio sharing is not supported on this platform.').root)
+        return
+      }
+
+      var res = state.audioList
+      if (!res) { g.body.appendChild(el('p', 'muted', 'Loading audio sources…')); return }
+
+      if (!res.ok) {
+        g.body.appendChild(alertBox(res.isGlibCxxOutdated
+          ? 'Could not load venmic: your C++ library (glibc) is too old. You can still share without audio.'
+          : 'Could not load venmic (PipeWire audio capture). You can still share without audio.', true).root)
+        return
+      }
+
+      if (!res.hasPipewirePulse && !state.ignorePulseWarning) {
+        var al = alertBox('Could not find pipewire-pulse. You can only share audio of apps running under PipeWire. ', true)
+        var a = el('a', 'link', "I know what I'm doing")
+        a.addEventListener('click', function () { state.ignorePulseWarning = true; renderAudio() })
+        al.desc.appendChild(a)
+        g.body.appendChild(al.root)
+        return
+      }
+
+      var seen = {}
+      var items = SPECIAL.concat(res.targets)
+        .map(mapToAudioItem).reduce(function (x, y) { return x.concat(y) }, [])
+        .filter(function (i) { if (seen[i.name]) return false; seen[i.name] = true; return true })
+
+      // Exclude list only applies to 'Entire System'; rebuilt separately so the
+      // open Audio Sources dropdown isn't torn down while picking
+      var exWrap = el('div')
+      function renderExclude () {
+        exWrap.innerHTML = ''
+        exWrap.hidden = state.include !== 'Entire System'   // no empty gap in the flex column
+        if (exWrap.hidden) return
+        var eg = group('Exclude Sources', 'Apps to leave out of the system audio.')
+        eg.body.appendChild(multiSelect(items.filter(function (i) { return i.name !== 'Entire System' }),
+          function () { return state.exclude },
+          function (v) { state.exclude = v }))
+        exWrap.appendChild(eg.root)
+      }
+
+      var sg = group('Audio Sources', 'Apps whose sound is included in the stream.', 'volume')
+      sg.body.appendChild(multiSelect(items,
+        function () { return state.include },
+        function (v) { state.include = v; if (v !== 'Entire System') state.exclude = 'None'; renderExclude() }))
+      g.body.appendChild(sg.root)
+      g.body.appendChild(exWrap)
+      renderExclude()
+
+      var btns = el('div', 'row-btns')
+      var refresh = el('button', 'btn btn-outline btn-sm')
+      refresh.appendChild(icon('refresh'))
+      refresh.appendChild(document.createTextNode('Refresh Audio Sources'))
+      refresh.addEventListener('click', loadAudio)
+      var gear = el('button', 'btn btn-outline btn-sm')
+      gear.appendChild(icon('settings'))
+      gear.appendChild(document.createTextNode('Audio Settings'))
+      var panel = el('div', 'card settings')
+      panel.hidden = !state.settingsOpen
+      gear.addEventListener('click', function () { state.settingsOpen = !state.settingsOpen; panel.hidden = !state.settingsOpen })
+      btns.appendChild(refresh)
+      btns.appendChild(gear)
+      g.body.appendChild(btns)
+
+      var s = state.settings
+      function set (k, v, resetSel) {
+        var patch = {}; patch[k] = v
+        if (k === 'ignoreDevices' && v) patch.deviceSelect = false
+        api.setAudioSettings(patch).then(function (ns) {
+          state.settings = ns
+          if (resetSel) { state.include = 'None'; state.exclude = 'None'; loadAudio() } else renderAudio()
+        })
+      }
+      ;[
+        ['mute', 'Initial Mute', 'Fix an initial audio spike caused by Chromium.'],
+        ['workaround', 'Microphone Workaround', 'Work around an issue that causes the microphone to be shared instead of the correct audio. Only enable if you have this issue.'],
+        ['onlySpeakers', 'Only Speakers', 'When sharing entire system audio, only share apps that play to a speaker. You may want to disable this when using "mix bussing".'],
+        ['onlyDefaultSpeakers', 'Only Default Speakers', 'When sharing entire system audio, only share apps that play to the default speakers.'],
+        ['ignoreInputMedia', 'Ignore Inputs', 'Exclude nodes that are intended to capture audio.'],
+        ['ignoreVirtual', 'Ignore Virtual', 'Exclude virtual nodes, such as nodes belonging to loopbacks.'],
+        ['ignoreDevices', 'Ignore Devices', 'Exclude device nodes, such as nodes belonging to microphones or speakers.'],
+        ['granularSelect', 'Granular Selection', 'Allow selecting applications more granularly.', true],
+        ['deviceSelect', 'Device Selection', 'Allow selecting devices such as microphones. Requires Ignore Devices to be off.', true, s.ignoreDevices],
+      ].forEach(function (t) {
+        panel.appendChild(switchRow(t[1], t[2], !!s[t[0]], function (v) { set(t[0], v, t[3]) }, t[4]))
+      })
+      g.body.appendChild(panel)
+    }
+    function loadAudio () {
+      state.audioList = null
+      renderAudio()
+      Promise.all([api.getAudioSettings(), api.listAudio()]).then(function (r) {
+        state.settings = r[0]
+        state.audioList = r[1]
+        renderAudio()
+      })
+    }
+
+    // ── Steps ──────────────────────────────────────────────────────────
+    function showStep1 () {
+      state.selected = null
+      $('title').textContent = 'Choose what to share'
+      $('subtitle').textContent = 'Select a screen or window'
+      $('step1').hidden = false; $('step2').hidden = true
+      $('back').hidden = true; $('golive').hidden = true
+    }
+    function showStep2 (src) {
+      state.selected = src.id
+      $('title').textContent = 'Screen Share'
+      $('subtitle').textContent = 'Choose what audio to include, then go live'
+      $('preview-img').src = src.thumbnail
+      $('preview-name').textContent = src.name
+      $('step1').hidden = true; $('step2').hidden = false
+      $('back').hidden = state.skipPicker; $('golive').hidden = false
+      if (state.platform === 'linux' && !state.audioList) loadAudio(); else renderAudio()
+    }
+
+    function renderGrid () {
+      var scroller = $('step1')
+      scroller.innerHTML = ''
+      function section (title, iconName, items) {
+        if (!items.length) return
+        var g = group(title, null, iconName)
+        var grid = el('div', 'grid')
+        items.forEach(function (src) {
+          var tile = el('div', 'card tile')
+          var img = el('img'); img.src = src.thumbnail
+          tile.appendChild(img)
+          tile.appendChild(el('div', 'name', src.name))
+          tile.addEventListener('click', function () { showStep2(src) })
+          grid.appendChild(tile)
+        })
+        g.body.appendChild(grid)
+        scroller.appendChild(g.root)
+      }
+      section('Screens', 'monitor', state.sources.filter(function (s) { return s.id.startsWith('screen:') }))
+      section('Windows', 'appWindow', state.sources.filter(function (s) { return !s.id.startsWith('screen:') }))
+    }
+
+    $('cancel').addEventListener('click', function () { api.cancel() })
+    $('back').addEventListener('click', showStep1)
+    $('golive').addEventListener('click', function () {
+      $('golive').disabled = true
+      api.goLive({
+        id: state.selected,
+        audio: state.audio,
+        include: state.platform === 'linux' && state.audioList && state.audioList.ok ? state.include : 'None',
+        exclude: state.exclude,
+      })
+    })
+
+    api.onInit(function (d) {
+      document.documentElement.className = d.theme === 'light' ? 'light' : 'dark'
+      state.sources = d.sources
+      state.skipPicker = d.skipPicker
+      state.platform = d.platform
+      if (d.skipPicker && d.sources[0]) showStep2(d.sources[0])
+      else { renderGrid(); showStep1() }
+    })
+  </script>
+</body>
+</html>

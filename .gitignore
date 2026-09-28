@@ -1,0 +1,9 @@
+node_modules/
+release/
+upstream/
+.sync_*
+Desktop.ini
+.nextcloud*
+LAB.local.md
+native/target/
+build/native/

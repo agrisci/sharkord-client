@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <title>Sharkord</title>
+  <link rel="stylesheet" href="theme.css">
+  <script>
+    const q = new URLSearchParams(location.search)
+    if (q.get('theme') === 'light') document.documentElement.className = 'light'
+  </script>
+</head>
+<body>
+  <div class="screen">
+    <div class="card">
+      <div class="card-header">
+        <img class="logo" src="../build/icon.png" alt="Sharkord" width="96" height="96">
+        <span class="card-title" id="title">Server unreachable</span>
+      </div>
+      <div class="card-content">
+        <span class="text-sm muted" id="msg">Couldn't connect to <span class="break" id="url"></span>. Check the address or your connection.</span>
+        <div class="stack">
+          <!-- Intercepted by main (will-navigate) -->
+          <a class="btn btn-outline w-full" href="sharkord://retry">Retry</a>
+          <a class="btn btn-ghost w-full" href="sharkord://change-server">Change server</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    document.getElementById('url').textContent = q.get('url') || ''
+    if (q.get('reason') === 'not-sharkord') {
+      document.getElementById('title').textContent = 'Not a Sharkord server'
+      const msg = document.getElementById('msg')
+      msg.firstChild.textContent = ''
+      msg.lastChild.textContent = " doesn't look like a Sharkord server. Check the address."
+    }
+  </script>
+</body>
+</html>

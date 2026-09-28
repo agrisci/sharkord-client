@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <title>Sharkord Setup</title>
+  <link rel="stylesheet" href="theme.css">
+  <script>
+    // Theme first so there's no flash (?theme=light|dark, default dark like Sharkord)
+    const q = new URLSearchParams(location.search)
+    if (q.get('theme') === 'light') document.documentElement.className = 'light'
+  </script>
+</head>
+<body>
+  <div class="screen">
+    <form class="card" id="form" novalidate>
+      <div class="card-header">
+        <img class="logo" src="../build/icon.png" alt="Sharkord" width="96" height="96">
+        <span class="card-title">Sharkord</span>
+      </div>
+      <div class="card-content">
+        <span class="text-sm muted">Enter the address of the Sharkord server you want to connect to.</span>
+
+        <div class="group">
+          <label class="label" for="url">Server URL</label>
+          <input class="input" id="url" placeholder="https://sharkord.example.com" autocomplete="url" autofocus>
+          <p class="text-sm error" id="error" role="alert" hidden></p>
+        </div>
+
+        <div class="stack">
+          <button type="submit" class="btn btn-outline w-full" id="connect">Connect</button>
+          <button type="button" class="btn btn-ghost w-full" id="cancel">Cancel</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <script>
+    // Same channel as Vesktop's first-launch view: main listens to console messages
+    const $url = document.getElementById('url')
+    const $err = document.getElementById('error')
+    $url.value = q.get('current') || ''
+    $url.select()
+
+    const $connect = document.getElementById('connect')
+    // Main checks the server, then closes this window or calls setError()
+    const setBusy = busy => {
+      $connect.disabled = busy
+      $connect.textContent = busy ? 'Connecting…' : 'Connect'
+    }
+    const setError = msg => {
+      if (msg) setBusy(false)
+      $err.textContent = msg || ''
+      $err.hidden = !msg
+      $url.setAttribute('aria-invalid', !!msg)
+    }
+    $url.oninput = () => setError('')
+
+    document.getElementById('cancel').onclick = () => console.log('cancel')
+    document.getElementById('form').onsubmit = e => {
+      e.preventDefault()
+      if ($connect.disabled) return
+      let v = $url.value.trim()
+      if (!v) return setError('Enter a server URL.')
+      if (!/^https?:\/\//i.test(v)) v = 'https://' + v
+      // Chromium's URL parser accepts hosts like "exa%20mple", so check the host too
+      let u; try { u = new URL(v) } catch {}
+      if (!u || !/^([a-z0-9-]+\.)*[a-z0-9-]+$|^\[[0-9a-f:.]+\]$/i.test(u.hostname))
+        return setError('That doesn\'t look like a valid URL.')
+      v = u.href.replace(/\/+$/, '')   // the parser adds a trailing slash to bare hosts
+      setError('')
+      setBusy(true)
+      console.log('form:' + JSON.stringify({ serverUrl: v }))
+    }
+  </script>
+</body>
+</html>

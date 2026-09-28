@@ -1,0 +1,16 @@
+[package]
+name = "sharkord-share"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Native screen capture + hardware encode for the Electron client's screen share"
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
+
+[profile.release]
+debug = "line-tables-only"

@@ -1,0 +1,115 @@
+/* Sharkord look for the client's own pages (setup, unreachable).
+   Tokens and component styles copied from upstream sharkord:
+   apps/client/src/index.css + packages/ui/src/components/{card,input,label,button}.tsx
+   Theme class on <html> ("dark" | "light"), like Sharkord's ThemeProvider. */
+:root {
+  --radius: 0.625rem;
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+}
+html.light {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+}
+html.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+}
+
+/* Tailwind preflight essentials */
+*, ::before, ::after { box-sizing: border-box; margin: 0; padding: 0; border: 0 solid var(--border); }
+html, body { height: 100%; overflow: hidden; }
+body {
+  background: var(--background); color: var(--foreground);
+  font-family: var(--font-sans); line-height: 1.5;
+}
+button, input { font: inherit; color: inherit; background: transparent; }
+a { color: inherit; text-decoration: inherit; }
+button:not(:disabled) { cursor: pointer; }
+img { display: block; max-width: 100%; }
+[hidden] { display: none !important; }
+
+/* Screen: centred like the connect screen (flex col, gap-2, h-full) */
+.screen { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 16px; }
+
+/* Card */
+.card {
+  width: 100%; max-width: 24rem;
+  background: var(--card); color: var(--card-foreground);
+  display: flex; flex-direction: column; gap: 24px;
+  border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 24px 0;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / .1), 0 1px 2px -1px rgb(0 0 0 / .1);
+}
+.card-header { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 0 24px; text-align: center; }
+.card-content { display: flex; flex-direction: column; gap: 16px; padding: 0 24px; }
+.logo { max-height: 8rem; border-radius: 5px; }
+.card-title { font-size: 1.25rem; line-height: 1.25; font-weight: 700; }
+
+/* Text */
+.text-sm { font-size: .875rem; line-height: 1.25rem; }
+.muted { color: var(--muted-foreground); }
+.error { color: var(--destructive); }
+.break { word-break: break-all; }
+
+/* Group + Label */
+.group { display: flex; flex-direction: column; gap: 8px; }
+.label { display: flex; align-items: center; gap: 8px; font-size: .875rem; line-height: 1; font-weight: 500; }
+
+/* Input */
+.input {
+  height: 36px; width: 100%; min-width: 0; padding: 4px 12px;
+  border: 1px solid var(--input); border-radius: var(--radius-md);
+  font-size: .875rem; outline: none;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05);
+  transition: color .15s, box-shadow .15s;
+}
+html.dark .input { background: color-mix(in oklab, var(--input) 30%, transparent); }
+.input::placeholder { color: var(--muted-foreground); }
+.input::selection { background: var(--primary); color: var(--primary-foreground); }
+.input:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+.input[aria-invalid="true"] { border-color: var(--destructive); box-shadow: 0 0 0 3px color-mix(in oklab, var(--destructive) 20%, transparent); }
+html.dark .input[aria-invalid="true"] { box-shadow: 0 0 0 3px color-mix(in oklab, var(--destructive) 40%, transparent); }
+
+/* Button */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 36px; padding: 8px 16px; border-radius: var(--radius-md);
+  font-size: .875rem; font-weight: 500; white-space: nowrap; text-decoration: none;
+  outline: none; transition: all .15s;
+}
+.btn:focus-visible { border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent); }
+.btn:disabled { pointer-events: none; opacity: .5; }
+.btn-outline {
+  border: 1px solid var(--border); background: var(--background);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / .05);
+}
+.btn-outline:hover { background: var(--accent); color: var(--accent-foreground); }
+html.dark .btn-outline { border-color: var(--input); background: color-mix(in oklab, var(--input) 30%, transparent); }
+html.dark .btn-outline:hover { background: color-mix(in oklab, var(--input) 50%, transparent); }
+.btn-ghost:hover { background: var(--accent); color: var(--accent-foreground); }
+html.dark .btn-ghost:hover { background: color-mix(in oklab, var(--accent) 50%, transparent); }
+.w-full { width: 100%; }
+.stack { display: flex; flex-direction: column; gap: 8px; }
