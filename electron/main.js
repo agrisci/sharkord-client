@@ -5,7 +5,7 @@ const {
   app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, net, shell, desktopCapturer, session,
   screen, MessageChannelMain, dialog,
 } = require('electron')
-const { spawn } = require('child_process')
+const { spawn, execFile } = require('child_process')
 const path = require('path')
 const fs   = require('fs')
 const os   = require('os')
@@ -187,6 +187,34 @@ ipcMain.handle('picker-go-live', (_e, { id, audio, include, exclude }) => {
 })
 ipcMain.on('picker-cancelled', () => finishPick(null))
 
+// Opens the picker on `sources`; `done` gets the streams, or null when it is cancelled or closed
+async function openPicker (sources, done) {
+  _displayCallback = done
+  _pickerSources   = sources
+  const theme = await pageTheme()
+  _pickerWin = new BrowserWindow({
+    width:720, height:660, parent:win, modal:false,
+    title:'Share Screen', backgroundColor: theme === 'light' ? '#ffffff' : '#0a0a0a', resizable:false,
+    ...(fs.existsSync(APP_ICON) ? { icon:APP_ICON } : {}),
+    webPreferences:{ preload:path.join(__dirname,'picker-preload.js'), contextIsolation:true, nodeIntegration:false },
+  })
+  _pickerWin.setMenuBarVisibility(false)
+  _pickerWin.loadFile(path.join(__dirname,'picker.html'))
+  _pickerWin.webContents.on('did-finish-load', () => {
+    _pickerWin.webContents.send('init', {
+      sources: sources.map(s=>({id:s.id,name:s.name,thumbnail:s.thumbnail?.toDataURL() || ''})),
+      skipPicker: isWayland,
+      platform: process.platform,
+      theme,
+    })
+  })
+  _pickerWin.on('closed', () => {
+    const cb = _displayCallback; _displayCallback = null
+    if (cb) cb(null)
+    _pickerWin = null
+  })
+}
+
 async function handleDisplayMediaRequest (_req, callback) {
   try {
     venmicUnlink()   // a previous share's link must not leak into this one
@@ -197,51 +225,50 @@ async function handleDisplayMediaRequest (_req, callback) {
       types:['screen','window'], thumbnailSize:{ width, height:Math.round(width*9/16) },
     })
     if (!sources.length) { callback(null); return }   // portal cancelled
-    _displayCallback = callback
-    _pickerSources   = sources
-    const theme = await pageTheme()
-    _pickerWin = new BrowserWindow({
-      width:720, height:660, parent:win, modal:false,
-      title:'Share Screen', backgroundColor: theme === 'light' ? '#ffffff' : '#0a0a0a', resizable:false,
-      ...(fs.existsSync(APP_ICON) ? { icon:APP_ICON } : {}),
-      webPreferences:{ preload:path.join(__dirname,'picker-preload.js'), contextIsolation:true, nodeIntegration:false },
-    })
-    _pickerWin.setMenuBarVisibility(false)
-    _pickerWin.loadFile(path.join(__dirname,'picker.html'))
-    _pickerWin.webContents.on('did-finish-load', () => {
-      _pickerWin.webContents.send('init', {
-        sources: sources.map(s=>({id:s.id,name:s.name,thumbnail:s.thumbnail.toDataURL()})),
-        skipPicker: isWayland,
-        platform: process.platform,
-        theme,
-      })
-    })
-    _pickerWin.on('closed', () => {
-      const cb = _displayCallback; _displayCallback = null
-      if (cb) cb(null)
-      _pickerWin = null
-    })
+    await openPicker(sources, callback)
   } catch (e) { log('[screen-share] error:', e.message); _displayCallback = null; callback(null) }
 }
 
-// ── Native screen share (Windows, experimental) ────────────────────────────
+// ── Native screen share (Windows; Linux on Wayland; experimental) ─────────
 //   A helper (native/, Rust + GStreamer) captures the picked monitor and encodes
 //   it with the GPU; the preload swaps its frames into Sharkord's own share.
 //   Frames go straight to the page over a MessagePort; the page sends keyframe
 //   and bitrate requests back the same way. The `nativeShare` setting turns it
 //   on (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
+//   Linux: the helper owns the pick. The page asks for it (native-share-pick)
+//   instead of calling Chromium's getDisplayMedia, so the portal asks once: the
+//   helper shows it, then the picker's audio step, and the page builds the
+//   share's stream (its preview decoded from the helper's frames).
 let _nativeTarget = null, _nativeShare = null
+let _nativeProbe = null   // Linux: the helper's --check, once per run
 
-const nativeShareExe = () => process.platform === 'win32' && [
-  path.join(process.resourcesPath || '', 'native', 'bin', 'sharkord-share.exe'),   // installed (scripts/stage-native.js)
-  path.join(__dirname, '..', 'native', 'target', 'release', 'sharkord-share.exe'),
+const EXE_NAME = process.platform === 'win32' ? 'sharkord-share.exe' : 'sharkord-share'
+const nativeShareExe = () => ['win32', 'linux'].includes(process.platform) && [
+  path.join(process.resourcesPath || '', 'native', 'bin', EXE_NAME),   // installed (scripts/stage-native.js)
+  path.join(__dirname, '..', 'native', 'target', 'release', EXE_NAME),
 ].find(p => fs.existsSync(p))
-const nativeShareOn = () => !!nativeShareExe() &&
+// Linux: Wayland only (X11 stays on Chromium's capture), and the system's GStreamer must have
+// the elements and a VA-API encoder (Fedora's own Mesa has no H.264 encoding, for one)
+const nativeShareSupported = () => !!nativeShareExe() &&
+  (process.platform === 'win32' || (isWayland && !!(_nativeProbe?.h264 || _nativeProbe?.av1)))
+const nativeShareOn = () => nativeShareSupported() &&
   (process.env.SHARKORD_NATIVE_SHARE === '1' || !!loadUserSettings().nativeShare)
 
-// Only whole screens: the helper captures monitors, not windows
+function probeNativeShare () {
+  const exe = nativeShareExe()
+  if (process.platform !== 'linux' || !isWayland || !exe) return
+  execFile(exe, ['--check'], { timeout: 10000 }, (err, stdout) => {
+    try { _nativeProbe = JSON.parse(stdout) } catch { _nativeProbe = null }
+    log('[native-share] probe', err && !_nativeProbe ? err.message : stdout.trim())
+    if (_nativeProbe?.missing?.length) _nativeProbe = null
+    updateTrayMenu()
+  })
+}
+
+// Windows: only whole screens, the helper captures monitors. Linux goes native through
+// native-share-pick instead, never through Chromium's pick.
 function nativeTargetFor (src) {
-  if (!src.id.startsWith('screen:') || !nativeShareOn()) return null
+  if (process.platform !== 'win32' || !src.id.startsWith('screen:') || !nativeShareOn()) return null
   const display = screen.getAllDisplays().find(d => String(d.id) === src.display_id)
   return display ? { label: display.label, primary: display.id === screen.getPrimaryDisplay().id } : { primary: true }
 }
@@ -252,18 +279,26 @@ function stopNativeShare () {
   try { s.proc.stdin.end() } catch {}
   setTimeout(() => { if (s.proc.exitCode === null) s.proc.kill() }, 2000)
   s.port.close()
+  s.settle('error')
 }
 
-ipcMain.handle('native-share-target', e => e.sender === win?.webContents ? _nativeTarget : null)
-ipcMain.on('native-share-start', (e, opts) => {
-  if (e.sender !== win?.webContents || !_nativeTarget) return
+// Spawns the helper and wires its records to a MessagePort that native-share-start hands the page.
+// `ready` settles on its first answer on Linux, where it opens the portal at once: 'selected',
+// 'cancelled', or 'error' (also when it exits or is stopped first).
+function spawnHelper () {
   stopNativeShare()
-  // Its own GStreamer only: no GST_* from an installed GStreamer, and a registry of its own
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GST(REAMER)?_/i.test(k)))
-  env.GST_REGISTRY_1_0 = path.join(app.getPath('userData'), 'gstreamer-registry.bin')
+  // Windows: its own GStreamer only -- no GST_* from an installed GStreamer, and a registry of its
+  // own. Linux uses the system's GStreamer, environment included.
+  let env = process.env
+  if (process.platform === 'win32') {
+    env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GST(REAMER)?_/i.test(k)))
+    env.GST_REGISTRY_1_0 = path.join(app.getPath('userData'), 'gstreamer-registry.bin')
+  }
   const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env })
   const { port1: port, port2 } = new MessageChannelMain()
-  const share = _nativeShare = { proc, port }
+  let settle
+  const ready = new Promise(resolve => { settle = resolve })
+  const share = _nativeShare = { proc, port, port2, ready, settle, started: false }
   // Records: u8 kind, u8 flags, u16 reserved, u32 LE length, u64 LE pts, payload
   let buf = Buffer.alloc(0)
   proc.stdout.on('data', chunk => {
@@ -279,6 +314,7 @@ ipcMain.on('native-share-start', (e, opts) => {
         try {
           const ev = JSON.parse(payload.toString())
           if (ev.type !== 'stats') log('[native-share]', JSON.stringify(ev))
+          if (['selected', 'cancelled', 'error'].includes(ev.type)) settle(ev.type)
           port.postMessage({ ...ev, type: 'event', event: ev.type })
         } catch {}
       }
@@ -288,6 +324,7 @@ ipcMain.on('native-share-start', (e, opts) => {
   // page, or the share stays on its placeholder and viewers see black
   const gone = why => {
     log('[native-share] helper', why)
+    settle('error')
     if (_nativeShare !== share) return   // stopped by the page
     port.postMessage({ type: 'event', event: 'error', message: 'helper ' + why })
     stopNativeShare()
@@ -299,11 +336,45 @@ ipcMain.on('native-share-start', (e, opts) => {
   port.on('message', ({ data }) => { try { proc.stdin.write(JSON.stringify(data) + '\n') } catch {} })
   port.on('close', () => { if (_nativeShare === share) stopNativeShare() })
   port.start()
-  proc.stdin.write(JSON.stringify({ cmd: 'start', ...opts, ..._nativeTarget }) + '\n')
+  return share
+}
+
+// Page → Linux: a share picked by the helper instead of Chromium. 'chromium' when it doesn't
+// apply here (the page calls Chromium's getDisplayMedia), 'cancelled' when the user cancelled a
+// dialog, 'ok' when the helper holds the screen and the audio step is done.
+ipcMain.handle('native-share-pick', async e => {
+  if (e.sender !== win?.webContents || process.platform !== 'linux' || !nativeShareOn()) return 'chromium'
+  venmicUnlink(); _nativeTarget = null
+  if (_pickerWin && !_pickerWin.isDestroyed()) _pickerWin.close()
+  const answer = await spawnHelper().ready
+  log('[native-share] pick', answer)
+  if (answer === 'cancelled') return 'cancelled'
+  if (answer !== 'selected') return 'chromium'   // the helper failed before a pick: Chromium's own
+  // The audio step only: the helper already has the screen
+  const streams = await new Promise(resolve => openPicker([{ id: 'native', name: 'Screen' }], resolve))
+  if (!streams) { stopNativeShare(); return 'cancelled' }
+  _nativeTarget = {}
+  return 'ok'
+})
+ipcMain.handle('native-share-target', e => e.sender === win?.webContents ? _nativeTarget : null)
+ipcMain.on('native-share-start', (e, opts) => {
+  if (e.sender !== win?.webContents || !_nativeTarget) return
+  // Linux: the helper from the pick, already holding the screen; Windows: spawned now
+  const share = process.platform !== 'linux' ? spawnHelper() : _nativeShare?.started === false ? _nativeShare : null
+  if (!share) {   // it exited after the pick: the error makes the page end the share
+    const { port1, port2 } = new MessageChannelMain()
+    port1.postMessage({ type: 'event', event: 'error', message: 'helper exited before start' })
+    return e.sender.postMessage('native-share-port', { id: opts.id }, [port2])
+  }
+  share.started = true
+  share.proc.stdin.write(JSON.stringify({ cmd: 'start', ...opts, ..._nativeTarget }) + '\n')
   // The id lets the page hand the port to the share that asked for it
-  e.sender.postMessage('native-share-port', { id: opts.id }, [port2])
+  e.sender.postMessage('native-share-port', { id: opts.id }, [share.port2])
   log('[native-share] helper started', JSON.stringify({ ...opts, ..._nativeTarget }))
 })
+// Page → a share ended before native-share-start (Linux: the helper from the pick still holds
+// the portal session, and the desktop's "sharing" indicator)
+ipcMain.on('native-share-stop', e => { if (e.sender === win?.webContents) stopNativeShare() })
 
 // ── Main window ───────────────────────────────────────────────────────────
 const APP_ICON = path.join(__dirname,'..','build', process.platform==='win32'?'icon.ico':'icon.png')
@@ -339,6 +410,8 @@ function createWindow () {
 
   loadServer()
 
+  // The page's native share log next to the helper's, so one log shows both ends of a share
+  win.webContents.on('console-message', e => { if (e.message?.startsWith('[native-share]')) log('[page]', e.message) })
   // Load failed anyway (e.g. server went down between check and load)
   win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     if (!isMainFrame || code === -3) return   // -3: aborted by a newer navigation
@@ -506,10 +579,10 @@ function setOpenAtLogin (on) {
   ].join('\n'))
 }
 
-// nativeShare is left out where there is no helper, which hides its switch and tray item
+// nativeShare is left out where the helper can't run, which hides its switch and tray item
 const desktopSettings = () => ({
   openAtLogin:openAtLogin(), minimizeToTray:!!loadUserSettings().minimizeToTray,
-  ...(nativeShareExe() ? { nativeShare:nativeShareOn() } : {}),
+  ...(nativeShareSupported() ? { nativeShare:nativeShareOn() } : {}),
 })
 function setDesktopSettings (s) {
   try {
@@ -569,6 +642,7 @@ app.whenReady().then(() => {
   session.defaultSession.setDisplayMediaRequestHandler(handleDisplayMediaRequest)
   Menu.setApplicationMenu(null)   // no menu bar; shortcuts live in before-input-event
   createTray()
+  probeNativeShare()
   openApp()
 })
 

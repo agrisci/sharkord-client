@@ -24,8 +24,8 @@ client is ~1300 lines on purpose.
 | `electron/unreachable.html`  | Shown when the server can't be reached or isn't a Sharkord server                             |
 | `electron/theme.css`         | Sharkord's design tokens + card/input/button styles for the two pages above                  |
 | `build/`                     | Icons packaged by electron-builder (committed so CI can build); `build/native/` is staged, not committed |
-| `native/`                    | Native screen share helper (Rust + GStreamer, Windows): captures a monitor, encodes it with AMF, frames on stdout (see *Native screen share*) |
-| `scripts/stage-native.js`    | Builds the helper and stages it with its GStreamer runtime subset into `build/native/` (shipped as `resources/native/`) |
+| `native/`                    | Native screen share helper (Rust + GStreamer): captures a monitor (Windows, DXGI) or a portal pick (Linux Wayland, PipeWire), encodes it on the GPU (AMF / VA-API), frames on stdout (see *Native screen share*) |
+| `scripts/stage-native.js`    | Builds the helper and stages it into `build/native/` (shipped as `resources/native/`): on Windows with its GStreamer runtime subset, on Linux alone (it uses the system's GStreamer) |
 | `.github/workflows/build.yml` | CI: builds on Linux + Windows runners for PRs into `dev`/`main` and pushes to `dev` (artifacts); run manually on `main` with a version bump to release |
 | `upstream/`                  | Gitignored local clones of `sharkord` and `Vesktop`, for reference only — never edit or import |
 
@@ -38,14 +38,15 @@ belongs to rather than adding files.
   `serverUrl` (saved without a trailing slash — use `savedServerUrl()`), `theme`
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `nativeShare` (default
-  off; Windows, only offered when the helper exists). *Open at login* is not
+  off; offered on Windows when the helper exists, on Linux Wayland when its `--check` probe at
+  startup finds the elements and a VA-API encoder). *Open at login* is not
   stored: the OS login item / `~/.config/autostart/sharkord.desktop` is the source of truth.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
   - Page → main: `virtmic-active`, `virtmic-unmute`, `virtmic-stop`, `change-server` (`send`),
     `desktop-settings-get`, `desktop-settings-set`, `notification-shown` / `notification-clicked`
-    (`send`), `native-share-target`, `native-share-start` (`send`) — only accepted from the main
-    window's webContents.
+    (`send`), `native-share-pick` (Linux), `native-share-target`, `native-share-start` /
+    `native-share-stop` (`send`) — only accepted from the main window's webContents.
   - Main → page: `native-share-port` (a `MessagePort` tagged with the share's `id`, forwarded
     into the page world with `window.postMessage`): helper frames and events one way,
     `keyframe`/`bitrate`/`stop` the other.
@@ -86,14 +87,32 @@ belongs to rather than adding files.
    virtual mic from `enumerateDevices`, and calls `virtmic-stop` when the share ends. Sharkord
    ends shares with `track.stop()`, which fires no `ended` event, so both are hooked.
 
-### Native screen share (Windows, experimental)
+### Native screen share (Windows, Linux Wayland; experimental)
 
-With the `nativeShare` setting on (or `SHARKORD_NATIVE_SHARE=1`), a whole-screen share's video is
-captured and encoded outside Chromium by the helper in `native/` (`d3d11screencapturesrc` →
-`d3d11convert` → AMF H.264/AV1), while Sharkord and Chromium keep everything else. Chromium's
-capture still runs for the local preview and share audio.
+With the `nativeShare` setting on (or `SHARKORD_NATIVE_SHARE=1`), a share's video is captured and
+encoded outside Chromium by the helper in `native/`, while Sharkord and Chromium keep everything
+else (connection, packetization, bandwidth estimate).
 
-1. `picker-go-live` records the picked monitor (`_nativeTarget`); windows stay on Chromium.
+- **Windows** (whole screens, AMD): `d3d11screencapturesrc` → `d3d11convert` → AMF H.264/AV1.
+  Chromium's capture still runs for the local preview and share audio.
+- **Linux** (Wayland, VA-API): the helper owns the pick, so the portal asks once. The page's
+  `getDisplayMedia` hook calls `native-share-pick` instead of Chromium's; main spawns the helper,
+  which opens its own ScreenCast portal session at once (`native/src/portal.rs`, `ashpd`; monitors
+  and windows, nothing persisted) and answers `selected` or `cancelled`, then main shows the
+  picker's audio step. The page builds Sharkord's stream itself: the video is a
+  `MediaStreamTrackGenerator` fed with the helper's frames decoded by `VideoDecoder` (the local
+  preview), the audio venmic's virtual mic (`withShareAudio`). The graph: `pipewiresrc` (no
+  clock, buffers re-stamped on arrival, `keepalive-time` at the frame period) → `vapostproc`
+  copy into VA memory at once (the compositor lends only a few buffers) → the same
+  videorate/queue → `vapostproc` → `vah264enc`/`vaav1enc` (VBR at 100% of the target: CBR pads a
+  still screen; AV1 without reordering). These were measured on KWin (Renoir
+  and RX 9060 XT), and took a Renoir iGPU from ~41 to 60 fps. With no Chromium capture there is
+  nothing to fall back to, so every fallback below **ends** the share; later shares use Chromium's
+  path. Tried and dropped: reading Chromium's own PipeWire stream (one portal pick too) -- Chromium
+  fixes a tiled DMA-BUF modifier VA can't import, and the GL read-back pinned a CPU core.
+
+1. Windows: `picker-go-live` records the picked monitor (`_nativeTarget`); windows stay on
+   Chromium. Linux: `native-share-pick` sets it once the helper has a pick.
 2. The page hook (`installNativeShare`) returns Sharkord the real stream but substitutes a
    placeholder track (`MediaStreamTrackGenerator`, 320x180 black) wherever it is handed to a
    connection (`addTransceiver`/`addTrack`/`replaceTrack`), and attaches an encoded transform.
@@ -128,7 +147,8 @@ capture still runs for the local preview and share audio.
    to 0.85x. Capped by Sharkord's bitrate
    setting and ~25 Mbps at 4K60; the resolution stays what the user picked.
    `getStats` is rewritten so Sharkord's stats show the helper's encoder and size. Main kills the
-   helper on every exit path (`stopNativeShare`).
+   helper on every exit path (`stopNativeShare`; the page sends `native-share-stop` for a share
+   that ends before `native-share-start`, as the Linux helper already holds the portal session).
 
 ## Rules
 
@@ -167,14 +187,18 @@ npm start               # run the app (DevTools: Ctrl+Shift+I)
 npm run dist:linux      # AppImage + deb + rpm → release/
 npm run dist:win        # NSIS installer       → release/ (stages the native helper first)
 npm run dist:all
-npm run stage:native    # build + stage native/ only (Windows)
+npm run stage:native    # build + stage native/ only
 ```
 
-The native helper needs Rust (`native/rust-toolchain.toml`) and GStreamer 1.28 MSVC with its
-development files (`/TYPE=devel`), plus `pkg-config`. Without them `dist:win` still builds an
-installer, only without the native share; CI sets `SHARKORD_REQUIRE_NATIVE=1` to fail instead.
-For `npm start` just `cd native && cargo build --release` (with `PKG_CONFIG_PATH` pointing at
-GStreamer's `lib\pkgconfig`).
+The native helper needs Rust (`native/rust-toolchain.toml`) and, on Windows, GStreamer 1.28 MSVC
+with its development files (`/TYPE=devel`), plus `pkg-config`; on Linux the distro's GStreamer
+development packages (Fedora `gstreamer1-devel gstreamer1-plugins-base-devel`, Debian/Ubuntu
+`libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`). At runtime Linux needs GStreamer 1.22+
+with the `va` plugin (plugins-bad) and `pipewiresrc`, and a VA driver that encodes: Fedora's own
+Mesa has H.264 encoding compiled out (RPM Fusion's `mesa-va-drivers-freeworld` has it). Without
+the build tools `dist:*` still builds, only without the native share; CI sets
+`SHARKORD_REQUIRE_NATIVE=1` to fail instead. For `npm start` just `cd native && cargo build
+--release` (on Windows with `PKG_CONFIG_PATH` pointing at GStreamer's `lib\pkgconfig`).
 
 Versioning is SemVer, independent of Sharkord's server version, and stays `0.x` while Sharkord
 is alpha (minor = features, patch = fixes). Don't bump `version` by hand in feature branches.
@@ -229,6 +253,12 @@ There are no automated tests. After a change, check what it touches:
   within a second, and Sharkord's stats show `sharkord-share (amf…)`. The console's
   `[native-share] sent …` lines should keep `lost`/`resync` near zero. A window share, VP8, or
   the setting off must behave exactly as before.
+- **Native screen share (Linux Wayland, VA-API)**: the switch appears only when the startup probe
+  passes (`[native-share] probe` in the log). Share with H.264, simulcast off: **one** portal
+  dialog then the audio step, the local preview moves, a viewer gets 60 fps, stats show
+  `sharkord-share (vah264enc)`. Cancelling the portal dialog or the audio step cancels the share
+  and the desktop's sharing indicator goes away; stopping the share ends the helper. VP8 or
+  simulcast ends the share and the next one uses Chromium's path.
 
 ## Commits and privacy
 

@@ -10,8 +10,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   notificationClicked: () => ipcRenderer.send('notification-clicked'),
   // Native screen share (SHARKORD_NATIVE_SHARE=1): the picked monitor, or null when the
   // share should stay Chromium's own; start hands the page a MessagePort (below)
+  // Linux: pick asks the helper to pick the screen (instead of Chromium): 'ok', 'cancelled', or
+  // 'chromium' to use Chromium's getDisplayMedia; stop is for a share that ends before start
   nativeShareTarget: () => ipcRenderer.invoke('native-share-target'),
   nativeShareStart:  opts => ipcRenderer.send('native-share-start', opts),
+  nativeSharePick:   () => ipcRenderer.invoke('native-share-pick'),
+  nativeShareStop:   () => ipcRenderer.send('native-share-stop'),
 })
 
 // The helper's frame port can't cross contextBridge; the page world takes it from a
@@ -41,8 +45,8 @@ function installShareAudioHooks (VIRTMIC) {
     return null
   }
 
-  md.getDisplayMedia = async (constraints) => {
-    const stream = await gdm(constraints)
+  // Also used on the stream the native share builds itself (Linux), which never calls Chromium's
+  const withShareAudio = async (stream) => {
     const api    = window.electronAPI
 
     if (await api.virtmicActive()) {
@@ -71,6 +75,8 @@ function installShareAudioHooks (VIRTMIC) {
     })
     return stream
   }
+  md.getDisplayMedia = async (constraints) => withShareAudio(await gdm(constraints))
+  md.getDisplayMedia.withShareAudio = withShareAudio
 }
 
 contextBridge.executeInMainWorld({ func: installShareAudioHooks, args: ['vencord-screen-share'] })
@@ -136,12 +142,13 @@ self.onrtctransform = e => {
   setInterval(() => self.postMessage({ type: 'stats', stats }), 1000)
 }`
 
-function installNativeShare (workerSource) {
+function installNativeShare (workerSource, helperPicks) {
   const md = navigator.mediaDevices
+  const withShareAudio = md.getDisplayMedia.withShareAudio
   const gdm = md.getDisplayMedia.bind(md)
   const api = window.electronAPI
   const log = (...a) => console.log('[native-share]', ...a)
-  const shares = new Map()   // real capture track → share state
+  const shares = new Map()   // Sharkord's track (the capture, or on Linux the preview) → share state
   const CODECS = { 'video/H264': 'h264', 'video/AV1': 'av1' }
   const now = () => Math.round(performance.now() * 1000)   // one clock for every placeholder
   const num = v => typeof v === 'number' ? v : (v?.ideal ?? v?.exact ?? v?.max)
@@ -165,10 +172,27 @@ function installNativeShare (workerSource) {
   })
 
   md.getDisplayMedia = async (constraints) => {
+    // Linux: the helper picks and captures the screen, Chromium doesn't (one portal dialog, not
+    // two). Sharkord gets a stream the page builds: the preview is the helper's frames, decoded.
+    if (helperPicks && !nativeOff && constraints?.video) {
+      const pick = await api.nativeSharePick().catch(() => 'chromium')
+      if (pick === 'cancelled') throw new DOMException('Permission denied by user', 'NotAllowedError')
+      if (pick === 'ok') {
+        const preview = new MediaStreamTrackGenerator({ kind: 'video' })
+        startShare(preview, constraints, true)
+        return withShareAudio(new MediaStream([preview]))
+      }
+    }
     const real = await gdm(constraints)
     const video = real.getVideoTracks()[0]
     const target = video && await api.nativeShareTarget().catch(() => null)
     if (!target || nativeOff) return real   // a window, no helper, or it failed earlier: Chromium's own share
+    startShare(video, constraints, false)
+    return real
+  }
+
+  // `owned`: the helper's capture is the only one (Linux), `video` its decoded preview
+  const startShare = (video, constraints, owned) => {
     const set = video.getSettings(), c = constraints?.video || {}
     const want = {
       width: num(c.width) || set.width || 1920, height: num(c.height) || set.height || 1080,
@@ -191,7 +215,7 @@ function installNativeShare (workerSource) {
       return blanks.get(k)
     }
     const worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })))
-    const s = { id: nextId++, want, gen, worker, port: null, sender: null, stopped: false, fell: false, anchored: false, tag: 0, stats: {}, helper: {}, size: 0, kbps: 2000, kbpsAt: 0, pending: [], lastPush: 0, pacer: null }
+    const s = { id: nextId++, owned, want, gen, worker, port: null, sender: null, stopped: false, fell: false, anchored: false, tag: 0, stats: {}, helper: {}, size: 0, kbps: 2000, kbpsAt: 0, pending: [], lastPush: 0, pacer: null }
     shares.set(video, s)
 
     const pushPlaceholder = (key, data) => {
@@ -232,11 +256,13 @@ function installNativeShare (workerSource) {
     const closeHelper = () => {
       clearInterval(s.boot)
       portWaiters.delete(s.id)
+      if (!s.port) api.nativeShareStop()   // Linux: the helper from the pick is waiting for start
       try { s.port?.postMessage({ cmd: 'stop' }); s.port?.close() } catch {}
       s.port = null
     }
     // Before any native frame went out (an unsupported codec, a helper that never started) the
-    // connection just gets Chromium's own capture. Mid-share, the share ends instead, as if the
+    // connection just gets Chromium's own capture -- if there is one: a share the helper picked
+    // (Linux) has nothing else, and ends. Mid-share, the share ends instead, as if the
     // capture had stopped: Sharkord cleans up on the track's `ended`, viewers see the share end, and
     // shares for the rest of the session use Chromium's own path. Continuing in place didn't work:
     // swapping the capture track in restarted the RTP timestamps from its older clock (viewers
@@ -246,14 +272,33 @@ function installNativeShare (workerSource) {
       if (s.fell || s.stopped) return
       s.fell = true
       closeHelper()
-      if (!s.sender || !s.stats.swapped) {
+      if (!s.owned && (!s.sender || !s.stats.swapped)) {
         log('using Chromium capture:', why)
         if (s.sender) { s.sender.transform = null; replaceTrack.call(s.sender, video).catch(e => log('fallback:', e.message)) }
         return
       }
       log('ending the share:', why)
       nativeOff = true
-      video.dispatchEvent(new Event('ended'))
+      // After the current call returns: a fallback inside addTransceiver comes before Sharkord
+      // listens for the end of the track it is adding
+      setTimeout(() => video.dispatchEvent(new Event('ended')))
+    }
+
+    // The preview of a share the helper picked: its frames, decoded by Chromium (on the GPU where
+    // it can). Decoding starts at the first keyframe.
+    const previewWriter = owned && video.writable.getWriter()
+    const decoder = owned && new VideoDecoder({
+      output: f => previewWriter.write(f).catch(() => f.close()),
+      error: e => log('preview:', e.message),
+    })
+    const preview = (codec, msg) => {
+      if (!decoder || decoder.state === 'closed') return
+      if (decoder.state === 'unconfigured') {
+        if (!msg.key) return
+        decoder.configure({ codec: codec === 'h264' ? 'avc1.42e034' : 'av01.0.13M.08', optimizeForLatency: true })
+      }
+      try { decoder.decode(new EncodedVideoChunk({ type: msg.key ? 'key' : 'delta', timestamp: msg.pts, data: msg.data })) }
+      catch (e) { log('preview:', e.message) }
     }
 
     worker.onmessage = e => {
@@ -271,6 +316,7 @@ function installNativeShare (workerSource) {
             if (msg.type === 'frame') {
               clearInterval(s.boot)
               s.lastFrameAt = performance.now()
+              preview(codec, msg)   // before its buffer moves to the worker
               const d = msg.data
               s.pending.push({ key: msg.key, data: d.byteOffset === 0 && d.byteLength === d.buffer.byteLength ? d.buffer : d.slice().buffer })
               pace()
@@ -293,13 +339,13 @@ function installNativeShare (workerSource) {
       if (s.stopped) return
       s.stopped = true; clearInterval(s.timer); clearTimeout(s.pacer); clearTimeout(s.keyTimer); closeHelper()
       worker.terminate(); gen.stop(); shares.delete(video); bySender.delete(s.sender)
+      try { if (decoder && decoder.state !== 'closed') decoder.close() } catch {}
       log('stopped', JSON.stringify(s.stats))
     }
     // Sharkord ends a share with track.stop(), which fires no 'ended'
     const stop = video.stop.bind(video)
     video.stop = () => { s.stop(); stop() }
     video.addEventListener('ended', () => s.stop())
-    return real
   }
 
   // Put the placeholder on the sender, attach the transform, and lift the resolution-based
@@ -410,9 +456,9 @@ function installNativeShare (workerSource) {
   }
 }
 
-// Installed on Windows always; each share asks the main process whether to go native
-if (process.platform === 'win32')
-  contextBridge.executeInMainWorld({ func: installNativeShare, args: [NATIVE_SHARE_WORKER] })
+// Installed on Windows and Linux always; each share asks the main process whether to go native
+if (process.platform === 'win32' || process.platform === 'linux')
+  contextBridge.executeInMainWorld({ func: installNativeShare, args: [NATIVE_SHARE_WORKER, process.platform === 'linux'] })
 
 // Sharkord shows plain `new Notification(...)` without an onclick, so hook the
 // constructor: flash the taskbar when one is shown, bring the window back on click.
@@ -512,7 +558,9 @@ const DESKTOP_OPTIONS = [
   { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
   { key: 'nativeShare',    label: 'Native screen share (experimental)',
-    description: 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. AMD GPUs; takes effect on the next share.' },
+    description: process.platform === 'linux'
+      ? 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. VA-API (AMD, Intel; on Fedora, RPM Fusion\'s mesa-va-drivers-freeworld), Wayland. Shares with H.264 or AV1 and simulcast off; takes effect on the next share.'
+      : 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. AMD GPUs; takes effect on the next share.' },
 ]
 
 function el (tag, className, text) {

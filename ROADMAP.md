@@ -8,7 +8,7 @@ about never leaving a share broken and being able to debug machines we have neve
 P3 = ideas
 **Status:** ✅ Done · 🚧 In progress · 🧪 Needs testing · 📋 Planned · 💡 Idea · ⛔ Won't do
 **#** is a stable ID for referring to an item in commits and issues, not its rank; new items take
-the next free number (currently 96).
+the next free number (currently 97).
 
 ## Bugs
 
@@ -17,7 +17,7 @@ Found while reviewing the code; each is small and should be fixed before new fea
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 76 | P2 | Frame buffering copies large frames repeatedly | 📋 | `Buffer.concat` on every stdout chunk plus a copy per frame (`main.js:265,270`); a 4K keyframe is re-copied many times. Keep a chunk list. |
-| 77 | P2 | `--check` doesn't prove encoding works | 📋 | It only checks element registration for `amfh264enc`/`amfav1enc` (`main.rs:405-413`), not the `device{N}` variants, and never instantiates one. See #9. |
+| 77 | P2 | `--check` doesn't prove encoding works | ✅ | It now builds each codec's encoder (every per-device factory) and takes it to READY, reported as `h264`/`av1`. The Linux app uses it to offer the option; see #9 for Windows. |
 | 86 | P3 | Baseline without the constraint flag | 📋 | With the profile pinned, AMF emits profile_idc 66 (Baseline) but not constraint_set1, and level 5.1: `420433` where the SDP says `42e01f`. Decoders accept it (no Baseline-only tools are used); patch the SPS flag byte or leave it. The helper logs it as a `stream` event. |
 
 ## Upstream (Sharkord, mediasoup)
@@ -117,7 +117,8 @@ Electron can rename or drop them without any error.
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 16 | P1 | Measure sharing from Linux | 🧪 | Only tested as a viewer. Share with logging at 1080p/1440p/4K, H.264 and AV1 (Wayland portal, VA-API, venmic) before building anything. |
-| 17 | P2 | Native share on Linux | 💡 | Only if Chromium's path falls short: PipeWire capture + VA-API (`vah264enc`, `vaav1enc`). Main problem: a second portal prompt, since Chromium already opens one for the preview. |
+| 17 | P2 | Native share on Linux | 🧪 | Wayland + VA-API (`vah264enc`, `vaav1enc`), system GStreamer. The helper owns the only portal dialog; the page decodes its frames for the preview. 60 fps 1080p H.264 on a Renoir iGPU. To test: AV1 (RDNA3+), Intel iHD, GNOME/mutter, 4K, the installed AppImage/deb/rpm. |
+| 96 | P2 | Linux native share: VP8/simulcast end the share | 📋 | With no Chromium capture there is nothing to fall back to. The decoded preview track could go on the connection instead (Chromium encodes it), at the cost of a decode and a second encode. |
 | 18 | P2 | NVIDIA and X11 on Linux | 💡 | No VA-API encode on NVIDIA (NVENC instead); X11 sessions use the source grid. |
 | 19 | P3 | macOS | 💡 | Not built (`package.json` has no mac target). ScreenCaptureKit + VideoToolbox if there is demand. |
 

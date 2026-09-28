@@ -1,15 +1,19 @@
-// Stages the native screen share helper (native/) with the GStreamer runtime it needs into
-// build/native/, which electron-builder ships as resources/native/ (Windows only).
+// Stages the native screen share helper (native/) into build/native/, which electron-builder
+// ships as resources/native/.
 //
+// Linux: just the helper, in bin/. It links the system's GStreamer (its va and pipewire plugins
+// come from the distro), which the app probes at startup with `--check`.
+//
+// Windows: the helper with the GStreamer runtime it needs.
 // GStreamer's own layout -- bin/ (the helper and every DLL it pulls in), lib/gstreamer-1.0/ (six
 // plugins), libexec/gstreamer-1.0/ (the plugin scanner) -- because GStreamer finds its plugins
 // relative to the directory libgstreamer-1.0-0.dll loads from: no configuration needed. The DLL
 // set is the import closure of the helper, the plugins and the scanner, walked from their PE
 // import tables.
 //
-// Needs Rust and GStreamer MSVC (devel). Without them it warns and stages nothing, so
-// `npm run dist:win` still builds an installer, just without the native share;
-// SHARKORD_REQUIRE_NATIVE=1 (CI) makes that an error instead.
+// Needs Rust and GStreamer's development files (MSVC on Windows, the distro's -dev/-devel packages
+// on Linux). Without them it warns and stages nothing, so `npm run dist:*` still builds, just
+// without the native share; SHARKORD_REQUIRE_NATIVE=1 (CI) makes that an error instead.
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
@@ -17,7 +21,7 @@ const { spawnSync } = require('child_process')
 
 const ROOT = path.join(__dirname, '..')
 const OUT = path.join(ROOT, 'build', 'native')
-const EXE = path.join(ROOT, 'native', 'target', 'release', 'sharkord-share.exe')
+const EXE = path.join(ROOT, 'native', 'target', 'release', process.platform === 'win32' ? 'sharkord-share.exe' : 'sharkord-share')
 const GST = process.env.GSTREAMER_1_0_ROOT_MSVC_X86_64 || 'C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64'
 const SYSTEM32 = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32')
 const REQUIRE = process.env.SHARKORD_REQUIRE_NATIVE === '1'
@@ -74,7 +78,20 @@ function peImports (file) {
 
 function copy (from, to) { fs.mkdirSync(path.dirname(to), { recursive: true }); fs.copyFileSync(from, to) }
 
-if (process.platform !== 'win32') skip('the native share is Windows-only')
+if (process.platform === 'linux') {
+  const cargo = spawnSync('cargo', ['build', '--release'], { cwd: path.join(ROOT, 'native'), stdio: 'inherit' })
+  if (cargo.error || cargo.status !== 0) skip('cargo build failed (are Rust and the GStreamer development packages installed?)')
+  fs.rmSync(OUT, { recursive: true, force: true })
+  const exe = path.join(OUT, 'bin', 'sharkord-share')
+  copy(EXE, exe)
+  // Proves it loads against the system's GStreamer; which codecs this machine encodes is the
+  // app's business at runtime (CI has no GPU)
+  const check = spawnSync(exe, ['--check'], { encoding: 'utf8' })
+  if (check.status !== 0) throw new Error(`self-check failed: ${check.stdout}${check.stderr}`)
+  log(`staged ${exe}; self-check ${check.stdout.trim()}`)
+  process.exit(0)
+}
+if (process.platform !== 'win32') skip('the native share is Windows and Linux only')
 if (!fs.existsSync(path.join(GST, 'bin', 'gstreamer-1.0-0.dll'))) skip(`no GStreamer MSVC at ${GST}`)
 
 // Build the helper
