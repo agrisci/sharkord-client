@@ -14,11 +14,11 @@
 //!   keyframe's SPS profile and level, `stats` every 2 s, `warning`, and `error` before the
 //!   process gives up -- every failure after `start` sends one).
 //!
-//! The graph and its settings follow the native client (`../sharkord-native-client`), where each
-//! was measured on an RX 9060 XT: DXGI capture straight into `d3d11convert` and AMF with no
-//! copies, `videorate` holding the declared rate the encoder budgets against, a one-frame
-//! leaky queue so a busy encoder never holds the source back, a keyframe a minute (more on
-//! request), no B-frames, and AMF AV1's keyframe poke (it ignores force-key-unit).
+//! Each part of the graph and its settings was measured on an RX 9060 XT: DXGI capture
+//! straight into `d3d11convert` and AMF with no copies, `videorate` holding the declared rate
+//! the encoder budgets against, a one-frame leaky queue so a busy encoder never holds the
+//! source back, a keyframe a minute (more on request), no B-frames, and AMF AV1's keyframe
+//! poke (it ignores force-key-unit).
 
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -140,8 +140,7 @@ fn choose(monitors: Vec<Monitor>, start: &Start) -> Option<Monitor> {
 }
 
 /// The largest even size inside `max` with the source's aspect ratio, never larger than
-/// the source -- what a browser does with getDisplayMedia's width/height (copied from the
-/// native client's `capture_front_end::fit`).
+/// the source -- what a browser does with getDisplayMedia's width/height.
 fn fit(source: (u32, u32), max: (u32, u32)) -> (u32, u32) {
     let ((sw, sh), (mw, mh)) = (
         (u64::from(source.0.max(1)), u64::from(source.1.max(1))),
@@ -284,7 +283,7 @@ fn build(start: &Start, out: &Out) -> Result<Share> {
     parser.link(&appsink).context("appsink link failed")?;
 
     // AMF AV1 ignores force-key-unit: shorten gop-size to 1 and restore it on the next
-    // buffer out of the encoder (native client BUG-32; costs one extra keyframe)
+    // buffer out of the encoder (costs one extra keyframe)
     let poking = Arc::new(AtomicBool::new(false));
     if start.codec == Codec::Av1
         && let Some(pad) = encoder.static_pad("src")
