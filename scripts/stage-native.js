@@ -5,7 +5,7 @@
 // plugins), libexec/gstreamer-1.0/ (the plugin scanner) -- because GStreamer finds its plugins
 // relative to the directory libgstreamer-1.0-0.dll loads from: no configuration needed. The DLL
 // set is the import closure of the helper, the plugins and the scanner, walked from their PE
-// import tables. Same approach as the native client's scripts/package_windows.py.
+// import tables.
 //
 // Needs Rust and GStreamer MSVC (devel). Without them it warns and stages nothing, so
 // `npm run dist:win` still builds an installer, just without the native share;

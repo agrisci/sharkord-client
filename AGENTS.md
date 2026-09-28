@@ -90,8 +90,7 @@ belongs to rather than adding files.
 
 With the `nativeShare` setting on (or `SHARKORD_NATIVE_SHARE=1`), a whole-screen share's video is
 captured and encoded outside Chromium by the helper in `native/` (`d3d11screencapturesrc` →
-`d3d11convert` → AMF H.264/AV1, graph and tuning copied from the native client), while Sharkord and
-Chromium keep everything else. Chromium's capture still runs for the local preview and share audio.
+`d3d11convert` → AMF H.264/AV1), while Sharkord and Chromium keep everything else. Chromium's capture still runs for the local preview and share audio.
 
 1. `picker-go-live` records the picked monitor (`_nativeTarget`); windows stay on Chromium.
 2. The page hook (`installNativeShare`) returns Sharkord the real stream but substitutes a
