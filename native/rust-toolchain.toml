@@ -1,0 +1,7 @@
+# The single owner of which Rust this builds with. `rust-version` in
+# Cargo.toml used to repeat it: a second copy of the same fact, stating a
+# minimum nobody had measured (it was the pin, copied) for consumers that do
+# not exist -- every crate here is `publish = false`.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

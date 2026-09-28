@@ -1,0 +1,158 @@
+name: Build
+
+# PRs and pushes build the installers and upload them as artifacts.
+# Releasing: Actions → Build → Run workflow on main, pick the version bump. The builds use the
+# bumped version, and only when both pass is the bump committed, tagged and the Release published.
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump (none releases the current package.json version)
+        type: choice
+        options: [patch, minor, major, none]
+        default: patch
+
+env:
+  BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.bump || 'none' }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            dist: linux
+          - os: windows-latest
+            dist: win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Only release from main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        shell: bash
+        run: |
+          echo "::error::Releases run from main (merge dev into main first)"
+          exit 1
+
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+
+      # Same bump the release job commits, so the installers carry the new version
+      - name: Bump version
+        if: env.BUMP != 'none'
+        run: npm version ${{ env.BUMP }} --no-git-tag-version
+
+      - name: Install rpm tools
+        if: matrix.dist == 'linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      # The native screen share helper (native/) builds against GStreamer MSVC and ships a subset
+      # of its runtime (scripts/stage-native.js). Rust comes from native/rust-toolchain.toml.
+      - name: Install GStreamer and pkg-config
+        if: matrix.dist == 'win'
+        shell: pwsh
+        run: |
+          $v = '1.28.7'
+          $exe = "$env:RUNNER_TEMP\gstreamer.exe"
+          Invoke-WebRequest "https://gstreamer.freedesktop.org/data/pkg/windows/$v/msvc/gstreamer-1.0-msvc-x86_64-$v.exe" -OutFile $exe
+          Start-Process $exe -ArgumentList '/TYPE=devel', '/VERYSILENT', '/NORESTART', '/ALLUSERS' -Wait
+          choco install pkgconfiglite -y --no-progress
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$env:ProgramFiles\gstreamer\1.0\msvc_x86_64" >> $env:GITHUB_ENV
+          "SHARKORD_REQUIRE_NATIVE=1" >> $env:GITHUB_ENV
+
+      - run: npm ci
+      - run: npm run dist:${{ matrix.dist }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sharkord-${{ matrix.dist }}
+          if-no-files-found: error
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.exe
+
+  release:
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Commit version and tag
+        id: tag
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          [ "$BUMP" = none ] || npm version "$BUMP" --no-git-tag-version
+          tag=v$(node -p "require('./package.json').version")
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then echo "::error::$tag already exists"; exit 1; fi
+          git diff --quiet || git commit -qam "Release $tag"
+          git tag "$tag"
+          git push --atomic origin HEAD:main "$tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Write release notes
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          prev=$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)
+          url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$TAG
+          file() { basename "$(ls dist/*"$1" | head -n1)"; }
+          exe=$(file .exe) appimage=$(file .AppImage) deb=$(file .deb) rpm=$(file .rpm)
+          {
+            echo '## Downloads'
+            echo
+            echo '| Platform | File | Install |'
+            echo '| --- | --- | --- |'
+            echo "| Windows 10/11 | [$exe]($url/$exe) | Run the installer. It isn't code-signed, so SmartScreen may warn: **More info → Run anyway** |"
+            echo "| Linux (any distro) | [$appimage]($url/$appimage) | \`chmod +x $appimage\` and run it |"
+            echo "| Debian / Ubuntu | [$deb]($url/$deb) | \`sudo apt install ./$deb\` |"
+            echo "| Fedora / openSUSE | [$rpm]($url/$rpm) | \`sudo dnf install ./$rpm\` |"
+            echo
+            echo '## Changes'
+            echo
+            if [ -n "$prev" ]; then
+              git log --no-merges --invert-grep --grep='^Release v' --pretty='- %s' "$prev..$TAG"
+              echo
+              echo "**Full diff**: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/compare/$prev...$TAG"
+            else
+              git log --no-merges --invert-grep --grep='^Release v' --pretty='- %s' "$TAG"
+            fi
+          } > notes.md
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Sharkord ${{ steps.tag.outputs.tag }}
+          body_path: notes.md
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
+          files: dist/*
+
+      # Keep dev on top of the release commit so the next dev → main merge fast-forwards
+      - name: Bring the release commit into dev
+        run: |
+          git fetch origin dev
+          git checkout -q -B dev origin/dev
+          git merge --no-edit main
+          git push origin dev

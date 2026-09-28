@@ -1,0 +1,55 @@
+{
+  "name": "sharkord-client",
+  "version": "0.1.0",
+  "description": "Standalone Sharkord desktop client",
+  "author": { "name": "Sharkord Client", "email": "noreply@sharkord.example.com" },
+  "license": "MIT",
+  "main": "electron/main.js",
+  "scripts": {
+    "start":        "electron .",
+    "stage:native": "node scripts/stage-native.js",
+    "dist:win":     "node scripts/stage-native.js && electron-builder --win --publish never",
+    "dist:linux":   "electron-builder --linux --publish never",
+    "dist:all":     "node scripts/stage-native.js && electron-builder --win --linux --publish never"
+  },
+  "build": {
+    "appId": "com.sharkord.client",
+    "productName": "Sharkord",
+    "directories": { "output": "release" },
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "files": ["electron/**/*", "build/icon.png", "build/icon.ico"],
+    "asarUnpack": ["node_modules/@vencord/venmic/**"],
+    "win": {
+      "target": [{ "target": "nsis", "arch": ["x64"] }],
+      "icon": "build/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "extraResources": [{ "from": "build/native", "to": "native" }]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Sharkord"
+    },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64"] },
+        { "target": "deb",      "arch": ["x64"] },
+        { "target": "rpm",      "arch": ["x64"] }
+      ],
+      "icon": "build/icons",
+      "category": "Network"
+    },
+    "deb": {
+      "depends": ["libgtk-3-0", "libnss3", "libxss1"]
+    }
+  },
+  "optionalDependencies": {
+    "@vencord/venmic": "^7.2.3"
+  },
+  "devDependencies": {
+    "electron":           "^44.4.5",
+    "electron-builder":   "^26.15.3"
+  }
+}

@@ -1,0 +1,581 @@
+const { contextBridge, ipcRenderer } = require('electron')
+
+contextBridge.exposeInMainWorld('electronAPI', {
+  // Screen share audio (venmic virtual mic)
+  virtmicActive: () => ipcRenderer.invoke('virtmic-active'),
+  virtmicUnmute: () => ipcRenderer.invoke('virtmic-unmute'),
+  virtmicStop:   () => ipcRenderer.invoke('virtmic-stop'),
+  // Desktop notifications
+  notificationShown:   () => ipcRenderer.send('notification-shown'),
+  notificationClicked: () => ipcRenderer.send('notification-clicked'),
+  // Native screen share (SHARKORD_NATIVE_SHARE=1): the picked monitor, or null when the
+  // share should stay Chromium's own; start hands the page a MessagePort (below)
+  nativeShareTarget: () => ipcRenderer.invoke('native-share-target'),
+  nativeShareStart:  opts => ipcRenderer.send('native-share-start', opts),
+})
+
+// The helper's frame port can't cross contextBridge; the page world takes it from a
+// window message instead (installNativeShare)
+ipcRenderer.on('native-share-port', (e, msg) => window.postMessage({ sharkordNativeSharePort: true, id: msg?.id }, '*', e.ports))
+
+// Runs in the page's own world before any page script, so Sharkord's calls
+// to getDisplayMedia / enumerateDevices go through these wrappers.
+function installShareAudioHooks (VIRTMIC) {
+  const md = navigator.mediaDevices
+  if (!md?.getDisplayMedia) return
+
+  const enumerate = md.enumerateDevices.bind(md)
+  const gum       = md.getUserMedia.bind(md)
+  const gdm       = md.getDisplayMedia.bind(md)
+
+  // Hide the virtual mic from Sharkord's microphone list
+  md.enumerateDevices = async () => (await enumerate()).filter(d => d.label !== VIRTMIC)
+
+  const findVirtmic = async () => {
+    // the node can take a moment to appear after link()
+    for (let i = 0; i < 10; i++) {
+      const dev = (await enumerate()).find(d => d.kind === 'audioinput' && d.label === VIRTMIC)
+      if (dev) return dev
+      await new Promise(r => setTimeout(r, 100))
+    }
+    return null
+  }
+
+  md.getDisplayMedia = async (constraints) => {
+    const stream = await gdm(constraints)
+    const api    = window.electronAPI
+
+    if (await api.virtmicActive()) {
+      try {
+        const dev = await findVirtmic()
+        if (dev) {
+          const mic = await gum({ audio: {
+            deviceId: { exact: dev.deviceId },
+            autoGainControl: false, echoCancellation: false, noiseSuppression: false,
+            channelCount: 2, sampleRate: 48000, sampleSize: 16,
+          } })
+          stream.getAudioTracks().forEach(t => { stream.removeTrack(t); t.stop() })
+          stream.addTrack(mic.getAudioTracks()[0])
+          api.virtmicUnmute()
+        } else console.warn('[share] virtual mic not found')
+      } catch (e) { console.warn('[share] virtual mic:', e.message) }
+    }
+
+    // Sharkord ends a share with track.stop(), which fires no 'ended' — hook both
+    let done = false
+    const onEnd = () => { if (!done) { done = true; api.virtmicStop() } }
+    stream.getTracks().forEach(t => {
+      const stop = t.stop.bind(t)
+      t.stop = () => { onEnd(); stop() }
+      t.addEventListener('ended', onEnd)
+    })
+    return stream
+  }
+}
+
+contextBridge.executeInMainWorld({ func: installShareAudioHooks, args: ['vencord-screen-share'] })
+
+// ── Native screen share (SHARKORD_NATIVE_SHARE=1) ──
+// Sharkord keeps the real capture track (its preview); the connection gets a placeholder whose
+// every outgoing encoded frame is swapped, by an encoded transform, for a frame the native helper
+// (native/) captured and encoded with the GPU. Chromium keeps the connection, packetization and
+// bandwidth estimate; nothing here depends on Sharkord's or mediasoup-client's internals.
+// Each placeholder is announced to the worker with its timestamp, and Chromium derives the RTP
+// timestamp from it (plus a random offset, and smoothed against the system clock), so once one
+// frame is identified the worker pairs each frame with the nearest placeholder of the same size --
+// frames are a whole frame interval apart, and the size changes exactly on native keyframes -- and
+// follows the smoothing's drift. Chromium drops placeholders it isn't ready to encode, so the first one is found
+// by its size: until the worker has anchored, each placeholder's width carries a small counter.
+// Keyframes must line up: receivers (and mediasoup, for AV1) trust Chromium's frame type, not our
+// payload. Chromium 152 has no generateKeyFrame() on the transformer, but its encoder always emits
+// a keyframe when the input size changes, so a native keyframe's placeholder switches size. Until
+// a Chromium keyframe carries a native keyframe nothing is sent -- at start, after a lost frame,
+// and when a viewer's PLI makes Chromium key on its own.
+const NATIVE_SHARE_WORKER = `
+const queue = [], stats = { swapped: 0, bootstrap: 0, noMatch: 0, lost: 0, chromeKeys: 0, resync: 0, nativeKeys: 0, ckNoNk: 0, nkNoCk: 0 }
+let offset = null, codec = null, synced = false, askedKey = false
+const needKey = () => { if (!askedKey) { askedKey = true; self.postMessage({ type: 'need-key' }) } }
+self.onmessage = e => {
+  const m = e.data
+  if (m.type !== 'frame') return
+  queue.push(m); if (m.key) { askedKey = false; stats.nativeKeys++ }
+  // Before anchoring only the newest placeholders can be the one Chromium encodes next, and the
+  // width counter is unique among 16
+  if (offset === null && queue.length > 16) queue.splice(0, queue.length - 16)
+}
+const rtpOf = ts => (offset + Math.round(ts * 0.09)) >>> 0
+self.onrtctransform = e => {
+  const out = e.transformer.writable.getWriter(), reader = e.transformer.readable.getReader()
+  ;(async () => { for (;;) {
+    const { value: frame, done } = await reader.read(); if (done) return
+    const meta = frame.getMetadata(), ckey = frame.type === 'key'
+    if (!codec) { codec = meta.mimeType; self.postMessage({ type: 'codec', codec }) }
+    if (ckey) stats.chromeKeys++
+    if (offset === null) {
+      const j = queue.findLastIndex(q => q.w === meta.width)
+      if (j < 0) { stats.noMatch++; continue }
+      offset = (meta.rtpTimestamp - Math.round(queue[j].ts * 0.09)) >>> 0
+      self.postMessage({ type: 'anchored' })
+    }
+    let i = -1, err = 0
+    queue.forEach((q, k) => { if (q.w !== meta.width || q.h !== meta.height) return   // the size pins keyframes to the right frame
+      const d = (rtpOf(q.ts) - meta.rtpTimestamp) | 0; if (Math.abs(d) <= 720 && (i < 0 || Math.abs(d) < Math.abs(err))) { i = k; err = d } })
+    if (i >= 0) offset = (offset - Math.round(err * 0.2)) >>> 0   // follow Chromium's timestamp smoothing
+    if (i < 0) { stats.noMatch++; if (ckey) { synced = false; needKey() } continue }
+    if (i > 0) { if (queue.slice(0, i).some(q => q.data)) { stats.lost += i; synced = false } queue.splice(0, i) }
+    const f = queue.shift()
+    if (!f.data) { stats.bootstrap++; continue }          // placeholder sent before the helper's frames
+    if (synced && ckey && !f.key) synced = false          // a viewer asked for a keyframe
+    if (!synced) {
+      if (!(ckey && f.key)) { stats.resync++; if (ckey) stats.ckNoNk++; if (f.key) stats.nkNoCk++; needKey(); continue }
+      synced = true
+    }
+    frame.data = f.data; stats.swapped++
+    await out.write(frame)
+  } })()
+  setInterval(() => self.postMessage({ type: 'stats', stats }), 1000)
+}`
+
+function installNativeShare (workerSource) {
+  const md = navigator.mediaDevices
+  const gdm = md.getDisplayMedia.bind(md)
+  const api = window.electronAPI
+  const log = (...a) => console.log('[native-share]', ...a)
+  const shares = new Map()   // real capture track → share state
+  const CODECS = { 'video/H264': 'h264', 'video/AV1': 'av1' }
+  const now = () => Math.round(performance.now() * 1000)   // one clock for every placeholder
+  const num = v => typeof v === 'number' ? v : (v?.ideal ?? v?.exact ?? v?.max)
+  const PC = RTCPeerConnection.prototype
+  const { addTransceiver, addTrack } = PC
+  const replaceTrack = RTCRtpSender.prototype.replaceTrack
+  const senderGetStats = RTCRtpSender.prototype.getStats, pcGetStats = PC.getStats
+  const bySender = new Map()   // sender carrying a placeholder → share state
+
+  // The helper's frame port comes from the preload's isolated world as a window message, tagged
+  // with the id of the share that asked for it (a quick restart must not take the old share's)
+  const portWaiters = new Map()
+  let nextId = 1
+  let nativeOff = false   // set when a native share failed mid-share
+  window.addEventListener('message', e => {
+    if (e.source !== window || !e.data?.sharkordNativeSharePort || !e.ports[0]) return
+    const waiter = portWaiters.get(e.data.id)
+    portWaiters.delete(e.data.id)
+    if (waiter) waiter(e.ports[0])
+    else { e.ports[0].postMessage({ cmd: 'stop' }); e.ports[0].close() }   // its share is gone
+  })
+
+  md.getDisplayMedia = async (constraints) => {
+    const real = await gdm(constraints)
+    const video = real.getVideoTracks()[0]
+    const target = video && await api.nativeShareTarget().catch(() => null)
+    if (!target || nativeOff) return real   // a window, no helper, or it failed earlier: Chromium's own share
+    const set = video.getSettings(), c = constraints?.video || {}
+    const want = {
+      width: num(c.width) || set.width || 1920, height: num(c.height) || set.height || 1080,
+      fps: Math.round(num(c.frameRate) || set.frameRate || 60),
+    }
+    const gen = new MediaStreamTrackGenerator({ kind: 'video' })
+    // No contentHint 'detail' here, although Sharkord sets it on the real track: as screen content
+    // Chromium probes every 5 s, and each probe result replaced the estimate, often lower -- it
+    // sawtoothed at 5-8 Mbps; as camera content it ramped cleanly past 12 Mbps
+    const genWriter = gen.writable.getWriter()
+    // Tiny black frames: Chromium encodes them in software for next to nothing. Once anchored,
+    // two sizes, because a size change makes its encoder emit a keyframe for exactly that frame.
+    // Built in memory, not on a canvas: a canvas frame lives on the GPU and has to be read back for
+    // the software encoder, and with the GPU busy (4K capture and encode, a video playing) that
+    // stalled the track at 15 fps.
+    const blanks = new Map()
+    const blank = (w, h) => {
+      const k = w + 'x' + h
+      if (!blanks.has(k)) { const b = new Uint8Array(w * h * 3 / 2); b.fill(16, 0, w * h); b.fill(128, w * h); blanks.set(k, b) }
+      return blanks.get(k)
+    }
+    const worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })))
+    const s = { id: nextId++, want, gen, worker, port: null, sender: null, stopped: false, fell: false, anchored: false, tag: 0, stats: {}, helper: {}, size: 0, kbps: 2000, kbpsAt: 0, pending: [], lastPush: 0, pacer: null }
+    shares.set(video, s)
+
+    const pushPlaceholder = (key, data) => {
+      if (s.stopped || s.fell) return
+      const ts = now()
+      let w = 320, h = 180
+      if (!s.anchored) w = 320 - 2 * (s.tag++ % 16)   // the worker identifies its first frame by width
+      else { if (key) s.size ^= 1; h = s.size ? 176 : 180 }
+      worker.postMessage({ type: 'frame', key, data, ts, w, h }, data ? [data] : [])
+      genWriter.write(new VideoFrame(blank(w, h), { format: 'I420', codedWidth: w, codedHeight: h, timestamp: ts })).catch(() => {})
+    }
+    // Native frames reach the page in bursts, and Chromium thins out a source that delivers faster
+    // than its frame rate. So they are paced: pushed at least 80% of a frame interval apart,
+    // at most a frame late.
+    const minGap = 800 / want.fps
+    const pace = () => {
+      if (s.pacer || !s.pending.length) return
+      s.pacer = setTimeout(() => {
+        s.pacer = null
+        const f = s.pending.shift()
+        s.lastPush = performance.now()
+        pushPlaceholder(f.key, f.data)
+        pace()
+      }, Math.max(0, s.lastPush + minGap - performance.now()))
+    }
+    // Until the helper's frames flow: placeholders at the share's rate, so Chromium encodes and
+    // the worker learns the negotiated codec
+    s.boot = setInterval(() => pushPlaceholder(false, null), 1000 / want.fps)
+
+    // At most one keyframe a second: each one resizes the placeholder, which makes Chromium
+    // reconfigure its encoder, and a burst of them turned one dropped frame into a keyframe storm
+    // (4K AV1 on a real server). A request inside the second waits for it instead.
+    const requestKeyframe = () => {
+      if (s.keyTimer) return
+      const wait = Math.max(0, (s.keyAt || 0) + 1000 - performance.now())
+      s.keyTimer = setTimeout(() => { s.keyTimer = null; s.keyAt = performance.now(); s.port?.postMessage({ cmd: 'keyframe' }) }, wait)
+    }
+    const closeHelper = () => {
+      clearInterval(s.boot)
+      portWaiters.delete(s.id)
+      try { s.port?.postMessage({ cmd: 'stop' }); s.port?.close() } catch {}
+      s.port = null
+    }
+    // Before any native frame went out (an unsupported codec, a helper that never started) the
+    // connection just gets Chromium's own capture. Mid-share, the share ends instead, as if the
+    // capture had stopped: Sharkord cleans up on the track's `ended`, viewers see the share end, and
+    // shares for the rest of the session use Chromium's own path. Continuing in place didn't work:
+    // swapping the capture track in restarted the RTP timestamps from its older clock (viewers
+    // dropped every frame as stale), and the hardware encoder Chromium switches to at <= 1080p
+    // stalled after a few frames.
+    s.fallback = why => {
+      if (s.fell || s.stopped) return
+      s.fell = true
+      closeHelper()
+      if (!s.sender || !s.stats.swapped) {
+        log('using Chromium capture:', why)
+        if (s.sender) { s.sender.transform = null; replaceTrack.call(s.sender, video).catch(e => log('fallback:', e.message)) }
+        return
+      }
+      log('ending the share:', why)
+      nativeOff = true
+      video.dispatchEvent(new Event('ended'))
+    }
+
+    worker.onmessage = e => {
+      const m = e.data
+      if (m.type === 'stats') s.stats = m.stats
+      if (m.type === 'anchored') s.anchored = true
+      if (m.type === 'need-key') requestKeyframe()
+      if (m.type === 'codec' && !s.port && !s.fell) {
+        const codec = CODECS[m.codec]
+        if (!codec) return s.fallback(m.codec + ' has no native encoder')
+        portWaiters.set(s.id, port => {
+          if (s.stopped || s.fell) { port.postMessage({ cmd: 'stop' }); port.close(); return }
+          s.port = port; s.portAt = performance.now()
+          port.onmessage = ({ data: msg }) => {
+            if (msg.type === 'frame') {
+              clearInterval(s.boot)
+              s.lastFrameAt = performance.now()
+              const d = msg.data
+              s.pending.push({ key: msg.key, data: d.byteOffset === 0 && d.byteLength === d.buffer.byteLength ? d.buffer : d.slice().buffer })
+              pace()
+            } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps }
+            else if (msg.event === 'error') s.fallback('helper failed: ' + msg.message)
+            else if (msg.event === 'started') { s.encoder = { name: msg.encoder, width: msg.size?.[0], height: msg.size?.[1] }; log(msg.event, JSON.stringify(msg)) }
+            else if (msg.event) log(msg.event, JSON.stringify(msg))
+          }
+        })
+        // Always the resolution the user picked, as Chromium does for a screen share: the estimate
+        // can't rise past what a mostly still screen sends (~5 Mbps on a LAN), so following it
+        // flipped a 4K share between 1080p and 4K
+        s.kbpsAt = performance.now()
+        api.nativeShareStart({ id: s.id, codec, ...want, kbps: s.kbps })
+        log('starting helper', codec, JSON.stringify(want))
+      }
+    }
+
+    s.stop = () => {
+      if (s.stopped) return
+      s.stopped = true; clearInterval(s.timer); clearTimeout(s.pacer); clearTimeout(s.keyTimer); closeHelper()
+      worker.terminate(); gen.stop(); shares.delete(video); bySender.delete(s.sender)
+      log('stopped', JSON.stringify(s.stats))
+    }
+    // Sharkord ends a share with track.stop(), which fires no 'ended'
+    const stop = video.stop.bind(video)
+    video.stop = () => { s.stop(); stop() }
+    video.addEventListener('ended', () => s.stop())
+    return real
+  }
+
+  // Put the placeholder on the sender, attach the transform, and lift the resolution-based
+  // bitrate cap (Chromium would budget for a 320x180 stream)
+  const capFor = ({ width, height, fps }) => Math.round(width * height * fps * 0.05 / 1000)
+  const attach = (sender, s, pc) => {
+    if (s.sender) return
+    s.sender = sender; s.outIds = new Set(); bySender.set(sender, s)
+    sender.transform = new RTCRtpScriptTransform(s.worker, {})
+    s.timer = setInterval(async () => {
+      // After a fallback: what Chromium's own capture really sends, so a poor fallback is visible
+      if (s.fell) {
+        let o, m; (await senderGetStats.call(sender)).forEach(x => { if (x.type === 'outbound-rtp') o = x; if (x.type === 'media-source' && x.kind === 'video') m = x })
+        if (o) log(`fallback: sent ${o.framesPerSecond ?? 0} fps, ${o.frameWidth}x${o.frameHeight}, ${o.encoderImplementation}, target ${Math.round((o.targetBitrate || 0) / 1000)} kbps, encoded ${o.framesEncoded}, sent ${o.framesSent}, limit ${o.qualityLimitationReason}, source ${m?.framesPerSecond ?? '-'} fps ${m?.width}x${m?.height} frames ${m?.frames}`)
+        return
+      }
+      // Watchdog: a share that stops getting frames through leaves viewers on the black
+      // placeholder with no error anywhere (a GPU stall once did, for minutes). Resyncs after a
+      // keyframe request take a second or two, so 6 s without a swapped frame means stuck.
+      if (s.port) {
+        const t = performance.now(), swapped = s.stats.swapped || 0
+        if (swapped > (s.lastSwapped ?? -1)) { s.lastSwapped = swapped; s.swappedAt = t }
+        if (t - (s.lastFrameAt ?? s.portAt) > 10000) return s.fallback('no frames from the helper for 10 s')
+        if (s.lastFrameAt && t - (s.swappedAt ?? s.portAt) > 6000) return s.fallback('stalled: no frame swapped for 6 s')
+      }
+      let o, r, bwe; (await senderGetStats.call(sender)).forEach(x => {
+        if (x.type === 'outbound-rtp') { o = x; s.outIds.add(x.id) }
+        if (x.type === 'remote-inbound-rtp' && x.kind === 'video') r = x
+        if (x.type === 'candidate-pair' && x.nominated && x.availableOutgoingBitrate) bwe = Math.round(x.availableOutgoingBitrate / 1000)
+      })
+      // Time packets waited in Chromium's pacer since the last tick: grows when the helper sends
+      // faster than the pacing rate (AMF overshooting on motion)
+      const pacerMs = o && o.packetsSent > (s.lastSent || 0) ? Math.round((o.totalPacketSendDelay - (s.lastDelay || 0)) * 1000 / (o.packetsSent - (s.lastSent || 0))) : 0
+      if (o) { s.lastSent = o.packetsSent; s.lastDelay = o.totalPacketSendDelay }
+      // The helper follows the transport estimate, not outbound-rtp targetBitrate: Chromium counts
+      // bytes the transform added as post-encode overhead (packetized size minus the placeholder's
+      // encoded size, capped at half) and halves the encoder target. But the estimate itself kept
+      // dropping 15-30% every few seconds on a clean LAN (no loss, no NACKs, 1 ms RTT, iperf clean
+      // to 100 Mbps), so while the path is clean the helper works up to its cap and the estimate follows
+      // what is really sent; on real congestion it drops to 0.85x the estimate until 10 s without.
+      // Congestion: loss, the round trip growing, or packets waiting in Chromium's pacer. The pacer
+      // only queues when the estimate is really below what goes out: after a quiet stretch it fell
+      // 32 -> 5.6 Mbps and stayed, and holding 25 Mbps through that queued 0.8 s of lag. The
+      // cap: Sharkord's bitrate setting (x-google-max-bitrate in the answer) and 0.05 bits per
+      // pixel per frame (~25 Mbps at 4K60). A change costs an AMF keyframe, so down at once, up
+      // only in 30% steps at least 4 s apart.
+      const rtt = r?.roundTripTime
+      if (rtt != null) s.minRtt = Math.min(s.minRtt ?? rtt, rtt)
+      if ((r?.fractionLost ?? 0) > 0.02 || (rtt != null && rtt > s.minRtt + 0.02) || pacerMs > 50) s.congestedAt = performance.now()
+      if (bwe && s.port && s.encoder) {
+        const mid = pc?.getTransceivers().find(t => t.sender === sender)?.mid
+        const sec = mid != null && pc.remoteDescription?.sdp.split(/(?=^m=)/m).find(m => m.includes('a=mid:' + mid + '\r'))
+        const setting = +(sec?.match(/x-google-max-bitrate=(\d+)/)?.[1]) || Infinity
+        const cap = Math.round(Math.min(setting, capFor({ ...s.want, width: s.encoder.width, height: s.encoder.height })))
+        const clean = performance.now() - (s.congestedAt ?? -Infinity) > 10000
+        // Clean: the estimate itself, never down. It grows ~8%/s whenever at least 2/3 of it is
+        // sent, so running ahead doesn't ramp faster -- straight to the cap queued up to 1.3 s in
+        // Chromium's pacer, 1.5x the estimate still 0.85 s, while it climbed 5 -> 25 Mbps in ~20 s
+        const aim = clean ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * 0.85))
+        s.cap = cap
+        // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under 1.3x
+        if (aim < s.kbps * 0.9 || ((aim >= s.kbps * 1.3 || (aim === cap && aim > s.kbps)) && performance.now() - s.kbpsAt > 4000)) {
+          s.kbps = aim; s.kbpsAt = performance.now(); s.port.postMessage({ cmd: 'bitrate', kbps: aim })
+        }
+      }
+      if (o) log(`sent ${o.framesPerSecond ?? 0} fps, estimate ${bwe} kbps, target ${Math.round((o.targetBitrate || 0) / 1000)} kbps, asked ${s.kbps} kbps (cap ${s.cap}), pacer ${pacerMs} ms, rtt ${Math.round((r?.roundTripTime ?? 0) * 1000)} ms, jitter ${Math.round((r?.jitter ?? 0) * 1000)} ms, lost ${r?.packetsLost ?? 0} (${Math.round((r?.fractionLost ?? 0) * 1000) / 10}%), nack ${o?.nackCount ?? 0}, retx ${o?.retransmittedPacketsSent ?? 0}, helper ${JSON.stringify(s.helper)}, worker ${JSON.stringify(s.stats)}`)
+    }, 2000)
+  }
+  // Stats describe the helper's encode, not the placeholder's: Sharkord's stats panel would
+  // otherwise show Chromium's software encoder at 320x180. Frame rate and bytes stay Chromium's
+  // own counts -- they are what really goes out.
+  const rewrite = report => {
+    const shares = [...bySender.values()].filter(s => s.encoder && !s.fell && !s.stopped)
+    if (!shares.length) return report
+    const out = new Map()
+    report.forEach((x, id) => {
+      const s = x.type === 'outbound-rtp' && shares.find(s => s.outIds.has(id))
+      out.set(id, s ? { ...x, encoderImplementation: `sharkord-share (${s.encoder.name})`, powerEfficientEncoder: true,
+        frameWidth: s.encoder.width ?? x.frameWidth, frameHeight: s.encoder.height ?? x.frameHeight } : x)
+    })
+    return out
+  }
+  RTCRtpSender.prototype.getStats = async function () { return rewrite(await senderGetStats.call(this)) }
+  PC.getStats = async function (...args) { return rewrite(await pcGetStats.apply(this, args)) }
+
+  PC.addTransceiver = function (trackOrKind, init) {
+    const s = shares.get(trackOrKind)
+    if (!s || s.fell) return addTransceiver.call(this, trackOrKind, init)
+    const encs = init?.sendEncodings
+    if (encs?.length > 1) { s.fallback('simulcast'); return addTransceiver.call(this, trackOrKind, init) }
+    init = { ...init, sendEncodings: [{ ...(encs?.[0] || {}), maxBitrate: 50e6 }] }
+    const t = addTransceiver.call(this, s.gen, init)
+    attach(t.sender, s, this)
+    return t
+  }
+  PC.addTrack = function (track, ...streams) {
+    const s = shares.get(track)
+    if (!s || s.fell) return addTrack.call(this, track, ...streams)
+    const sender = addTrack.call(this, s.gen, ...streams)
+    attach(sender, s, this)
+    return sender
+  }
+  RTCRtpSender.prototype.replaceTrack = function (track) {
+    const s = track && shares.get(track)
+    if (!s || s.fell) return replaceTrack.call(this, track)
+    attach(this, s)
+    return replaceTrack.call(this, s.gen)
+  }
+}
+
+// Installed on Windows always; each share asks the main process whether to go native
+if (process.platform === 'win32')
+  contextBridge.executeInMainWorld({ func: installNativeShare, args: [NATIVE_SHARE_WORKER] })
+
+// Sharkord shows plain `new Notification(...)` without an onclick, so hook the
+// constructor: flash the taskbar when one is shown, bring the window back on click.
+function installNotificationHooks () {
+  const N = window.Notification
+  if (!N) return
+
+  const items   = id => [...document.querySelectorAll(`[data-testid="${id}"]`)]
+  const waitFor = async find => {
+    for (let i = 0; i < 20; i++) { const el = find(); if (el) return el; await new Promise(r => setTimeout(r, 100)) }
+    return null
+  }
+  // The notification carries no channel id — only Sharkord's (untranslated) title:
+  // "<author> in #<channel>" or "<author> (DM)". A DM notified through "All messages"
+  // gets the channel form, with the DM channel's name "DM - <id>:<id>". Open the
+  // matching sidebar item; if nothing matches, the window is just shown.
+  const openSource = async title => {
+    const dm = title.match(/^(.*) \(DM\)$/) || title.match(/^(.*) in #DM - \d+:\d+$/)
+    const ch = !dm && title.match(/^.* in #(.*)$/)
+    if (!dm && !ch) return
+    const matches = dm
+      ? () => items('dm-item').filter(el => el.querySelector('span.truncate')?.textContent === dm[1])
+      : () => items('channel-item').filter(el => el.querySelector('.lucide-hash') && el.querySelector('span')?.textContent === ch[1])
+    // Same name twice: the one the message went to has an unread badge
+    const find = () => { const m = matches(); return m.find(el => el.querySelector('[data-testid="unread-count"]')) || m[0] }
+    // Channels and DMs share the sidebar: switch it if the other list is showing
+    if (!!dm === !!items('channel-item').length) document.querySelector('[data-testid="dm-toggle"]')?.click()
+    ;(await waitFor(find))?.click()
+  }
+
+  window.Notification = class Notification extends N {
+    constructor (...a) {
+      super(...a)
+      window.electronAPI.notificationShown()
+      this.addEventListener('click', () => {
+        window.electronAPI.notificationClicked()
+        openSource(this.title).catch(() => {})
+      })
+    }
+  }
+}
+
+contextBridge.executeInMainWorld({ func: installNotificationHooks })
+
+// ── "Change server" inside Sharkord's UI ────────────────────────────────
+//   Added to the ☰ server menu (above Disconnect) and the login screen (under
+//   Connect). Each is anchored on a data-testid that Sharkord's own e2e tests
+//   rely on, and is a clone of that element so it keeps Sharkord's exact
+//   styling. If an anchor ever disappears the control just isn't added
+//   (Ctrl+Shift+O and the tray menu still work).
+const MARK = 'data-client-change-server'
+
+function cloneAs (anchor, label, place) {
+  if (anchor.parentElement.querySelector(`[${MARK}]`)) return null
+  const el = anchor.cloneNode(false)
+  el.removeAttribute('data-testid')
+  el.setAttribute(MARK, '')
+  el.textContent = label
+  el.addEventListener('click', () => ipcRenderer.send('change-server'))
+  anchor[place](el)
+  return el
+}
+
+function addChangeServerControls () {
+  // ☰ server menu: styled like Disconnect minus its red
+  const disconnect = document.querySelector('[data-testid="server-menu-disconnect"]')
+  const item = disconnect && cloneAs(disconnect, 'Change server', 'before')
+  if (item) {
+    item.removeAttribute('data-highlighted')
+    item.removeAttribute('data-radix-collection-item')   // not one of Radix's own items
+    item.classList.remove('text-destructive', 'focus:text-destructive')
+    item.classList.add('focus:text-accent-foreground')
+    item.addEventListener('pointermove', () => item.focus())   // Radix does this for its items
+  }
+
+  // Login screen: styled like Connect (or the SSO button on OIDC-only servers)
+  const connect = document.querySelector('[data-testid="connect-button"]') ||
+                  document.querySelector('[data-testid="connect-oidc-button"]')
+  const button = connect && cloneAs(connect, 'Change server', 'after')
+  if (button) {
+    button.removeAttribute('disabled')   // Connect is disabled while the fields are empty
+    button.type = 'button'
+  }
+}
+
+// ── Desktop options at the top of Sharkord's Settings → Others ─────────
+//   Found through the "Others" sidebar entry (the only one with the
+//   sliders-horizontal icon, so server settings don't get them). The rows are
+//   built from Sharkord's Group / Label / Switch class strings and apply
+//   immediately, outside Sharkord's Save bar. The tray menu has the same
+//   toggles if the anchor ever disappears.
+const DESKTOP = 'data-client-desktop-settings'
+const SWITCH_CLASS = 'peer data-[state=checked]:bg-primary data-[state=unchecked]:bg-input focus-visible:border-ring focus-visible:ring-ring/50 dark:data-[state=unchecked]:bg-input/80 inline-flex h-[1.15rem] w-8 shrink-0 items-center rounded-full border border-transparent shadow-xs transition-all outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50'
+const THUMB_CLASS  = 'bg-background dark:data-[state=unchecked]:bg-foreground dark:data-[state=checked]:bg-primary-foreground pointer-events-none block size-4 rounded-full ring-0 transition-transform data-[state=checked]:translate-x-[calc(100%-2px)] data-[state=unchecked]:translate-x-0'
+const DESKTOP_OPTIONS = [
+  { key: 'openAtLogin',    label: 'Open Sharkord when your computer starts up' },
+  { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
+    description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
+  { key: 'nativeShare',    label: 'Native screen share (experimental)',
+    description: 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. AMD GPUs; takes effect on the next share.' },
+]
+
+function el (tag, className, text) {
+  const e = document.createElement(tag)
+  if (className) e.className = className
+  if (text) e.textContent = text
+  return e
+}
+
+function addDesktopSettings () {
+  const others = document.querySelector('svg.lucide-sliders-horizontal')?.closest('[data-testid="settings-sidebar-entry"]')
+  if (!others?.classList.contains('bg-accent')) return   // Others isn't the open tab
+  const content = others.closest('nav')?.parentElement.querySelector('main [data-slot="card-content"]')
+  if (!content || content.querySelector(`[${DESKTOP}]`) || addDesktopSettings.pending) return
+  // Options the main process leaves out (nativeShare without a helper) get no row
+  addDesktopSettings.pending = true
+  ipcRenderer.invoke('desktop-settings-get').then(s => {
+    addDesktopSettings.pending = false
+    if (s && !content.querySelector(`[${DESKTOP}]`)) buildDesktopSettings(content, s)
+  }).catch(() => { addDesktopSettings.pending = false })
+}
+
+function buildDesktopSettings (content, initial) {
+  const switches = {}
+  const render = s => {
+    if (!s) return
+    for (const key of Object.keys(switches)) {
+      const state = s[key] ? 'checked' : 'unchecked'
+      switches[key].setAttribute('aria-checked', String(!!s[key]))
+      switches[key].dataset.state = state
+      switches[key].firstChild.dataset.state = state
+    }
+  }
+  const rows = DESKTOP_OPTIONS.filter(({ key }) => key in initial).map(({ key, label, description }) => {
+    const group = el('div', 'flex flex-col gap-2')
+    group.setAttribute(DESKTOP, key)
+    const text = el('div', 'flex flex-col')
+    text.append(el('label', 'flex items-center gap-2 text-sm leading-none font-medium', label))
+    if (description) text.append(el('span', 'text-sm text-muted-foreground', description))
+    const sw = el('button', SWITCH_CLASS)
+    sw.type = 'button'
+    sw.setAttribute('role', 'switch')
+    sw.append(el('span', THUMB_CLASS))
+    sw.addEventListener('click', async () => {
+      render(await ipcRenderer.invoke('desktop-settings-set', { [key]: sw.dataset.state !== 'checked' }))
+    })
+    switches[key] = sw
+    const control = el('div', 'flex flex-col gap-2')
+    control.append(sw)
+    group.append(text, control)
+    return group
+  })
+  content.prepend(...rows)
+  render(initial)
+}
+
+let _clientControlsQueued = false
+new MutationObserver(() => {
+  if (_clientControlsQueued) return
+  _clientControlsQueued = true
+  requestAnimationFrame(() => {
+    _clientControlsQueued = false
+    addChangeServerControls()
+    addDesktopSettings()
+  })
+}).observe(document, { childList: true, subtree: true })
