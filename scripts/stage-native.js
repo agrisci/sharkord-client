@@ -84,10 +84,10 @@ if (process.platform === 'linux') {
   fs.rmSync(OUT, { recursive: true, force: true })
   const exe = path.join(OUT, 'bin', 'sharkord-share')
   copy(EXE, exe)
-  // Proves it loads against the system's GStreamer; which codecs this machine encodes is the
-  // app's business at runtime (CI has no GPU)
+  // Proves it runs against the system's GStreamer: any answer will do. What this machine has is
+  // the app's business at runtime -- CI has no GPU, and the va plugin registers nothing without one
   const check = spawnSync(exe, ['--check'], { encoding: 'utf8' })
-  if (check.status !== 0) throw new Error(`self-check failed: ${check.stdout}${check.stderr}`)
+  try { JSON.parse(check.stdout) } catch { throw new Error(`self-check failed: ${check.stdout}${check.stderr}`) }
   log(`staged ${exe}; self-check ${check.stdout.trim()}`)
   process.exit(0)
 }
