@@ -511,6 +511,28 @@ function installNativeShare (workerSource, helperPicks) {
     attach(this, s)
     return replaceTrack.call(this, s.gen)
   }
+
+  // Watching: which decoder each incoming video uses (GPU or CPU), logged when it first plays
+  // and when the codec or decoder changes. Chromium names the decoder only while the page is
+  // capturing (the mic in a voice channel counts); otherwise it says so.
+  const pcs = new Set(), decoders = new WeakMap(), setRemote = PC.setRemoteDescription
+  PC.setRemoteDescription = function (...args) { pcs.add(this); return setRemote.apply(this, args) }
+  setInterval(async () => {
+    for (const pc of pcs) {
+      if (pc.connectionState === 'closed') { pcs.delete(pc); continue }
+      for (const r of pc.getReceivers()) {
+        if (r.track?.kind !== 'video' || r.track.readyState !== 'live') continue
+        let i; const codecs = new Map()
+        try { (await r.getStats()).forEach(x => { if (x.type === 'inbound-rtp') i = x; if (x.type === 'codec') codecs.set(x.id, x.mimeType) }) } catch { continue }
+        if (!i?.framesDecoded) continue
+        const codec = (codecs.get(i.codecId) || '?').replace('video/', ''), key = codec + '|' + i.decoderImplementation
+        if (decoders.get(r) === key) continue
+        decoders.set(r, key)
+        const where = i.powerEfficientDecoder === true ? 'GPU' : i.powerEfficientDecoder === false ? 'CPU' : 'unknown'
+        log(`incoming ${codec} ${i.frameWidth}x${i.frameHeight}: decoder ${i.decoderImplementation ?? '(hidden: not capturing)'}, ${where}, ${Math.round(i.framesPerSecond || 0)} fps`)
+      }
+    }
+  }, 5000)
 }
 
 // Installed on Windows and Linux always; each share asks the main process whether to go native
