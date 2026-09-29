@@ -91,7 +91,11 @@ belongs to rather than adding files.
 
 With the `nativeShare` setting on (or `SHARKORD_NATIVE_SHARE=1`), a share's video is captured and
 encoded outside Chromium by the helper in `native/`, while Sharkord and Chromium keep everything
-else (connection, packetization, bandwidth estimate).
+else (connection, packetization, bandwidth estimate). Only when **H.264 or AV1** is picked in
+Sharkord's Devices settings: the page reads `screenCodec` from `sharkord-devices-settings` in its
+localStorage before the share starts, and anything else (VP8, VP9, `auto`, a value it can't read)
+is Chromium's own share, as with the setting off. This is the one place the client reads
+Sharkord's state; a renamed key only turns the helper off.
 
 - **Windows** (whole screens, AMD): `d3d11screencapturesrc` → `d3d11convert` → AMF H.264/AV1.
   Chromium's capture still runs for the local preview and share audio.
@@ -106,11 +110,7 @@ else (connection, packetization, bandwidth estimate).
   copy into VA memory at once (the compositor lends only a few buffers) → the same
   videorate/queue → `vapostproc` → `vah264enc`/`vaav1enc` (VBR at 100% of the target: CBR pads a
   still screen; AV1 without reordering). These were measured on KWin (Renoir
-  and RX 9060 XT), and took a Renoir iGPU from ~41 to 60 fps. Before the pick the page reads
-  the screen codec from Sharkord's Devices settings (`sharkord-devices-settings` in its
-  localStorage, `screenCodec`): the helper encodes only H.264/AV1, so VP8, VP9 and `auto` stay
-  entirely Chromium's (its capture, its picker). This is the one place the client reads Sharkord's
-  state; an unreadable value counts as native. With no Chromium capture in a native share there is
+  and RX 9060 XT), and took a Renoir iGPU from ~41 to 60 fps. With no Chromium capture in a native share there is
   nothing to fall back to, so every fallback below **ends** it (the `ended` event is sent again
   every second until Sharkord stops the track: at the very start Sharkord isn't listening yet);
   later shares use Chromium's path. Tried and dropped: reading Chromium's own PipeWire stream (one portal pick too) -- Chromium

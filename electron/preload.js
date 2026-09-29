@@ -171,14 +171,13 @@ function installNativeShare (workerSource, helperPicks) {
     else { e.ports[0].postMessage({ cmd: 'stop' }); e.ports[0].close() }   // its share is gone
   })
 
-  // The screen codec picked in Sharkord's Devices settings (its localStorage): the helper encodes
-  // only H.264 and AV1, and on Linux it has to know before the pick. Unreadable settings (a renamed
-  // key) count as native, so a Sharkord change can't turn the helper off unnoticed.
+  // The screen codec picked in Sharkord's Devices settings (its localStorage). The helper encodes
+  // only H.264 and AV1, and on Linux it has to know before the pick, so it's used only when one of
+  // them is picked explicitly; anything else (VP8, VP9, auto, a setting it can't read) is
+  // Chromium's share from the start, on both platforms.
   const nativeCodec = () => {
-    try {
-      const codec = JSON.parse(localStorage.getItem('sharkord-devices-settings'))?.screenCodec
-      return !codec || !!CODECS[codec]
-    } catch { return true }
+    try { return !!CODECS[JSON.parse(localStorage.getItem('sharkord-devices-settings'))?.screenCodec] }
+    catch { return false }
   }
 
   md.getDisplayMedia = async (constraints) => {
@@ -197,7 +196,8 @@ function installNativeShare (workerSource, helperPicks) {
     const real = await gdm(constraints)
     const video = real.getVideoTracks()[0]
     const target = video && await api.nativeShareTarget().catch(() => null)
-    if (!target || nativeOff) return real   // a window, no helper, or it failed earlier: Chromium's own share
+    // A window, no helper, another codec, or it failed earlier: Chromium's own share
+    if (!target || nativeOff || !nativeCodec()) return real
     startShare(video, constraints, false)
     return real
   }
