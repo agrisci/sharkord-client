@@ -106,9 +106,14 @@ else (connection, packetization, bandwidth estimate).
   copy into VA memory at once (the compositor lends only a few buffers) → the same
   videorate/queue → `vapostproc` → `vah264enc`/`vaav1enc` (VBR at 100% of the target: CBR pads a
   still screen; AV1 without reordering). These were measured on KWin (Renoir
-  and RX 9060 XT), and took a Renoir iGPU from ~41 to 60 fps. With no Chromium capture there is
-  nothing to fall back to, so every fallback below **ends** the share; later shares use Chromium's
-  path. Tried and dropped: reading Chromium's own PipeWire stream (one portal pick too) -- Chromium
+  and RX 9060 XT), and took a Renoir iGPU from ~41 to 60 fps. Before the pick the page reads
+  the screen codec from Sharkord's Devices settings (`sharkord-devices-settings` in its
+  localStorage, `screenCodec`): the helper encodes only H.264/AV1, so VP8, VP9 and `auto` stay
+  entirely Chromium's (its capture, its picker). This is the one place the client reads Sharkord's
+  state; an unreadable value counts as native. With no Chromium capture in a native share there is
+  nothing to fall back to, so every fallback below **ends** it (the `ended` event is sent again
+  every second until Sharkord stops the track: at the very start Sharkord isn't listening yet);
+  later shares use Chromium's path. Tried and dropped: reading Chromium's own PipeWire stream (one portal pick too) -- Chromium
   fixes a tiled DMA-BUF modifier VA can't import, and the GL read-back pinned a CPU core.
 
 1. Windows: `picker-go-live` records the picked monitor (`_nativeTarget`); windows stay on
@@ -257,8 +262,8 @@ There are no automated tests. After a change, check what it touches:
   passes (`[native-share] probe` in the log). Share with H.264, simulcast off: **one** portal
   dialog then the audio step, the local preview moves, a viewer gets 60 fps, stats show
   `sharkord-share (vah264enc)`. Cancelling the portal dialog or the audio step cancels the share
-  and the desktop's sharing indicator goes away; stopping the share ends the helper. VP8 or
-  simulcast ends the share and the next one uses Chromium's path.
+  and the desktop's sharing indicator goes away; stopping the share ends the helper. VP8 in
+  Sharkord's Devices settings: Chromium's picker, not the helper's, and a moving preview.
 
 ## Commits and privacy
 

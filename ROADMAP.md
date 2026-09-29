@@ -118,7 +118,7 @@ Electron can rename or drop them without any error.
 |---|-----|------|--------|-------|
 | 16 | P1 | Measure sharing from Linux | 🧪 | Only tested as a viewer. Share with logging at 1080p/1440p/4K, H.264 and AV1 (Wayland portal, VA-API, venmic) before building anything. |
 | 17 | P2 | Native share on Linux | 🧪 | Wayland + VA-API (`vah264enc`, `vaav1enc`), system GStreamer. The helper owns the only portal dialog; the page decodes its frames for the preview. 60 fps 1080p H.264 on a Renoir iGPU. To test: AV1 (RDNA3+), Intel iHD, GNOME/mutter, 4K, the installed AppImage/deb/rpm. |
-| 96 | P2 | Linux native share: VP8/simulcast end the share | 📋 | With no Chromium capture there is nothing to fall back to. The decoded preview track could go on the connection instead (Chromium encodes it), at the cost of a decode and a second encode. |
+| 96 | P2 | Linux native share: codec known only from Sharkord's settings | 📋 | The helper must pick before the codec is negotiated, so the page reads `screenCodec` from Sharkord's localStorage (VP8/VP9/auto stay Chromium's). A renamed key or simulcast forced on H.264 would send the share native and end it. A server- or SDP-based signal, or the decoded preview going on the connection (Chromium encodes it), would remove the dependency. |
 | 18 | P2 | NVIDIA and X11 on Linux | 💡 | No VA-API encode on NVIDIA (NVENC instead); X11 sessions use the source grid. |
 | 19 | P3 | macOS | 💡 | Not built (`package.json` has no mac target). ScreenCaptureKit + VideoToolbox if there is demand. |
 

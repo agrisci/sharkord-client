@@ -171,10 +171,21 @@ function installNativeShare (workerSource, helperPicks) {
     else { e.ports[0].postMessage({ cmd: 'stop' }); e.ports[0].close() }   // its share is gone
   })
 
+  // The screen codec picked in Sharkord's Devices settings (its localStorage): the helper encodes
+  // only H.264 and AV1, and on Linux it has to know before the pick. Unreadable settings (a renamed
+  // key) count as native, so a Sharkord change can't turn the helper off unnoticed.
+  const nativeCodec = () => {
+    try {
+      const codec = JSON.parse(localStorage.getItem('sharkord-devices-settings'))?.screenCodec
+      return !codec || !!CODECS[codec]
+    } catch { return true }
+  }
+
   md.getDisplayMedia = async (constraints) => {
     // Linux: the helper picks and captures the screen, Chromium doesn't (one portal dialog, not
     // two). Sharkord gets a stream the page builds: the preview is the helper's frames, decoded.
-    if (helperPicks && !nativeOff && constraints?.video) {
+    // Any other codec (VP8, VP9, auto) stays entirely Chromium's: its own capture and encoder.
+    if (helperPicks && !nativeOff && constraints?.video && nativeCodec()) {
       const pick = await api.nativeSharePick().catch(() => 'chromium')
       if (pick === 'cancelled') throw new DOMException('Permission denied by user', 'NotAllowedError')
       if (pick === 'ok') {
@@ -279,9 +290,16 @@ function installNativeShare (workerSource, helperPicks) {
       }
       log('ending the share:', why)
       nativeOff = true
-      // After the current call returns: a fallback inside addTransceiver comes before Sharkord
-      // listens for the end of the track it is adding
-      setTimeout(() => video.dispatchEvent(new Event('ended')))
+      // Again every second until Sharkord stops the track: a fallback right at the start (a codec
+      // the helper can't encode) comes before Sharkord listens for the end, and the share was
+      // left running on a black preview
+      let tries = 0
+      const end = () => {
+        if (s.trackStopped || tries++ >= 10) return
+        video.dispatchEvent(new Event('ended'))
+        setTimeout(end, 1000)
+      }
+      setTimeout(end)
     }
 
     // The preview of a share the helper picked: its frames, decoded by Chromium (on the GPU where
@@ -344,7 +362,7 @@ function installNativeShare (workerSource, helperPicks) {
     }
     // Sharkord ends a share with track.stop(), which fires no 'ended'
     const stop = video.stop.bind(video)
-    video.stop = () => { s.stop(); stop() }
+    video.stop = () => { s.trackStopped = true; s.stop(); stop() }
     video.addEventListener('ended', () => s.stop())
   }
 
@@ -559,7 +577,7 @@ const DESKTOP_OPTIONS = [
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
   { key: 'nativeShare',    label: 'Native screen share (experimental)',
     description: process.platform === 'linux'
-      ? 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. VA-API (AMD, Intel; on Fedora, RPM Fusion\'s mesa-va-drivers-freeworld), Wayland. Shares with H.264 or AV1 and simulcast off; takes effect on the next share.'
+      ? 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. VA-API (AMD, Intel; on Fedora, RPM Fusion\'s mesa-va-drivers-freeworld), Wayland. Used for H.264 and AV1 shares (Sharkord\'s Devices settings); takes effect on the next share.'
       : 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. AMD GPUs; takes effect on the next share.' },
 ]
 
