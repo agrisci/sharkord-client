@@ -137,7 +137,7 @@ Sharkord's state; a renamed key or field only turns the helper off:
 | Failure | Windows | Linux |
 |---|---|---|
 | Before the first native frame (the encoder won't start despite the probe, a codec other than the settings said) | the connection gets Chromium's capture; the share goes on | the share **ends** (nothing to fall back to); later shares that session are Chromium's |
-| Mid-share (helper error or exit, watchdog: no frame for 10 s / none swapped for 6 s) | the share ends; later shares that session are Chromium's | same |
+| Mid-share (helper error or exit, watchdog: no frame for 10 s / none swapped for 6 s) | the share ends; later shares that session are Chromium's (logged at each share), unless the system was suspended during it (`powerMonitor`, sent as a `suspend` event on the share's port) | same |
 | A picker or the audio step cancelled | no share | no share; the helper is stopped |
 
 A share ends through `ended` on Sharkord's track, sent again every second until Sharkord stops it
@@ -315,7 +315,8 @@ There are no automated tests. After a change, check what it touches:
   "This GPU can hardware encode" lists H.264 / AV1. Share with H.264: **one** portal dialog then the
   audio step, the local preview moves, a viewer gets 60 fps, stats show
   `sharkord-share (vah264enc)`. Cancelling the portal dialog or the audio step cancels the share
-  and the desktop's sharing indicator goes away; stopping the share ends the helper.
+  and the desktop's sharing indicator goes away; stopping the share ends the helper. Suspending
+  mid-share ends the share, and the next share is native again.
 - **Codec routing (both platforms)**: VP8, VP9, `auto`, or Simulcast on (on a server that allows
   it) in Sharkord's Devices settings, and a codec the probe didn't open (AV1 on a GPU without AV1 encoding), are Chromium's share: its
   picker, a moving preview, no `sharkord-share` process and Chromium's encoder in the stats.

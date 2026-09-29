@@ -162,7 +162,7 @@ function installNativeShare (workerSource, helperPicks) {
   // with the id of the share that asked for it (a quick restart must not take the old share's)
   const portWaiters = new Map()
   let nextId = 1
-  let nativeOff = false   // set when a native share failed mid-share
+  let nativeOff = ''   // why, once a native share failed mid-share
   window.addEventListener('message', e => {
     if (e.source !== window || !e.data?.sharkordNativeSharePort || !e.ports[0]) return
     const waiter = portWaiters.get(e.data.id)
@@ -205,6 +205,7 @@ function installNativeShare (workerSource, helperPicks) {
     // two). Sharkord gets a stream the page builds: the preview is the helper's frames, decoded.
     // Any other share (VP8, VP9, auto, simulcast) stays entirely Chromium's: its capture and encoder.
     const codec = nativeCodec()
+    if (nativeOff && codec) log('Chromium\'s share: the native share is off for this session:', nativeOff)
     if (helperPicks && !nativeOff && constraints?.video && codec) {
       const pick = await api.nativeSharePick(codec).catch(() => 'chromium')
       if (pick === 'cancelled') throw new DOMException('Permission denied by user', 'NotAllowedError')
@@ -297,7 +298,8 @@ function installNativeShare (workerSource, helperPicks) {
     // connection just gets Chromium's own capture -- if there is one: a share the helper picked
     // (Linux) has nothing else, and ends. Mid-share, the share ends instead, as if the
     // capture had stopped: Sharkord cleans up on the track's `ended`, viewers see the share end, and
-    // shares for the rest of the session use Chromium's own path. Continuing in place didn't work:
+    // shares for the rest of the session use Chromium's own path (not after a suspend, which loses
+    // the capture without the helper being at fault). Continuing in place didn't work:
     // swapping the capture track in restarted the RTP timestamps from its older clock (viewers
     // dropped every frame as stale), and the hardware encoder Chromium switches to at <= 1080p
     // stalled after a few frames.
@@ -311,7 +313,9 @@ function installNativeShare (workerSource, helperPicks) {
         return
       }
       log('ending the share:', why)
-      nativeOff = true
+      // A capture lost to a suspend isn't the helper's fault: the next share can use it again
+      if (s.suspended) log('native share stays on: the system was suspended')
+      else nativeOff = why
       // Again every second until Sharkord stops the track: a fallback right at the start (a codec
       // the helper can't encode) comes before Sharkord listens for the end, and the share was
       // left running on a black preview
@@ -362,6 +366,7 @@ function installNativeShare (workerSource, helperPicks) {
               pace()
             } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps }
             else if (msg.event === 'error') s.fallback('helper failed: ' + msg.message)
+            else if (msg.event === 'suspend') { s.suspended = true; log('system suspending') }
             else if (msg.event === 'started') { s.encoder = { name: msg.encoder, width: msg.size?.[0], height: msg.size?.[1] }; log(msg.event, JSON.stringify(msg)) }
             else if (msg.event) log(msg.event, JSON.stringify(msg))
           }
