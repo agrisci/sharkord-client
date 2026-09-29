@@ -232,7 +232,11 @@ and the GL read-back pinned a CPU core.
 - 2-space indent, no semicolons, single quotes, dense aligned one-liners like the surrounding
   code. `picker.html`'s inline script is ES5 (`var`, `function`) — match it there.
 - Short comments that explain *why* (platform quirks, Electron/Chromium behaviour), not what.
-- Log through `log()` with a `[tag]` prefix (`[venmic]`, `[load]`, `[check]`, `[gpu]`).
+- Log through `log()` with a `[tag]` prefix (`[venmic]`, `[load]`, `[check]`, `[gpu]`). It prints to
+  the console and appends to `userData/logs/main.log` (the previous run in `main.old.log`; each
+  capped at 5 MB, rotated, so never more than two files). Only the primary instance writes;
+  lines logged before the single-instance lock wait in memory. The helper's stderr (probe and
+  shares) is logged line by line as `[helper]`.
 - New dependencies need a real reason; the only runtime dependency is `@vencord/venmic`
   (optional, Linux-only; listed in `asarUnpack` because it's a native module).
 
@@ -310,6 +314,9 @@ There are no automated tests. After a change, check what it touches:
   back (also from the tray) and opens that channel or DM — test from the channel list and from the
   DM list. On Windows (installed build) the toast is labelled Sharkord.
 - **Unreachable page**: stop the server → Retry and Change server both work.
+- **Log files**: launch from the menu (no terminal): `logs/main.log` in the settings folder has the
+  `[flags]`, probe and `[gpu]` lines; a restart moves it to `main.old.log`; a second launch while
+  running leaves both untouched; `GST_DEBUG=9` never leaves more than the two files, each <= 5 MB.
 - **Theme**: switch Sharkord to light, restart with the server down — local pages and the
   picker should be light too.
 - **Screen share picker**: on X11 (source grid) and Wayland (portal, then audio step); cancel
@@ -319,8 +326,8 @@ There are no automated tests. After a change, check what it touches:
 - **Share audio (Windows)**: "Stream With Audio" loopback.
 - **Native screen share (Windows, AMD)**: turn it on in Settings → Desktop Client (or the tray). Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
-  within a second, and Sharkord's stats show `GPU (Native: AMF, amf…)`. The `[native-share] sent …` lines (DevTools console, and the app's log
-  as `[page] [native-share] …`) should keep `lost`/`resync` near zero. A window share, VP8, or
+  within a second, and Sharkord's stats show `GPU (Native: AMF, amf…)`. The `[native-share] sent …` lines (DevTools console, and the app's log,
+  `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero. A window share, VP8, or
   the setting off must behave exactly as before.
 - **Native screen share (Linux Wayland, VA-API)**: the switch is usable only when the startup
   probe passes (`[native-share] probe` in the log); otherwise it's greyed out with the reason, and

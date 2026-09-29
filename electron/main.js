@@ -5,12 +5,47 @@ const {
   app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, net, shell, desktopCapturer, session,
   screen, MessageChannelMain, dialog, powerMonitor,
 } = require('electron')
-const { spawn, execFile } = require('child_process')
+const { spawn } = require('child_process')
 const path = require('path')
 const fs   = require('fs')
 const os   = require('os')
 
-const log = (...a) => console.log(new Date().toISOString().slice(11,23), '|', ...a)
+const log = (...a) => {
+  const line = [new Date().toISOString().slice(11,23), '|', ...a]
+  console.log(...line)
+  writeLog(require('util').format(...line).slice(0, 65536) + '\n')
+}
+// Also to userData/logs/main.log, for launches with no terminal (menu, tray, at login). Bounded:
+// main.log and the previous one (main.old.log), LOG_MAX each; only the primary instance writes
+// (a second launch would rotate the running app's log). Lines before openLog wait in memory.
+const LOG_MAX  = 5 * 1024 * 1024
+const logDir   = path.join(app.getPath('userData'), 'logs'), logFile = path.join(logDir, 'main.log')
+let logState   = 'pending', logPending = [], logBytes = 0
+const rotateLog = () => { try { fs.renameSync(logFile, path.join(logDir, 'main.old.log')) } catch {} logBytes = 0 }
+function writeLog (line) {
+  if (logState === 'pending') return logPending.push(line)
+  if (logState !== 'on') return
+  const bytes = Buffer.byteLength(line)
+  try {
+    if (logBytes + bytes > LOG_MAX) rotateLog()
+    fs.appendFileSync(logFile, line); logBytes += bytes
+  } catch { logState = 'off' }   // a full disk or no permission: the console still has it
+}
+function openLog (primary) {
+  const pending = logPending; logPending = []
+  logState = 'off'
+  if (!primary) return
+  try { fs.mkdirSync(logDir, { recursive: true }); rotateLog(); logState = 'on' } catch { return }
+  pending.forEach(writeLog)
+  log('[log]', logFile)
+}
+// A child's stderr into the log, a line at a time (the helper's GStreamer and driver messages)
+function logLines (stream, tag) {
+  let rest = ''
+  stream.setEncoding('utf8')
+  stream.on('data', d => { const lines = (rest + d).split(/\r?\n/); rest = lines.pop(); lines.forEach(l => l && log(tag, l)) })
+  stream.on('end', () => { if (rest) log(tag, rest) })
+}
 
 // ── Settings ──────────────────────────────────────────────────────────────
 const settingsPath     = path.join(app.getPath('userData'), 'settings.json')
@@ -313,11 +348,22 @@ function helperEnv () {
 function probeNativeShare () {
   const exe = nativeShareExe()
   if (!exe || (process.platform === 'linux' && !isWayland)) return
-  execFile(exe, ['--check'], { timeout: 30000, windowsHide: true, env: helperEnv() }, (err, stdout) => {
-    try { _nativeProbe = JSON.parse(stdout) } catch { _nativeProbe = { error: err?.message || 'no answer' } }
+  // spawn, not execFile: its stderr goes to the log as it comes (execFile buffers it and kills
+  // the helper past 1 MB, which a chatty driver or GST_DEBUG reaches)
+  const proc = spawn(exe, ['--check'], { windowsHide: true, env: helperEnv() })
+  let stdout = '', finished = false
+  proc.stdout.on('data', d => { stdout += d })
+  logLines(proc.stderr, '[helper]')
+  const timer = setTimeout(() => proc.kill(), 30000)
+  const done = why => {
+    if (finished) return
+    finished = true; clearTimeout(timer)
+    try { _nativeProbe = JSON.parse(stdout) } catch { _nativeProbe = { error: why || 'no answer' } }
     log('[native-share] probe', stdout.trim() || _nativeProbe.error)
     updateTrayMenu()
-  })
+  }
+  proc.on('close', (code, signal) => done(signal ? 'killed (' + signal + ')' : code ? 'exit ' + code : null))
+  proc.on('error', err => done(err.message))
 }
 
 // Windows: only whole screens, the helper captures monitors. Linux goes native through
@@ -342,7 +388,8 @@ function stopNativeShare () {
 // 'cancelled', or 'error' (also when it exits or is stopped first).
 function spawnHelper () {
   stopNativeShare()
-  const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: helperEnv() })
+  const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: helperEnv() })
+  logLines(proc.stderr, '[helper]')
   const { port1: port, port2 } = new MessageChannelMain()
   let settle
   const ready = new Promise(resolve => { settle = resolve })
@@ -690,6 +737,7 @@ function updateTrayMenu () {
 // ── App startup ───────────────────────────────────────────────────────────
 // One instance only: a second launch (or autostart) brings the existing window back
 const primaryInstance = app.requestSingleInstanceLock()
+openLog(primaryInstance)
 if (!primaryInstance) app.quit()
 app.on('second-instance', showWindow)
 
