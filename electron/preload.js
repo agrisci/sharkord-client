@@ -461,19 +461,28 @@ function installNativeShare (workerSource, helperPicks) {
   }
   // Stats describe the helper's encode, not the placeholder's: Sharkord's stats panel would
   // otherwise show Chromium's software encoder at 320x180. Frame rate and bytes stay Chromium's
-  // own counts -- they are what really goes out.
-  const rewrite = report => {
-    const shares = [...bySender.values()].filter(s => s.encoder && !s.fell && !s.stopped)
+  // own counts -- they are what really goes out. Until the helper has started, "Native: starting"
+  // (not the placeholder's OpenH264); after a fallback, Chromium's own encoder again.
+  // "Native: VAAPI, vah264enc" tells the helper apart from Chromium's encoders, and the API name is
+  // one Sharkord's stats match to label it GPU (vah264enc alone shows as Unknown).
+  const nativeLabel = ({ name }) => `Native: ${/^va/.test(name) ? 'VAAPI' : /^amf/.test(name) ? 'AMF' : 'hardware'}, ${name}`
+  const rewrite = (report, sender) => {
+    // Through the sender its outbound-rtp is known before the first stats tick records its id
+    const own = sender && bySender.get(sender)
+    if (own) report.forEach((x, id) => { if (x.type === 'outbound-rtp') own.outIds.add(id) })
+    const shares = [...bySender.values()].filter(s => !s.fell && !s.stopped)
     if (!shares.length) return report
     const out = new Map()
     report.forEach((x, id) => {
       const s = x.type === 'outbound-rtp' && shares.find(s => s.outIds.has(id))
-      out.set(id, s ? { ...x, encoderImplementation: `sharkord-share (${s.encoder.name})`, powerEfficientEncoder: true,
-        frameWidth: s.encoder.width ?? x.frameWidth, frameHeight: s.encoder.height ?? x.frameHeight } : x)
+      if (!s) return out.set(id, x)
+      out.set(id, !s.encoder ? { ...x, encoderImplementation: 'Native: starting' }
+        : { ...x, encoderImplementation: nativeLabel(s.encoder), powerEfficientEncoder: true,
+            frameWidth: s.encoder.width ?? x.frameWidth, frameHeight: s.encoder.height ?? x.frameHeight })
     })
     return out
   }
-  RTCRtpSender.prototype.getStats = async function () { return rewrite(await senderGetStats.call(this)) }
+  RTCRtpSender.prototype.getStats = async function () { return rewrite(await senderGetStats.call(this), this) }
   PC.getStats = async function (...args) { return rewrite(await pcGetStats.apply(this, args)) }
 
   PC.addTransceiver = function (trackOrKind, init) {
