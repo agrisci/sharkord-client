@@ -35,7 +35,7 @@ Things best fixed in Sharkord itself; the client can only work around them.
 
 Windows window shares, VP8/VP9/auto and simulcast, Linux on X11, the native share turned off or
 failed, and every GPU the helper doesn't support go through Chromium's own capture and encoders. On Windows we change four Chromium
-features for that path (`electron/main.js`, Chromium flags section). Checked against Chromium 152:
+features for that path (Linux: see below the table) (`electron/main.js`, Chromium flags section). Checked against Chromium 152:
 all are experimental, none can be scoped per vendor or codec (no feature parameters), and a future
 Electron can rename or drop them without any error.
 
@@ -46,10 +46,22 @@ Electron can rename or drop them without any error.
 | `enable-features=PlatformH264CbpEncoding` | Off on Windows ("rolled out later with corresponding ISV") | Hardware for the Constrained Baseline H.264 (`42e01f`) Sharkord negotiates | Encoder errors fall back to software (`RTCVideoEncoder::NotifyErrorStatus`); a driver producing a bad stream wouldn't. **NVIDIA is always skipped for Constrained Baseline** (crbug 1088650), so NVIDIA H.264 on this path is CPU regardless. | Medium-low |
 | `enable-features=WebRtcAV1HWEncode` | Off on Windows | Hardware AV1 | Chromium's vendor blocklists still apply (Intel's hybrid AV1 encoder is skipped); AV1 drivers are the youngest. | Medium-low |
 
+On Linux (checked against Chromium 152's source, on a Cezanne iGPU with an RTX 3050 on nouveau,
+KDE Wayland) we used to set seven switches; one is left, and only with *Hardware encoding for other
+shares* on (off by default):
+
+| Linux switch | Chromium 152 default | Now | Why |
+|---|---|---|---|
+| `enable-features=AcceleratedVideoEncoder` | Off | **Opt-in** | VA-API encoding for Chromium's path. A driver can open the encoder and still produce a stream viewers can't play (infinite loading or garbled, Vesktop #1004 on Mesa 24.3 / RX 6600), with no fallback; Vesktop ships it off too. The helper checks its own encoder at startup. |
+| `AcceleratedVideoDecodeLinuxGL`, `AcceleratedVideoDecodeLinuxZeroCopyGL` | On | Dropped | Already the default. |
+| `VaapiIgnoreDriverChecks` | Off | Dropped | Only read when Chromium renders with Vulkan, which Wayland doesn't allow (GL through ANGLE instead). |
+| `ignore-gpu-blocklist` | -- | Dropped | Changed nothing on current Mesa AMD/Intel; overrode every entry for broken setups (nouveau, software GL, VMs, old drivers) and turned on WebGPU through Vulkan (the "not compatible with Vulkan" error at startup). |
+| `enable-gpu-rasterization`, `enable-zero-copy` | On / off | Dropped | Page drawing only; forcing them bypassed the blocklist. |
+
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 88 | P0 | Stop capping every GPU at 1080p | 📋 | Keep Chromium's default everywhere except where it hurts: disable `ExpandMediaFoundationEncodingResolutions` only when an AMD GPU is present. Detect the vendor before `ready` (Electron has no GPU info yet): `%SystemRoot%\System32\reg.exe query HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318} /s /v MatchingDeviceId`, match `PCI\VEN_1002` (AMD), `10DE` (NVIDIA), `8086` (Intel); ~70 ms, `windowsHide`, 2 s timeout, try/catch → today's behaviour on failure. Only `PCI\` IDs count (skips virtual adapters); log the result. `wmic` is gone on 24H2/25H2 and PowerShell CIM takes ~1.3 s. AMD whole-screen shares use the helper, so AMD only keeps the cap for window shares and with the helper off. Covers #54. |
-| 89 | P0 | One merged, logged feature list + kill switch | 📋 | Like Vesktop (`src/main/main.ts`): read any `enable-features`/`disable-features` passed on the command line, merge ours, append each once, log the final lists. A setting "Use Chromium's default video encoding" (takes effect after a restart) that skips all four flags, plus an environment variable for support. The one place to turn it all off when a driver misbehaves. |
+| 89 | P0 | One merged, logged feature list + kill switch | ✅ | Like Vesktop: the command line's `enable-features`/`disable-features` are merged with ours (a disabled one wins), appended once and logged (`[flags]`). The setting *Hardware encoding for other shares* (`chromiumHwEncode`, next launch; on on Windows, off on Linux) skips all our flags, and `SHARKORD_CHROMIUM_DEFAULTS=1` forces it off for support. |
 | 90 | P1 | Texture capture only where it's safe | 📋 | Enable `WebRtcAllowWgcUsingTexture` only with a single hardware GPU (count the `PCI\VEN_` adapters from #88's probe); off on hybrid and multi-GPU machines, where an adapter change breaks capture for good. Revisit when Chromium adds its readback fallback. |
 | 91 | P1 | Re-verify the flags on every Electron upgrade | 📋 | Release-checklist step: `chrome://gpu`, the sender's `encoderImplementation`, and 4K capture fps on the Chromium path. Log the applied features and, per share, the encoder Chromium really used (feeds #34). |
 | 92 | P1 | NVIDIA H.264 on the Chromium path | 📋 | Chromium never uses NVIDIA's hardware encoder for Constrained Baseline, which is what Sharkord negotiates; High profile works. Fixed by #79 / #48; until then NVIDIA shares H.264 on the CPU (AV1 on RTX 40+ is hardware). |

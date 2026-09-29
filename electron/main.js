@@ -26,36 +26,52 @@ const saveUserSettings = s  => {
 const savedServerUrl   = () => loadUserSettings().serverUrl?.replace(/\/+$/, '') || ''
 
 // ── Chromium flags ────────────────────────────────────────────────────────
-// Hardware video encode/decode for WebRTC screen share (VA-API on Linux, Media
-// Foundation on Windows). Only one enable-features switch may be set — a
-// second call overrides the first.
-if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('enable-features', [
-    'AcceleratedVideoEncoder',               // VA-API encode (was VaapiVideoEncoder before Chromium 131)
-    'AcceleratedVideoDecodeLinuxGL',
-    'AcceleratedVideoDecodeLinuxZeroCopyGL',
-    'VaapiIgnoreDriverChecks',               // AMD radeonsi isn't on Chromium's driver allow list
-  ].join(','))
-  app.commandLine.appendSwitch('ignore-gpu-blocklist')
-  app.commandLine.appendSwitch('enable-gpu-rasterization')
-  app.commandLine.appendSwitch('enable-zero-copy')
-} else if (process.platform === 'win32') {
-  app.commandLine.appendSwitch('enable-features', [
-    // Media Foundation encodes Baseline H.264 in hardware, but WebRTC's usual
-    // Constrained Baseline (42e01f, what Sharkord negotiates) falls back to
-    // OpenH264 unless this is on (off by default in Chromium, pending rollout)
-    'PlatformH264CbpEncoding',
-    // Screen capture (WGC on Win11 24H2+) copies every frame to CPU memory and
-    // is throttled to half the CPU time; at 4K that caps it near 36 fps. GPU
-    // textures keep it at 60.
-    'WebRtcAllowWgcUsingTexture',
-    // AV1 hardware encoding for WebRTC (libaom otherwise)
-    'WebRtcAV1HWEncode',
-  ].join(','))
-  // Chromium asks each encoder for its max resolutions and drops the ones that
-  // don't answer, like AMD's AV1 encoder. Without the query every hardware
-  // encoder is limited to 1080p (above that WebRTC falls back to software).
-  app.commandLine.appendSwitch('disable-features', 'ExpandMediaFoundationEncodingResolutions')
+// Hardware video encoding for Chromium's own share (shares the native helper doesn't take), behind
+// the chromiumHwEncode setting: on by default on Windows, off on Linux, where the helper is the
+// hardware path and Chromium's VA-API encoder has no fallback for a driver that opens but encodes
+// garbage (viewers load forever, Vesktop #1004). SHARKORD_CHROMIUM_DEFAULTS=1 turns it off.
+// Nothing else is overridden: decode is on by default, and the GPU blocklist stays in force (it
+// lists nouveau, software GL and VMs).
+// The saved choice (what the settings show) takes effect at the next launch
+const chromiumHwEncodeSetting = () => loadUserSettings().chromiumHwEncode ?? process.platform === 'win32'
+const chromiumHwEncodeSource  = () => process.env.SHARKORD_CHROMIUM_DEFAULTS === '1' ? 'env'
+  : typeof loadUserSettings().chromiumHwEncode === 'boolean' ? 'setting' : 'default'
+const chromiumHwEncode        = () => chromiumHwEncodeSource() !== 'env' && chromiumHwEncodeSetting()
+{
+  const enable = [], disable = []
+  if (chromiumHwEncode() && process.platform === 'linux') {
+    enable.push('AcceleratedVideoEncoder')   // VA-API encode (was VaapiVideoEncoder before Chromium 131)
+  } else if (chromiumHwEncode() && process.platform === 'win32') {
+    enable.push(
+      // Media Foundation encodes Baseline H.264 in hardware, but WebRTC's usual
+      // Constrained Baseline (42e01f, what Sharkord negotiates) falls back to
+      // OpenH264 unless this is on (off by default in Chromium, pending rollout)
+      'PlatformH264CbpEncoding',
+      // Screen capture (WGC on Win11 24H2+) copies every frame to CPU memory and
+      // is throttled to half the CPU time; at 4K that caps it near 36 fps. GPU
+      // textures keep it at 60.
+      'WebRtcAllowWgcUsingTexture',
+      // AV1 hardware encoding for WebRTC (libaom otherwise)
+      'WebRtcAV1HWEncode',
+    )
+    // Chromium asks each encoder for its max resolutions and drops the ones that
+    // don't answer, like AMD's AV1 encoder. Without the query every hardware
+    // encoder is limited to 1080p (above that WebRTC falls back to software).
+    disable.push('ExpandMediaFoundationEncodingResolutions')
+  }
+  // Merged with the command line's, which a second appendSwitch would override; a feature
+  // disabled there wins, so --disable-features=... always works for support
+  const merge = (name, ours) => {
+    const all = new Set([...app.commandLine.getSwitchValue(name).split(','), ...ours].filter(Boolean))
+    app.commandLine.removeSwitch(name)
+    return all
+  }
+  const disabled = merge('disable-features', disable)
+  const enabled = [...merge('enable-features', enable)].filter(f => !disabled.has(f))
+  if (enabled.length) app.commandLine.appendSwitch('enable-features', enabled.join(','))
+  if (disabled.size) app.commandLine.appendSwitch('disable-features', [...disabled].join(','))
+  log('[flags] hardware encoding for Chromium\'s share:', chromiumHwEncode() ? 'on' : 'off', `(${chromiumHwEncodeSource()})`)
+  log('[flags] enable-features:', enabled.join(',') || '-', '| disable-features:', [...disabled].join(',') || '-')
 }
 
 // ── venmic (Linux per-app share audio via PipeWire) ──────────────────────
@@ -627,7 +643,7 @@ function setOpenAtLogin (on) {
 // switch; nativeShareNote says why (or which codecs it covers)
 const desktopSettings = () => ({
   openAtLogin:openAtLogin(), startMinimized:!!loadUserSettings().startMinimized,
-  minimizeToTray:!!loadUserSettings().minimizeToTray,
+  minimizeToTray:!!loadUserSettings().minimizeToTray, chromiumHwEncode:chromiumHwEncodeSetting(),
   ...(nativeShareSupported() ? { nativeShare:nativeShareOn() } : {}),
   ...(nativeShareNote() ? { nativeShareNote:nativeShareNote() } : {}),
   ...(nativeShareCodecs() ? { nativeShareCodecs:nativeShareCodecs() } : {}),
@@ -638,6 +654,7 @@ function setDesktopSettings (s) {
     if (typeof s?.startMinimized === 'boolean') saveUserSettings({ ...loadUserSettings(), startMinimized:s.startMinimized })
     if (typeof s?.minimizeToTray === 'boolean') saveUserSettings({ ...loadUserSettings(), minimizeToTray:s.minimizeToTray })
     if (typeof s?.nativeShare === 'boolean') saveUserSettings({ ...loadUserSettings(), nativeShare:s.nativeShare })
+    if (typeof s?.chromiumHwEncode === 'boolean') saveUserSettings({ ...loadUserSettings(), chromiumHwEncode:s.chromiumHwEncode })
   } catch (e) { log('[desktop] settings error:', e.message) }
   updateTrayMenu()
   return desktopSettings()

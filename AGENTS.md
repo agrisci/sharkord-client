@@ -42,7 +42,10 @@ belongs to rather than adding files.
   off; usable only when the helper's `--check` probe at startup opens an encoder -- AMF on
   Windows, VA-API on Linux Wayland -- and a share goes native only with a codec it opened; where it
   can't run, its switch is greyed out and `nativeShareNote` says why, and `nativeShareCodecs` lists
-  what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross). *Open at login* is not
+  what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross),
+  `chromiumHwEncode` (hardware encoding for shares on Chromium's own path, i.e. the Chromium flags
+  below; default on on Windows, off on Linux; read once at launch, `SHARKORD_CHROMIUM_DEFAULTS=1`
+  forces it off). *Open at login* is not
   stored: the OS login item / `~/.config/autostart/sharkord.desktop` is the source of truth.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
@@ -206,8 +209,11 @@ and the GL read-back pinned a CPU core.
   menu item / shortcut) for anything injected.
 - Every window keeps `contextIsolation: true` and `nodeIntegration: false`. Expose new
   capabilities as small named functions on the existing bridges, not raw `ipcRenderer`.
-- Only **one** `enable-features` switch may be set (a second call overrides the first) — add
-  to the existing list in `main.js`.
+- Chromium features go in the lists in `main.js`'s Chromium flags section, which merges them with
+  the command line's and appends one `enable-features` / `disable-features` each (a second
+  `appendSwitch` would override the first); never call `appendSwitch` for features elsewhere. The
+  `[flags]` log lines show what was applied. Don't add GPU blocklist overrides
+  (`ignore-gpu-blocklist`, `enable-gpu-rasterization`, ...): the blocklist covers broken drivers.
 - Local pages look like Sharkord: reuse `theme.css` classes, and when you need a new style or
   icon, copy it from `upstream/sharkord` (tokens, component classes, lucide icons) instead of
   inventing one. Support both `dark` and `light`.
@@ -262,7 +268,8 @@ commit subjects, so keep them readable) and merges the release commit back into 
 Hardware encoding tip for testing screen share: pick **H264** and turn **Simulcast off** in
 Sharkord's Devices settings (with simulcast on, and allowed by the server, Sharkord shares VP8,
 which most GPUs can't encode; the native share needs it off too, unless the server disables it). Check
-`chrome://gpu` or the `[gpu]` log lines for VA-API status. To confirm hardware encoding, look at
+`chrome://gpu` or the `[gpu]` log lines for VA-API status (on Linux Chromium's path encodes on the
+GPU only with *Hardware encoding for other shares* on, after a restart). To confirm hardware encoding, look at
 the sender's `outbound-rtp` `encoderImplementation` (e.g. `MediaFoundationVideoEncodeAccelerator`
 on Windows, not `OpenH264`). On Windows it relies on `PlatformH264CbpEncoding`: without it
 Chromium encodes Constrained Baseline H.264 (`42e01f`, what Sharkord negotiates) in software,
@@ -273,7 +280,8 @@ it can't query its resolutions. That feature is on by default in Chromium; turni
 every hardware encoder, on every GPU, at 1080p, so 1440p/4K shares on Chromium's path fall back to
 software (`OpenH264` / `libaom`). NVIDIA never gets hardware Constrained Baseline H.264 in Chromium
 (crbug 1088650), and texture capture fails for good if the GPU adapter changes (hybrid laptops).
-All four flags are experimental: see ROADMAP.md #88-#91 before relying on or changing them.
+All four flags are experimental: see ROADMAP.md #88-#91 before relying on or changing them. On Linux
+the only flag is `AcceleratedVideoEncoder`, off by default (see ROADMAP.md, Linux flags).
 
 ## Manual test checklist
 
@@ -292,6 +300,10 @@ There are no automated tests. After a change, check what it touches:
   off, and with both on a login launch (`--hidden`) starts in the tray; *Minimize
   to tray* makes X hide the window, tray click reopens it, tray **Quit** exits. The tray menu
   applies the same toggles at once. Launching again focuses the running window.
+  *Hardware encoding for other shares* is saved at once but applies at the next launch: the
+  `[flags]` lines show it (`on|off (setting|default|env)`) and the features, and with it on a
+  Chromium-path share's encoder is the GPU's (not `OpenH264`); a `--disable-features=...` on the
+  command line removes a feature from the list.
 - **Notifications**: enable them in Sharkord → Settings → Notifications; a message from another
   account while the channel isn't open (or the window is hidden) shows a native notification,
   flashes the taskbar until focused (X11; Wayland ignores it), and clicking it brings the window
