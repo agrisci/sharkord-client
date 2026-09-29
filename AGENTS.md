@@ -106,14 +106,16 @@ helper is opt-in per share, so nothing it can't handle ever reaches it.
 opens each codec's encoder (AMF on Windows, VA-API on Linux) and reports `h264`/`av1`. No codec →
 the switch is greyed out, with the reason under it. When a share starts, the page reads
 `screenCodec` and `simulcastEnabled` from Sharkord's Devices settings (`sharkord-devices-settings`
-in its localStorage -- the one place the client reads Sharkord's state; a renamed key only turns
-the helper off):
+in its localStorage), and whether the server allows simulcast: `webRtcSimulcastEnabled`, one of
+the server's public settings, read from Sharkord's own WebSocket messages as they arrive (never
+changed; until seen, the user's switch alone decides). These are the only places the client reads
+Sharkord's state; a renamed key or field only turns the helper off:
 
 | Sharkord's Devices settings | Encoder opened at startup | Share |
 |---|---|---|
-| H.264 or AV1, Simulcast off | yes | **helper** |
-| H.264 or AV1, Simulcast off | no (e.g. AV1 on a GPU without AV1 encoding) | Chromium |
-| Simulcast on | -- (Sharkord shares VP8 when the server allows simulcast, which the page can't see) | Chromium |
+| H.264 or AV1, no simulcast (switch off, or not allowed by the server) | yes | **helper** |
+| H.264 or AV1, no simulcast | no (e.g. AV1 on a GPU without AV1 encoding) | Chromium |
+| Simulcast on, and allowed by the server | -- (Sharkord shares VP8) | Chromium |
 | VP8, VP9 | -- (the helper never encodes them) | Chromium |
 | `auto`, missing, unreadable | -- (codec not known in advance) | Chromium |
 
@@ -259,7 +261,7 @@ commit subjects, so keep them readable) and merges the release commit back into 
 
 Hardware encoding tip for testing screen share: pick **H264** and turn **Simulcast off** in
 Sharkord's Devices settings (with simulcast on, and allowed by the server, Sharkord shares VP8,
-which most GPUs can't encode; the native share needs it off too). Check
+which most GPUs can't encode; the native share needs it off too, unless the server disables it). Check
 `chrome://gpu` or the `[gpu]` log lines for VA-API status. To confirm hardware encoding, look at
 the sender's `outbound-rtp` `encoderImplementation` (e.g. `MediaFoundationVideoEncodeAccelerator`
 on Windows, not `OpenH264`). On Windows it relies on `PlatformH264CbpEncoding`: without it
@@ -314,8 +316,8 @@ There are no automated tests. After a change, check what it touches:
   audio step, the local preview moves, a viewer gets 60 fps, stats show
   `sharkord-share (vah264enc)`. Cancelling the portal dialog or the audio step cancels the share
   and the desktop's sharing indicator goes away; stopping the share ends the helper.
-- **Codec routing (both platforms)**: VP8, VP9, `auto` or Simulcast on in Sharkord's Devices
-  settings, and a codec the probe didn't open (AV1 on a GPU without AV1 encoding), are Chromium's share: its
+- **Codec routing (both platforms)**: VP8, VP9, `auto`, or Simulcast on (on a server that allows
+  it) in Sharkord's Devices settings, and a codec the probe didn't open (AV1 on a GPU without AV1 encoding), are Chromium's share: its
   picker, a moving preview, no `sharkord-share` process and Chromium's encoder in the stats.
 
 ## Commits and privacy

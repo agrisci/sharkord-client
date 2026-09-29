@@ -171,15 +171,32 @@ function installNativeShare (workerSource, helperPicks) {
     else { e.ports[0].postMessage({ cmd: 'stop' }); e.ports[0].close() }   // its share is gone
   })
 
+  // Whether the server allows simulcast: one of its public settings, which reach the page only over
+  // Sharkord's WebSocket (on joining, and again when an admin changes them). Read from each message
+  // as Sharkord receives it, never changed. null until seen
+  let serverSimulcast = null
+  const WS = window.WebSocket
+  window.WebSocket = class WebSocket extends WS {
+    constructor (...args) {
+      super(...args)
+      this.addEventListener('message', e => {
+        const m = typeof e.data === 'string' && e.data.match(/"webRtcSimulcastEnabled":(true|false)/)
+        if (m && serverSimulcast !== (m[1] === 'true')) { serverSimulcast = m[1] === 'true'; log('server simulcast:', serverSimulcast) }
+      })
+    }
+  }
+
   // The screen codec picked in Sharkord's Devices settings (its localStorage). The helper encodes
   // only H.264 and AV1, and on Linux it has to know before the pick, so it's used only when one of
-  // them is picked explicitly, with Simulcast off: Sharkord shares VP8 whenever simulcast is on
-  // there and the server allows it, which the page can't see. Anything else (VP8, VP9, auto, a
-  // setting it can't read) is Chromium's share from the start, on both platforms.
+  // them is picked explicitly and the share won't be simulcast: Sharkord shares VP8 when the server
+  // allows simulcast and the user's switch is on (while the server's setting hasn't been seen, the
+  // switch alone decides). Anything else (VP8, VP9, auto, a setting it can't read) is Chromium's
+  // share from the start, on both platforms.
   const nativeCodec = () => {
     try {
       const devices = JSON.parse(localStorage.getItem('sharkord-devices-settings'))
-      return devices?.simulcastEnabled === false ? CODECS[devices.screenCodec] || null : null
+      const simulcast = serverSimulcast !== false && devices?.simulcastEnabled !== false
+      return simulcast ? null : CODECS[devices?.screenCodec] || null
     } catch { return null }
   }
 
@@ -595,7 +612,7 @@ const DESKTOP_OPTIONS = [
   { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
   { key: 'nativeShare',    label: 'Native screen share (experimental)',
-    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in the Devices tab, with Simulcast off. ' +
+    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
       (process.platform === 'linux' ? 'AMD and Intel GPUs (VA-API), Wayland.' : 'AMD GPUs, whole screens.') + ' Takes effect on the next share.' },
 ]
 
