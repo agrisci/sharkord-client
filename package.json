@@ -1,5 +1,5 @@
 {
-  "name": "sharkord-client",
+  "name": "sharkord",
   "version": "0.1.0",
   "description": "Standalone Sharkord desktop client",
   "author": { "name": "Sharkord Client", "email": "noreply@sharkord.example.com" },

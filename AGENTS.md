@@ -34,7 +34,8 @@ belongs to rather than adding files.
 
 ## How the pieces talk
 
-- **Settings**: `userData/settings.json` via `loadUserSettings` / `saveUserSettings`. Keys:
+- **Settings**: `userData/settings.json` (`~/.config/sharkord`, `%APPDATA%\sharkord`; moved from
+  `sharkord-client` on first start, the name of earlier builds) via `loadUserSettings` / `saveUserSettings`. Keys:
   `serverUrl` (saved without a trailing slash — use `savedServerUrl()`), `theme`
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `startMinimized` (a login launch stays in the
