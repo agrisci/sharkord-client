@@ -586,6 +586,9 @@ const svg = markup => new DOMParser().parseFromString(markup, 'image/svg+xml').d
 const MONITOR_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-monitor h-4 w-4 shrink-0"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>'
 const DESKTOP_OPTIONS = [
   { key: 'openAtLogin',    label: 'Open Sharkord when your computer starts up' },
+  // Only for launches at login: greyed out while Open at login is off (its value is kept)
+  { key: 'startMinimized', label: 'Start minimized', requires: 'openAtLogin',
+    description: 'When Sharkord opens at login, it starts in the system tray instead of showing its window.' },
   { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
   { key: 'nativeShare',    label: 'Native screen share (experimental)',
@@ -758,6 +761,9 @@ function buildDesktopPanel (mainClass, initial) {
   const switches = {}
   const render = () => {
     for (const [key, sw] of Object.entries(switches)) {
+      const requires = DESKTOP_OPTIONS.find(o => o.key === key)?.requires
+      sw.disabled = !(key in initial) || (!!requires && !draft[requires])
+      sw.closest(`[${DESKTOP}=row]`)?.classList.toggle('opacity-50', !!requires && !draft[requires])
       const state = draft[key] ? 'checked' : 'unchecked'
       sw.setAttribute('aria-checked', String(!!draft[key]))
       sw.dataset.state = state
@@ -780,6 +786,7 @@ function buildDesktopPanel (mainClass, initial) {
   // without the helper).
   for (const { key, label, description } of DESKTOP_OPTIONS.filter(({ key }) => key in initial || initial[key + 'Note'])) {
     const group = el('div', 'flex flex-col gap-2')
+    group.setAttribute(DESKTOP, 'row')
     const text = el('div', 'flex flex-col')
     text.append(el('label', 'flex items-center gap-2 text-sm leading-none font-medium', label))
     if (description) text.append(el('span', 'text-sm text-muted-foreground', description))
@@ -800,7 +807,6 @@ function buildDesktopPanel (mainClass, initial) {
     const sw = el('button', SWITCH_CLASS)
     sw.type = 'button'
     sw.setAttribute('role', 'switch')
-    sw.disabled = !(key in initial)
     sw.append(el('span', THUMB_CLASS))
     sw.addEventListener('click', () => { draft[key] = !draft[key]; render() })
     switches[key] = sw

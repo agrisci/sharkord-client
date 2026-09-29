@@ -109,7 +109,7 @@ Windows builds aren't code-signed, so SmartScreen may warn on first run (**More 
 | **Share audio** | Linux: per-app or entire-system audio through PipeWire ([venmic](https://github.com/Vencord/venmic)). Windows: system loopback ("Stream With Audio") |
 | **Notifications** | Turn them on in Sharkord's **Settings → Notifications**. The taskbar flashes until you come back, and a click also brings the window back from the tray |
 | **Change server** | Sharkord's **☰** menu → **Change server**, the button on the login screen, `Ctrl+Shift+O`, or the tray menu |
-| **Tray and startup** | In the **Desktop Client** tab of Sharkord's user settings (saved with **Save Changes**, like Sharkord's own tabs), or in the tray menu: **Open at login** (starts minimized in the tray when **Minimize to tray** is on) and **Minimize to tray** (X keeps Sharkord running; quit from the tray, even during a call). Launching Sharkord again brings the running window to the front |
+| **Tray and startup** | In the **Desktop Client** tab of Sharkord's user settings (saved with **Save Changes**, like Sharkord's own tabs), or in the tray menu: **Open at login**, **Start minimized** (a login launch starts in the tray; only with Open at login) and **Minimize to tray** (X keeps Sharkord running; quit from the tray, even during a call). Launching Sharkord again brings the running window to the front |
 | **DevTools** | `Ctrl+Shift+I` |
 
 ---

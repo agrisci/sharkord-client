@@ -482,13 +482,13 @@ function createWindow () {
     e.preventDefault()
     win.hide()
   })
-  // Launched at login: start in the tray, but only if there is a tray option to get back
+  // Launched at login with Start minimized on: start in the tray (only if there is one to get back)
   win.once('ready-to-show', () => {
-    if (!(startHidden && tray && loadUserSettings().minimizeToTray)) win.show()
+    if (!(startHidden && tray && loadUserSettings().startMinimized)) win.show()
     startHidden = false   // only the first window (not one re-created by Change server)
   })
 }
-let startHidden = process.argv.includes('--hidden')
+let startHidden = process.argv.includes('--hidden')   // launched at login (AUTOSTART_ARGS)
 
 function showWindow () {
   if (!win || win.isDestroyed()) return
@@ -591,7 +591,10 @@ function openApp () {
 
 // ── Desktop integration (open at login, tray) ─────────────────────────────
 //   Open at login lives in the OS (login item / autostart file), not in
-//   settings.json, so it stays right if the user removes it there.
+//   settings.json, so it stays right if the user removes it there. Its
+//   --hidden only marks a login launch; Start minimized (settings.json)
+//   decides whether that launch stays in the tray, so the entry never has to
+//   change (and Windows only finds its login item by the same args).
 const AUTOSTART_ARGS = ['--hidden']
 const autostartFile  = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(),'.config'), 'autostart', 'sharkord.desktop')
 
@@ -617,7 +620,8 @@ function setOpenAtLogin (on) {
 // nativeShare is left out where the helper can't run, which hides its tray item and greys out its
 // switch; nativeShareNote says why (or which codecs it covers)
 const desktopSettings = () => ({
-  openAtLogin:openAtLogin(), minimizeToTray:!!loadUserSettings().minimizeToTray,
+  openAtLogin:openAtLogin(), startMinimized:!!loadUserSettings().startMinimized,
+  minimizeToTray:!!loadUserSettings().minimizeToTray,
   ...(nativeShareSupported() ? { nativeShare:nativeShareOn() } : {}),
   ...(nativeShareNote() ? { nativeShareNote:nativeShareNote() } : {}),
   ...(nativeShareCodecs() ? { nativeShareCodecs:nativeShareCodecs() } : {}),
@@ -625,6 +629,7 @@ const desktopSettings = () => ({
 function setDesktopSettings (s) {
   try {
     if (typeof s?.openAtLogin === 'boolean') setOpenAtLogin(s.openAtLogin)
+    if (typeof s?.startMinimized === 'boolean') saveUserSettings({ ...loadUserSettings(), startMinimized:s.startMinimized })
     if (typeof s?.minimizeToTray === 'boolean') saveUserSettings({ ...loadUserSettings(), minimizeToTray:s.minimizeToTray })
     if (typeof s?.nativeShare === 'boolean') saveUserSettings({ ...loadUserSettings(), nativeShare:s.nativeShare })
   } catch (e) { log('[desktop] settings error:', e.message) }
@@ -651,6 +656,7 @@ function updateTrayMenu () {
     { label:'Change Server…', click:changeServer },
     { type:'separator' },
     { label:'Open at login',    type:'checkbox', checked:s.openAtLogin,    click:i => setDesktopSettings({ openAtLogin:i.checked }) },
+    { label:'Start minimized',  type:'checkbox', checked:s.startMinimized, enabled:s.openAtLogin, click:i => setDesktopSettings({ startMinimized:i.checked }) },
     { label:'Minimize to tray', type:'checkbox', checked:s.minimizeToTray, click:i => setDesktopSettings({ minimizeToTray:i.checked }) },
     ...('nativeShare' in s ? [{ label:'Native screen share', type:'checkbox', checked:s.nativeShare, click:i => setDesktopSettings({ nativeShare:i.checked }) }] : []),
     { type:'separator' },
@@ -679,6 +685,9 @@ app.whenReady().then(() => {
 
   session.defaultSession.setDisplayMediaRequestHandler(handleDisplayMediaRequest)
   Menu.setApplicationMenu(null)   // no menu bar; shortcuts live in before-input-event
+  // Starting in the tray at login used to follow Minimize to tray: keep what those users had
+  const saved = loadUserSettings()
+  if (saved.startMinimized === undefined) saveUserSettings({ ...saved, startMinimized: !!saved.minimizeToTray && openAtLogin() })
   createTray()
   probeNativeShare()
   openApp()

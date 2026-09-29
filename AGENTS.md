@@ -37,7 +37,8 @@ belongs to rather than adding files.
 - **Settings**: `userData/settings.json` via `loadUserSettings` / `saveUserSettings`. Keys:
   `serverUrl` (saved without a trailing slash — use `savedServerUrl()`), `theme`
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
-  options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `nativeShare` (default
+  options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `startMinimized` (a login launch stays in the
+  tray; set once from `minimizeToTray` && open at login for older settings), `nativeShare` (default
   off; offered only when the helper's `--check` probe at startup opens an encoder -- AMF on
   Windows, VA-API on Linux Wayland -- and a share goes native only with a codec it opened; where it
   can't run, `nativeShareNote` says why under its greyed-out switch, and `nativeShareCodecs` lists
@@ -64,9 +65,10 @@ belongs to rather than adding files.
   `current`, `reason`) and apply the theme class before first paint.
 - **Tray / no menu bar**: there is no application menu (`Menu.setApplicationMenu(null)`);
   shortcuts are handled in `before-input-event`. The tray menu (Open, Change Server…, Open at
-  login, Minimize to tray, Quit) is the non-DOM fallback. With *Minimize to tray* on, `close`
-  hides the window unless `quitting`. Autostart launches with `--hidden` (starts in the tray,
-  only if *Minimize to tray* is on). A single-instance lock makes a second launch show the window.
+  login, Start minimized, Minimize to tray, Quit) is the non-DOM fallback. With *Minimize to tray*
+  on, `close` hides the window unless `quitting`. Autostart launches with `--hidden`, which only
+  marks a login launch: it starts in the tray when *Start minimized* is on (independent of
+  *Minimize to tray*, like Discord's and Vesktop's). A single-instance lock makes a second launch show the window.
 - **Server check**: `checkServer` fetches `<url>/info` and expects `serverId` and `name`
   strings → `'ok' | 'not-sharkord' | 'unreachable'`. `loadServer` checks before loading —
   navigating to an unreachable URL and then to a local page can leave the window unable to paint.
@@ -273,7 +275,8 @@ There are no automated tests. After a change, check what it touches:
   "You have unsaved changes / Save Changes" bar and apply only on Save. Leaving with unsaved changes
   (another entry, the back button, Escape) asks first; Desktop Client doesn't open while Sharkord's own
   tab has unsaved changes. On a narrow window the drawer closes after picking it.
-  *Open at login* creates/removes the autostart entry; *Minimize
+  *Open at login* creates/removes the autostart entry; *Start minimized* is greyed out while it's
+  off, and with both on a login launch (`--hidden`) starts in the tray; *Minimize
   to tray* makes X hide the window, tray click reopens it, tray **Quit** exits. The tray menu
   applies the same toggles at once. Launching again focuses the running window.
 - **Notifications**: enable them in Sharkord → Settings → Notifications; a message from another
