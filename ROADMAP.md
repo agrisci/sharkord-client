@@ -8,7 +8,7 @@ about never leaving a share broken and being able to debug machines we have neve
 P3 = ideas
 **Status:** ✅ Done · 🚧 In progress · 🧪 Needs testing · 📋 Planned · 💡 Idea · ⛔ Won't do
 **#** is a stable ID for referring to an item in commits and issues, not its rank; new items take
-the next free number (currently 97).
+the next free number (currently 98).
 
 ## Bugs
 
@@ -120,6 +120,7 @@ Electron can rename or drop them without any error.
 | 17 | P2 | Native share on Linux | 🧪 | Wayland + VA-API (`vah264enc`, `vaav1enc`), system GStreamer. The helper owns the only portal dialog; the page decodes its frames for the preview. 60 fps 1080p H.264 on a Renoir iGPU. To test: AV1 (RDNA3+), Intel iHD, GNOME/mutter, 4K, the installed AppImage/deb/rpm. |
 | 96 | P2 | Native share: codec known only from Sharkord's settings | 📋 | The helper is used only when H.264/AV1 is picked, read from Sharkord's localStorage before the share (on Linux the helper must pick before the codec is negotiated). A renamed key silently turns the helper off; `auto` never uses it. A signal from the server or the SDP would remove the dependency. |
 | 18 | P2 | NVIDIA and X11 on Linux | 💡 | No VA-API encode on NVIDIA (NVENC instead); X11 sessions use the source grid. |
+| 97 | P3 | Picture-in-picture window shows the Wayland icon | 📋 | Chromium's video PiP window (`VideoOverlayWindowViews`) sets no Wayland app ID (no `WM_CLASS` on X11), so KWin can't match it to `sharkord-client.desktop`: it borrows the main window's icon while that is shown and falls back to the generic Wayland icon once it hides to the tray. Upstream: [brave-browser#57390](https://github.com/brave/brave-browser/issues/57390), fixed in Brave by patching Chromium ([brave-core#38210](https://github.com/brave/brave-core/pull/38210)); needs the same in Electron. Workaround if it matters: our own PiP window behind Sharkord's `requestPictureInPicture`. |
 | 19 | P3 | macOS | 💡 | Not built (`package.json` has no mac target). ScreenCaptureKit + VideoToolbox if there is demand. |
 
 ## Diagnostics and support
