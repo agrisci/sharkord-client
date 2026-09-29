@@ -327,7 +327,8 @@ There are no automated tests. After a change, check what it touches:
 - **Native screen share (Windows, AMD)**: turn it on in Settings → Desktop Client (or the tray). Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `GPU (Native: AMF, amf…)`. The `[native-share] sent …` lines (DevTools console, and the app's log,
-  `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero. A window share, VP8, or
+  `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero
+  (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for). A window share, VP8, or
   the setting off must behave exactly as before.
 - **Native screen share (Linux Wayland, VA-API)**: the switch is usable only when the startup
   probe passes (`[native-share] probe` in the log); otherwise it's greyed out with the reason, and

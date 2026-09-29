@@ -285,7 +285,7 @@ function installNativeShare (workerSource, helperPicks) {
     const requestKeyframe = () => {
       if (s.keyTimer) return
       const wait = Math.max(0, (s.keyAt || 0) + 1000 - performance.now())
-      s.keyTimer = setTimeout(() => { s.keyTimer = null; s.keyAt = performance.now(); s.port?.postMessage({ cmd: 'keyframe' }) }, wait)
+      s.keyTimer = setTimeout(() => { s.keyTimer = null; s.keyAt = performance.now(); s.keyReqs = (s.keyReqs || 0) + 1; s.port?.postMessage({ cmd: 'keyframe' }) }, wait)
     }
     const closeHelper = () => {
       clearInterval(s.boot)
@@ -456,7 +456,7 @@ function installNativeShare (workerSource, helperPicks) {
           s.kbps = aim; s.kbpsAt = performance.now(); s.port.postMessage({ cmd: 'bitrate', kbps: aim })
         }
       }
-      if (o) log(`sent ${o.framesPerSecond ?? 0} fps, estimate ${bwe} kbps, target ${Math.round((o.targetBitrate || 0) / 1000)} kbps, asked ${s.kbps} kbps (cap ${s.cap}), pacer ${pacerMs} ms, rtt ${Math.round((r?.roundTripTime ?? 0) * 1000)} ms, jitter ${Math.round((r?.jitter ?? 0) * 1000)} ms, lost ${r?.packetsLost ?? 0} (${Math.round((r?.fractionLost ?? 0) * 1000) / 10}%), nack ${o?.nackCount ?? 0}, retx ${o?.retransmittedPacketsSent ?? 0}, helper ${JSON.stringify(s.helper)}, worker ${JSON.stringify(s.stats)}`)
+      if (o) log(`sent ${o.framesPerSecond ?? 0} fps, estimate ${bwe} kbps, target ${Math.round((o.targetBitrate || 0) / 1000)} kbps, asked ${s.kbps} kbps (cap ${s.cap}), pacer ${pacerMs} ms, rtt ${Math.round((r?.roundTripTime ?? 0) * 1000)} ms, jitter ${Math.round((r?.jitter ?? 0) * 1000)} ms, lost ${r?.packetsLost ?? 0} (${Math.round((r?.fractionLost ?? 0) * 1000) / 10}%), nack ${o?.nackCount ?? 0}, retx ${o?.retransmittedPacketsSent ?? 0}, pli ${o.pliCount ?? 0}, fir ${o.firCount ?? 0}, keys ${o.keyFramesEncoded ?? 0}, keyreq ${s.keyReqs || 0}, helper ${JSON.stringify(s.helper)}, worker ${JSON.stringify(s.stats)}`)
     }, 2000)
   }
   // Stats describe the helper's encode, not the placeholder's: Sharkord's stats panel would
