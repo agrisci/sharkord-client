@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 const {
   app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, net, shell, desktopCapturer, session,
-  screen, MessageChannelMain, dialog,
+  screen, MessageChannelMain, dialog, powerMonitor,
 } = require('electron')
 const { spawn, execFile } = require('child_process')
 const path = require('path')
@@ -427,6 +427,11 @@ ipcMain.on('native-share-start', (e, opts) => {
 // Page → a share ended before native-share-start (Linux: the helper from the pick still holds
 // the portal session, and the desktop's "sharing" indicator)
 ipcMain.on('native-share-stop', e => { if (e.sender === win?.webContents) stopNativeShare() })
+// A suspend loses the capture (the portal's PipeWire stream doesn't come back on resume): the
+// page still ends the share, but doesn't count it as the helper failing
+function watchSuspend () {
+  powerMonitor.on('suspend', () => _nativeShare?.port.postMessage({ type: 'event', event: 'suspend' }))
+}
 
 // ── Main window ───────────────────────────────────────────────────────────
 const APP_ICON = path.join(__dirname,'..','build', process.platform==='win32'?'icon.ico':'icon.png')
@@ -705,6 +710,7 @@ app.whenReady().then(() => {
   Menu.setApplicationMenu(null)   // no menu bar; shortcuts live in before-input-event
   createTray()
   probeNativeShare()
+  watchSuspend()
   openApp()
 })
 

@@ -162,7 +162,7 @@ function installNativeShare (workerSource, helperPicks) {
   // with the id of the share that asked for it (a quick restart must not take the old share's)
   const portWaiters = new Map()
   let nextId = 1
-  let nativeOff = false   // set when a native share failed mid-share
+  let nativeOff = ''   // why, once a native share failed mid-share
   window.addEventListener('message', e => {
     if (e.source !== window || !e.data?.sharkordNativeSharePort || !e.ports[0]) return
     const waiter = portWaiters.get(e.data.id)
@@ -205,6 +205,7 @@ function installNativeShare (workerSource, helperPicks) {
     // two). Sharkord gets a stream the page builds: the preview is the helper's frames, decoded.
     // Any other share (VP8, VP9, auto, simulcast) stays entirely Chromium's: its capture and encoder.
     const codec = nativeCodec()
+    if (nativeOff && codec) log('Chromium\'s share: the native share is off for this session:', nativeOff)
     if (helperPicks && !nativeOff && constraints?.video && codec) {
       const pick = await api.nativeSharePick(codec).catch(() => 'chromium')
       if (pick === 'cancelled') throw new DOMException('Permission denied by user', 'NotAllowedError')
@@ -297,7 +298,8 @@ function installNativeShare (workerSource, helperPicks) {
     // connection just gets Chromium's own capture -- if there is one: a share the helper picked
     // (Linux) has nothing else, and ends. Mid-share, the share ends instead, as if the
     // capture had stopped: Sharkord cleans up on the track's `ended`, viewers see the share end, and
-    // shares for the rest of the session use Chromium's own path. Continuing in place didn't work:
+    // shares for the rest of the session use Chromium's own path (not after a suspend, which loses
+    // the capture without the helper being at fault). Continuing in place didn't work:
     // swapping the capture track in restarted the RTP timestamps from its older clock (viewers
     // dropped every frame as stale), and the hardware encoder Chromium switches to at <= 1080p
     // stalled after a few frames.
@@ -311,7 +313,9 @@ function installNativeShare (workerSource, helperPicks) {
         return
       }
       log('ending the share:', why)
-      nativeOff = true
+      // A capture lost to a suspend isn't the helper's fault: the next share can use it again
+      if (s.suspended) log('native share stays on: the system was suspended')
+      else nativeOff = why
       // Again every second until Sharkord stops the track: a fallback right at the start (a codec
       // the helper can't encode) comes before Sharkord listens for the end, and the share was
       // left running on a black preview
@@ -362,6 +366,7 @@ function installNativeShare (workerSource, helperPicks) {
               pace()
             } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps }
             else if (msg.event === 'error') s.fallback('helper failed: ' + msg.message)
+            else if (msg.event === 'suspend') { s.suspended = true; log('system suspending') }
             else if (msg.event === 'started') { s.encoder = { name: msg.encoder, width: msg.size?.[0], height: msg.size?.[1] }; log(msg.event, JSON.stringify(msg)) }
             else if (msg.event) log(msg.event, JSON.stringify(msg))
           }
@@ -456,19 +461,28 @@ function installNativeShare (workerSource, helperPicks) {
   }
   // Stats describe the helper's encode, not the placeholder's: Sharkord's stats panel would
   // otherwise show Chromium's software encoder at 320x180. Frame rate and bytes stay Chromium's
-  // own counts -- they are what really goes out.
-  const rewrite = report => {
-    const shares = [...bySender.values()].filter(s => s.encoder && !s.fell && !s.stopped)
+  // own counts -- they are what really goes out. Until the helper has started, "Native: starting"
+  // (not the placeholder's OpenH264); after a fallback, Chromium's own encoder again.
+  // "Native: VAAPI, vah264enc" tells the helper apart from Chromium's encoders, and the API name is
+  // one Sharkord's stats match to label it GPU (vah264enc alone shows as Unknown).
+  const nativeLabel = ({ name }) => `Native: ${/^va/.test(name) ? 'VAAPI' : /^amf/.test(name) ? 'AMF' : 'hardware'}, ${name}`
+  const rewrite = (report, sender) => {
+    // Through the sender its outbound-rtp is known before the first stats tick records its id
+    const own = sender && bySender.get(sender)
+    if (own) report.forEach((x, id) => { if (x.type === 'outbound-rtp') own.outIds.add(id) })
+    const shares = [...bySender.values()].filter(s => !s.fell && !s.stopped)
     if (!shares.length) return report
     const out = new Map()
     report.forEach((x, id) => {
       const s = x.type === 'outbound-rtp' && shares.find(s => s.outIds.has(id))
-      out.set(id, s ? { ...x, encoderImplementation: `sharkord-share (${s.encoder.name})`, powerEfficientEncoder: true,
-        frameWidth: s.encoder.width ?? x.frameWidth, frameHeight: s.encoder.height ?? x.frameHeight } : x)
+      if (!s) return out.set(id, x)
+      out.set(id, !s.encoder ? { ...x, encoderImplementation: 'Native: starting' }
+        : { ...x, encoderImplementation: nativeLabel(s.encoder), powerEfficientEncoder: true,
+            frameWidth: s.encoder.width ?? x.frameWidth, frameHeight: s.encoder.height ?? x.frameHeight })
     })
     return out
   }
-  RTCRtpSender.prototype.getStats = async function () { return rewrite(await senderGetStats.call(this)) }
+  RTCRtpSender.prototype.getStats = async function () { return rewrite(await senderGetStats.call(this), this) }
   PC.getStats = async function (...args) { return rewrite(await pcGetStats.apply(this, args)) }
 
   PC.addTransceiver = function (trackOrKind, init) {
