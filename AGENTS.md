@@ -192,8 +192,8 @@ and the GL read-back pinned a CPU core.
    the encoder target, and its estimate only grows to 1.5x what is acknowledged. While loss, round
    trip and Chromium's pacer queue stay clean it only steps up with the estimate (which dips 15-50%
    every few seconds on a clean LAN with mediasoup); on congestion (loss, a growing round trip, or
-   packets kept waiting in the pacer -- over 250 ms, or over 50 ms on two 2 s readings running, i.e.
-   the estimate really below what goes out; one keyframe's spike doesn't count) it drops to 0.85x.
+   packets waiting over 250 ms in the pacer, i.e. the estimate really below what goes out; a
+   keyframe's 50-180 ms doesn't count) it drops to 0.85x.
    Every bitrate change restarts the encoder with a keyframe (`vah264enc` and AMF), so changes are rare. Capped by Sharkord's bitrate
    setting and ~25 Mbps at 4K60; the resolution stays what the user picked.
    `getStats` is rewritten so Sharkord's stats show the helper's encoder and size. Main kills the

@@ -434,17 +434,15 @@ function installNativeShare (workerSource, helperPicks) {
       // Congestion: loss, the round trip growing, or packets kept waiting in Chromium's pacer. The
       // pacer stays queued when the estimate is really below what goes out: after a quiet stretch
       // it fell 32 -> 5.6 Mbps and stayed, and holding 25 Mbps through that queued 0.8 s of lag.
-      // One keyframe queues 50-135 ms for a single tick on a clean path, so that alone isn't
-      // congestion (over 250 ms, or over 50 ms two ticks running): counted, each keyframe lowered
-      // the bitrate, and the change itself restarts the encoder with a keyframe (vah264enc and
-      // AMF reconfigure on any bitrate change) -- a keyframe every few seconds. The cap: Sharkord's
-      // bitrate setting (x-google-max-bitrate in the answer) and 0.05 bits per pixel per frame
-      // (~25 Mbps at 4K60). So down at once, up only in 30% steps at least 4 s apart.
+      // A keyframe queues 50-180 ms on a clean path (over two ticks on Wi-Fi), so only over 250 ms
+      // counts: counted, each keyframe lowered the bitrate, and the change itself restarts the
+      // encoder with a keyframe (vah264enc and AMF reconfigure on any bitrate change) -- a
+      // keyframe every few seconds. The cap: Sharkord's bitrate setting (x-google-max-bitrate in
+      // the answer) and 0.05 bits per pixel per frame (~25 Mbps at 4K60). So down at once, up only
+      // in 30% steps at least 4 s apart.
       const rtt = r?.roundTripTime
       if (rtt != null) s.minRtt = Math.min(s.minRtt ?? rtt, rtt)
-      const queued = pacerMs > 250 || (pacerMs > 50 && (s.lastPacerMs ?? 0) > 50)
-      s.lastPacerMs = pacerMs
-      if ((r?.fractionLost ?? 0) > 0.02 || (rtt != null && rtt > s.minRtt + 0.02) || queued) s.congestedAt = performance.now()
+      if ((r?.fractionLost ?? 0) > 0.02 || (rtt != null && rtt > s.minRtt + 0.02) || pacerMs > 250) s.congestedAt = performance.now()
       if (bwe && s.port && s.encoder) {
         const mid = pc?.getTransceivers().find(t => t.sender === sender)?.mid
         const sec = mid != null && pc.remoteDescription?.sdp.split(/(?=^m=)/m).find(m => m.includes('a=mid:' + mid + '\r'))
