@@ -50,8 +50,9 @@ jobs:
         if: env.BUMP != 'none'
         run: npm version ${{ env.BUMP }} --no-git-tag-version
 
-      # rpm tools, plus GStreamer's development files for the native helper and the plugins its
-      # self-check looks for (the installed app uses the user's own GStreamer)
+      # rpm tools, plus GStreamer's development files for the native helper; the plugins only make
+      # its self-check's output complete (without a GPU it runs either way, and the installed app
+      # uses the user's own GStreamer)
       - name: Install rpm tools and GStreamer
         if: matrix.dist == 'linux'
         run: |

@@ -230,7 +230,8 @@ async function handleDisplayMediaRequest (_req, callback) {
 }
 
 // ── Native screen share (Windows; Linux on Wayland; experimental) ─────────
-//   A helper (native/, Rust + GStreamer) captures the picked monitor and encodes
+//   A helper (native/, Rust + GStreamer) captures the picked monitor (Windows) or
+//   portal pick (Linux: a screen or a window) and encodes
 //   it with the GPU; the preload swaps its frames into Sharkord's own share.
 //   Frames go straight to the page over a MessagePort; the page sends keyframe
 //   and bitrate requests back the same way. The `nativeShare` setting turns it

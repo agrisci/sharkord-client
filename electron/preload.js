@@ -8,7 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Desktop notifications
   notificationShown:   () => ipcRenderer.send('notification-shown'),
   notificationClicked: () => ipcRenderer.send('notification-clicked'),
-  // Native screen share (SHARKORD_NATIVE_SHARE=1): the picked monitor, or null when the
+  // Native screen share (the nativeShare setting): the picked monitor, or null when the
   // share should stay Chromium's own; start hands the page a MessagePort (below)
   // Linux: pick asks the helper to pick the screen (instead of Chromium): 'ok', 'cancelled', or
   // 'chromium' to use Chromium's getDisplayMedia; stop is for a share that ends before start
@@ -81,7 +81,7 @@ function installShareAudioHooks (VIRTMIC) {
 
 contextBridge.executeInMainWorld({ func: installShareAudioHooks, args: ['vencord-screen-share'] })
 
-// ── Native screen share (SHARKORD_NATIVE_SHARE=1) ──
+// ── Native screen share (the nativeShare setting, or SHARKORD_NATIVE_SHARE=1) ──
 // Sharkord keeps the real capture track (its preview); the connection gets a placeholder whose
 // every outgoing encoded frame is swapped, by an encoded transform, for a frame the native helper
 // (native/) captured and encoded with the GPU. Chromium keeps the connection, packetization and
@@ -173,17 +173,20 @@ function installNativeShare (workerSource, helperPicks) {
 
   // The screen codec picked in Sharkord's Devices settings (its localStorage). The helper encodes
   // only H.264 and AV1, and on Linux it has to know before the pick, so it's used only when one of
-  // them is picked explicitly; anything else (VP8, VP9, auto, a setting it can't read) is
-  // Chromium's share from the start, on both platforms.
+  // them is picked explicitly, with Simulcast off: Sharkord shares VP8 whenever simulcast is on
+  // there and the server allows it, which the page can't see. Anything else (VP8, VP9, auto, a
+  // setting it can't read) is Chromium's share from the start, on both platforms.
   const nativeCodec = () => {
-    try { return CODECS[JSON.parse(localStorage.getItem('sharkord-devices-settings'))?.screenCodec] || null }
-    catch { return null }
+    try {
+      const devices = JSON.parse(localStorage.getItem('sharkord-devices-settings'))
+      return devices?.simulcastEnabled === false ? CODECS[devices.screenCodec] || null : null
+    } catch { return null }
   }
 
   md.getDisplayMedia = async (constraints) => {
     // Linux: the helper picks and captures the screen, Chromium doesn't (one portal dialog, not
     // two). Sharkord gets a stream the page builds: the preview is the helper's frames, decoded.
-    // Any other codec (VP8, VP9, auto) stays entirely Chromium's: its own capture and encoder.
+    // Any other share (VP8, VP9, auto, simulcast) stays entirely Chromium's: its capture and encoder.
     const codec = nativeCodec()
     if (helperPicks && !nativeOff && constraints?.video && codec) {
       const pick = await api.nativeSharePick(codec).catch(() => 'chromium')
@@ -592,7 +595,7 @@ const DESKTOP_OPTIONS = [
   { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
   { key: 'nativeShare',    label: 'Native screen share (experimental)',
-    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in the Devices tab. ' +
+    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in the Devices tab, with Simulcast off. ' +
       (process.platform === 'linux' ? 'AMD and Intel GPUs (VA-API), Wayland.' : 'AMD GPUs, whole screens.') + ' Takes effect on the next share.' },
 ]
 

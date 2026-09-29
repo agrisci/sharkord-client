@@ -6,13 +6,16 @@
 //!
 //! Protocol, one share per process:
 //! - stdin, JSON lines: `{"cmd":"start","codec":"h264"|"av1","width","height","fps","kbps",
-//!   "label","primary"}`, `{"cmd":"keyframe"}`, `{"cmd":"bitrate","kbps"}`, `{"cmd":"stop"}`.
+//!   "label","primary"}` (label/primary pick the monitor on Windows), `{"cmd":"keyframe"}`,
+//!   `{"cmd":"bitrate","kbps"}`, `{"cmd":"stop"}`.
 //!   EOF means the app is gone: stop and exit.
 //! - stdout, records: a 16-byte header (u8 kind, u8 flags, u16 reserved, u32 LE length,
 //!   u64 LE pts in microseconds) and the payload. Kind 1 is an encoded frame (flag 1 =
-//!   keyframe), kind 2 a JSON event (`started` once capturing, `stream` with the first H.264
-//!   keyframe's SPS profile and level, `stats` every 2 s, `warning`, and `error` before the
-//!   process gives up -- every failure after `start` sends one).
+//!   keyframe), kind 2 a JSON event: on Linux `selected` / `cancelled` for the portal dialog,
+//!   then `started` once capturing, `input` with the caps reaching the converter (whether frames
+//!   stay in GPU memory), `stream` with the first H.264 keyframe's SPS profile and level, `stats`
+//!   every 2 s (with videorate's in/out/duplicate/drop totals), `warning`, and `error` before the
+//!   process gives up -- every failure after `start` sends one.
 //!
 //! Windows: each part of the graph and its settings was measured on an RX 9060 XT: DXGI capture
 //! straight into `d3d11convert` and AMF with no copies, `videorate` holding the declared rate

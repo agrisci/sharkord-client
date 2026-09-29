@@ -9,15 +9,15 @@ share picker with share audio, hardware video encoding, and a way to pick/change
 There is no build step, no TypeScript and no bundler: plain CommonJS JavaScript and static HTML.
 
 Core principle: **no over-engineering**. Follow the existing pattern, add the smallest thing
-that works, and don't introduce abstractions or dependencies for a single use case. The whole
-client is ~1300 lines on purpose.
+that works, and don't introduce abstractions or dependencies for a single use case. The Electron
+side is ~2300 lines and the native helper ~900 (`native/`, `scripts/stage-native.js`), on purpose.
 
 ## Architecture
 
 | Path                         | What it is                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, main window, server check, first launch / change server, open at login + tray, lifecycle |
-| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hook that adds share audio, `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls and a **Desktop Client** tab in the user settings |
+| `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, lifecycle |
+| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls and a **Desktop Client** tab in the user settings |
 | `electron/picker.html`       | Screen share picker (source grid + audio step), styled like Sharkord                          |
 | `electron/picker-preload.js` | `pickerAPI` bridge for the picker window                                                      |
 | `electron/first-launch.html` | Server URL prompt (first run and Change server)                                               |
@@ -39,17 +39,18 @@ belongs to rather than adding files.
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `startMinimized` (a login launch stays in the
   tray), `nativeShare` (default
-  off; offered only when the helper's `--check` probe at startup opens an encoder -- AMF on
+  off; usable only when the helper's `--check` probe at startup opens an encoder -- AMF on
   Windows, VA-API on Linux Wayland -- and a share goes native only with a codec it opened; where it
-  can't run, `nativeShareNote` says why under its greyed-out switch, and `nativeShareCodecs` lists
+  can't run, its switch is greyed out and `nativeShareNote` says why, and `nativeShareCodecs` lists
   what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross). *Open at login* is not
   stored: the OS login item / `~/.config/autostart/sharkord.desktop` is the source of truth.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
   - Page → main: `virtmic-active`, `virtmic-unmute`, `virtmic-stop`, `change-server` (`send`),
     `desktop-settings-get`, `desktop-settings-set`, `notification-shown` / `notification-clicked`
-    (`send`), `native-share-pick` (Linux), `native-share-target`, `native-share-start` /
-    `native-share-stop` (`send`) — only accepted from the main window's webContents.
+    (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
+    `native-share-start` / `native-share-stop` (`send`) — only accepted from the main window's
+    webContents.
   - Main → page: `native-share-port` (a `MessagePort` tagged with the share's `id`, forwarded
     into the page world with `window.postMessage`): helper frames and events one way,
     `keyframe`/`bitrate`/`stop` the other.
@@ -74,6 +75,9 @@ belongs to rather than adding files.
   navigating to an unreachable URL and then to a local page can leave the window unable to paint.
 
 ## Screen share flow
+
+Chromium's own share, used whenever the native share isn't (see below; on Linux a native share
+replaces steps 1-3 with the helper's portal pick and the picker's audio step).
 
 1. Sharkord calls `getDisplayMedia` → `handleDisplayMediaRequest` (set with
    `session.setDisplayMediaRequestHandler`). Any previous venmic link is dropped first.
@@ -100,19 +104,20 @@ helper is opt-in per share, so nothing it can't handle ever reaches it.
 
 **Which path a share takes.** At startup `probeNativeShare` runs the helper's `--check` once: it
 opens each codec's encoder (AMF on Windows, VA-API on Linux) and reports `h264`/`av1`. No codec →
-the option isn't offered. When a share starts, the page reads `screenCodec` from Sharkord's
-Devices settings (`sharkord-devices-settings` in its localStorage -- the one place the client
-reads Sharkord's state; a renamed key only turns the helper off):
+the switch is greyed out, with the reason under it. When a share starts, the page reads
+`screenCodec` and `simulcastEnabled` from Sharkord's Devices settings (`sharkord-devices-settings`
+in its localStorage -- the one place the client reads Sharkord's state; a renamed key only turns
+the helper off):
 
-| Sharkord's screen codec | Encoder opened at startup | Share |
+| Sharkord's Devices settings | Encoder opened at startup | Share |
 |---|---|---|
-| H.264 or AV1 | yes | **helper** |
-| H.264 or AV1 | no (e.g. AV1 on a GPU without AV1 encoding) | Chromium |
+| H.264 or AV1, Simulcast off | yes | **helper** |
+| H.264 or AV1, Simulcast off | no (e.g. AV1 on a GPU without AV1 encoding) | Chromium |
+| Simulcast on | -- (Sharkord shares VP8 when the server allows simulcast, which the page can't see) | Chromium |
 | VP8, VP9 | -- (the helper never encodes them) | Chromium |
 | `auto`, missing, unreadable | -- (codec not known in advance) | Chromium |
 
 "Chromium" is exactly the share with the option off: Chromium's picker, capture and encoders.
-Simulcast only comes with VP8 here, so it never reaches the helper either.
 
 **How a helper share runs.**
 
@@ -129,7 +134,7 @@ Simulcast only comes with VP8 here, so it never reaches the helper either.
 
 | Failure | Windows | Linux |
 |---|---|---|
-| Before the first native frame (the encoder won't start despite the probe, simulcast) | the connection gets Chromium's capture; the share goes on | the share **ends** (nothing to fall back to); later shares that session are Chromium's |
+| Before the first native frame (the encoder won't start despite the probe, a codec other than the settings said) | the connection gets Chromium's capture; the share goes on | the share **ends** (nothing to fall back to); later shares that session are Chromium's |
 | Mid-share (helper error or exit, watchdog: no frame for 10 s / none swapped for 6 s) | the share ends; later shares that session are Chromium's | same |
 | A picker or the audio step cancelled | no share | no share; the helper is stopped |
 
@@ -163,7 +168,7 @@ and the GL read-back pinned a CPU core.
 3. The worker learns the negotiated codec from the first encoded frame; for H.264/AV1 the page
    calls `native-share-start` and main spawns the helper (Linux: reuses the one from the pick) and
    hands the page a `MessagePort`. Anything unexpected goes through `s.fallback` (the failure
-   table above): a codec other than the one read from the settings, simulcast, a helper `error`
+   table above): a codec other than the one read from the settings, simulcast anyway, a helper `error`
    event (the helper sends one for every failure after `start`), the helper exiting on its own
    (main reports it as an `error`), and the watchdog. Continuing a failed share in place didn't
    work: swapping a capture track in restarts the RTP timestamps from its older clock (viewers
@@ -228,7 +233,7 @@ and the GL read-back pinned a CPU core.
 ```sh
 npm install
 npm start               # run the app (DevTools: Ctrl+Shift+I)
-npm run dist:linux      # AppImage + deb + rpm → release/
+npm run dist:linux      # AppImage + deb + rpm → release/ (stages the native helper first)
 npm run dist:win        # NSIS installer       → release/ (stages the native helper first)
 npm run dist:all
 npm run stage:native    # build + stage native/ only
@@ -253,7 +258,8 @@ commit subjects, so keep them readable) and merges the release commit back into 
 `npm ci` on Windows skips it.
 
 Hardware encoding tip for testing screen share: pick **H264** and turn **Simulcast off** in
-Sharkord's Devices settings (simulcast forces VP8, which most GPUs can't encode). Check
+Sharkord's Devices settings (with simulcast on, and allowed by the server, Sharkord shares VP8,
+which most GPUs can't encode; the native share needs it off too). Check
 `chrome://gpu` or the `[gpu]` log lines for VA-API status. To confirm hardware encoding, look at
 the sender's `outbound-rtp` `encoderImplementation` (e.g. `MediaFoundationVideoEncodeAccelerator`
 on Windows, not `OpenH264`). On Windows it relies on `PlatformH264CbpEncoding`: without it
@@ -299,16 +305,17 @@ There are no automated tests. After a change, check what it touches:
 - **Share audio (Windows)**: "Stream With Audio" loopback.
 - **Native screen share (Windows, AMD)**: turn it on in Settings → Desktop Client (or the tray). Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
-  within a second, and Sharkord's stats show `sharkord-share (amf…)`. The console's
-  `[native-share] sent …` lines should keep `lost`/`resync` near zero. A window share, VP8, or
+  within a second, and Sharkord's stats show `sharkord-share (amf…)`. The `[native-share] sent …` lines (DevTools console, and the app's log
+  as `[page] [native-share] …`) should keep `lost`/`resync` near zero. A window share, VP8, or
   the setting off must behave exactly as before.
-- **Native screen share (Linux Wayland, VA-API)**: the switch appears only when the startup probe
-  passes (`[native-share] probe` in the log). Share with H.264: **one** portal dialog then the
+- **Native screen share (Linux Wayland, VA-API)**: the switch is usable only when the startup
+  probe passes (`[native-share] probe` in the log); otherwise it's greyed out with the reason, and
+  "This GPU can hardware encode" lists H.264 / AV1. Share with H.264: **one** portal dialog then the
   audio step, the local preview moves, a viewer gets 60 fps, stats show
   `sharkord-share (vah264enc)`. Cancelling the portal dialog or the audio step cancels the share
   and the desktop's sharing indicator goes away; stopping the share ends the helper.
-- **Codec routing (both platforms)**: VP8, VP9 and `auto` in Sharkord's Devices settings, and a
-  codec the probe didn't open (AV1 on a GPU without AV1 encoding), are Chromium's share: its
+- **Codec routing (both platforms)**: VP8, VP9, `auto` or Simulcast on in Sharkord's Devices
+  settings, and a codec the probe didn't open (AV1 on a GPU without AV1 encoding), are Chromium's share: its
   picker, a moving preview, no `sharkord-share` process and Chromium's encoder in the stats.
 
 ## Commits and privacy

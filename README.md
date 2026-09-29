@@ -18,7 +18,8 @@ loads the real Sharkord web app, unchanged, and adds what a browser can't do.
 
 **Where this has been tested:** screen sharing at 4K 60 fps (H.264 and AV1) from Windows 11 with an
 AMD RX 9060 XT, using the native screen share, watched on a Fedora Linux laptop (AMD Ryzen 4000
-graphics). Other GPUs and setups should work but haven't been verified yet — reports welcome.
+graphics); and the native screen share from that laptop (Fedora 44 KDE Plasma, Wayland) at 1080p
+60 fps in H.264. Other GPUs and setups should work but haven't been verified yet — reports welcome.
 
 ---
 
@@ -103,8 +104,8 @@ Windows builds aren't code-signed, so SmartScreen may warn on first run (**More 
 
 | Feature | How |
 |---------|-----|
-| **Hardware screen sharing** | In Sharkord's Devices settings pick **H264** or **AV1** and turn **Simulcast off** (simulcast forces VP8, which most GPUs can't encode). Linux uses VA-API, Windows Media Foundation |
-| **Native screen share (Windows AMD, Linux Wayland; experimental)** | Turn it on in **Settings → Desktop Client → Native screen share (experimental)** or the tray. A small helper (`native/`, Rust + GStreamer) captures the screen and encodes it on the GPU (AMF on Windows, VA-API on Linux); its frames go through Sharkord's own connection, so Sharkord itself is unchanged. The bitrate follows the network, capped by Sharkord's bitrate slider. It's used only when **H264** or **AV1** is picked in Sharkord's Devices settings **and** the GPU can encode it (checked at startup; the option only appears when it can encode one of them). Every other share (VP8, VP9, auto, a codec the GPU lacks) is the normal Chromium share. On Windows it takes whole screens (window shares stay normal) and a helper failure before the first frame falls back to the normal share; on Linux the helper shows the only portal dialog (screens or windows) and Sharkord's preview shows its frames. A helper failure mid-share ends the share on both, and later shares that session are normal ones. Where it can't be used (or only for one codec) Settings says why under its switch. **Linux needs** a Wayland session (a clean Fedora 44 Workstation or KDE install already has the rest, except H.264 encoding on AMD; the rpm and deb recommend the GStreamer plugins), GStreamer 1.22+ with its `va` and PipeWire plugins (Fedora: `gstreamer1-plugins-bad-free pipewire-gstreamer`; Debian/Ubuntu: `gstreamer1.0-plugins-bad gstreamer1.0-pipewire`) and a VA-API driver that encodes (Fedora's own Mesa doesn't: `mesa-va-drivers-freeworld` from RPM Fusion; Intel: `intel-media-driver`) |
+| **Hardware screen sharing** | In Sharkord's Devices settings pick **H264** or **AV1** and turn **Simulcast off** (with simulcast on, and allowed by the server, Sharkord shares VP8, which most GPUs can't encode). Linux uses VA-API, Windows Media Foundation |
+| **Native screen share (Windows AMD, Linux Wayland; experimental)** | Turn it on in **Settings → Desktop Client → Native screen share (experimental)** or the tray. A small helper (`native/`, Rust + GStreamer) captures the screen and encodes it on the GPU (AMF on Windows, VA-API on Linux); its frames go through Sharkord's own connection, so Sharkord itself is unchanged. The bitrate follows the network, capped by Sharkord's bitrate slider. It's used only when **H264** or **AV1** is picked in Sharkord's Devices settings with **Simulcast off**, **and** the GPU can encode it (checked at startup; the tab lists what it found, and the switch is greyed out when it can encode neither). Every other share (VP8, VP9, auto, simulcast, a codec the GPU lacks) is the normal Chromium share. On Windows it takes whole screens (window shares stay normal) and a helper failure before the first frame falls back to the normal share; on Linux the helper shows the only portal dialog (screens or windows) and Sharkord's preview shows its frames. A helper failure mid-share ends the share on both, and later shares that session are normal ones. Where it can't be used (or only for one codec) Settings says why under its switch. **Linux needs** a Wayland session (a clean Fedora 44 Workstation or KDE install already has the rest, except H.264 encoding on AMD; the rpm and deb recommend the GStreamer plugins), GStreamer 1.22+ with its `va` and PipeWire plugins (Fedora: `gstreamer1-plugins-bad-free pipewire-gstreamer`; Debian/Ubuntu: `gstreamer1.0-plugins-bad gstreamer1.0-pipewire`) and a VA-API driver that encodes (Fedora's own Mesa has no H.264 encoding: `mesa-va-drivers-freeworld` from RPM Fusion; Intel's driver, `libva-intel-media-driver` on Fedora, is installed by default) |
 | **Screen share picker** | Choose a screen or window, then the audio. On Wayland the system portal picks the source and the picker opens on the audio step |
 | **Share audio** | Linux: per-app or entire-system audio through PipeWire ([venmic](https://github.com/Vencord/venmic)). Windows: system loopback ("Stream With Audio") |
 | **Notifications** | Turn them on in Sharkord's **Settings → Notifications**. The taskbar flashes until you come back, and a click also brings the window back from the tray |
@@ -121,8 +122,8 @@ the list:
 
 - **Never break a share, on any hardware:** a clean fallback for every capture failure, and
   always-on logs plus a "Copy diagnostics" button for bug reports.
-- **More GPUs for the native share:** NVIDIA (NVENC) and Intel (Quick Sync), chosen by a startup
-  probe of what the machine can really encode.
+- **More GPUs for the native share:** NVIDIA (NVENC) and Intel (Quick Sync) on Windows, where
+  only AMD is supported today.
 - **4K at 120 fps:** lift the remaining frame-rate limits (WebRTC's default 60 fps cap per
   sender, capture on high-refresh screens) and test on a 120 Hz display.
 - **A safer normal path on Windows:** hardware encoding up to 4K on NVIDIA and Intel, the
@@ -144,7 +145,7 @@ sharkord-client/
 │   └── build.yml          ← CI: build installers; manual run on main publishes a release
 ├── electron/
 │   ├── main.js            ← window, tray, GPU flags, screen-share picker, venmic audio, native share helper
-│   ├── preload.js         ← bridge, getDisplayMedia hooks (share audio, native share), injected settings
+│   ├── preload.js         ← bridge, getDisplayMedia hooks (share audio, native share), Desktop Client settings tab
 │   ├── first-launch.html  ← server URL prompt (first run / Change Server)
 │   ├── unreachable.html   ← shown when the server can't be reached
 │   ├── theme.css          ← Sharkord's design tokens for the two pages above
