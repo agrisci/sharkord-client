@@ -240,27 +240,60 @@ async function handleDisplayMediaRequest (_req, callback) {
 //   helper shows it, then the picker's audio step, and the page builds the
 //   share's stream (its preview decoded from the helper's frames).
 let _nativeTarget = null, _nativeShare = null
-let _nativeProbe = null   // Linux: the helper's --check, once per run
+let _nativeProbe = null   // the helper's --check ({ missing, h264, av1 } or { error }), once per run
 
 const EXE_NAME = process.platform === 'win32' ? 'sharkord-share.exe' : 'sharkord-share'
 const nativeShareExe = () => ['win32', 'linux'].includes(process.platform) && [
   path.join(process.resourcesPath || '', 'native', 'bin', EXE_NAME),   // installed (scripts/stage-native.js)
   path.join(__dirname, '..', 'native', 'target', 'release', EXE_NAME),
 ].find(p => fs.existsSync(p))
-// Linux: Wayland only (X11 stays on Chromium's capture), and the system's GStreamer must have
-// the elements and a VA-API encoder (Fedora's own Mesa has no H.264 encoding, for one)
+// Only where the startup probe opened an encoder (an AMD GPU on Windows; on Linux a VA-API one,
+// which Fedora's own Mesa lacks for H.264), and on Linux only on Wayland (X11 stays Chromium's)
+const canEncode = codec => !_nativeProbe?.missing?.length && !!_nativeProbe?.[codec]
 const nativeShareSupported = () => !!nativeShareExe() &&
-  (process.platform === 'win32' || (isWayland && !!(_nativeProbe?.h264 || _nativeProbe?.av1)))
+  (process.platform !== 'linux' || isWayland) && (canEncode('h264') || canEncode('av1'))
+
+// Why the native share is off, or only for one codec, on this machine: shown under its switch in
+// Settings, so a missing driver or plugin doesn't just make the option vanish. null: nothing to say
+// (or the probe hasn't answered yet).
+function nativeShareNote () {
+  const linux = process.platform === 'linux', p = _nativeProbe
+  if (!nativeShareExe()) return null
+  if (linux && !isWayland) return 'Needs a Wayland session; on X11 shares use the browser\'s capture.'
+  if (!p) return null
+  if (p.error) return linux
+    ? 'The helper could not run: GStreamer 1.22+ (gstreamer1, gstreamer1-plugins-base) is needed.'
+    : 'The helper could not run; reinstalling Sharkord should fix it.'
+  if (p.missing?.includes('pipewiresrc')) return 'GStreamer\'s PipeWire plugin is missing: install pipewire-gstreamer (Fedora) or gstreamer1.0-pipewire (Debian/Ubuntu).'
+  if (p.missing?.length && linux) return 'No VA-API GPU found, or GStreamer\'s va plugin is missing: gstreamer1-plugins-bad-free (Fedora) or gstreamer1.0-plugins-bad (Debian/Ubuntu).'
+  if (p.missing?.length) return 'The helper is incomplete; reinstalling Sharkord should fix it.'
+  const freeworld = linux ? ' On Fedora with an AMD GPU, H.264 needs mesa-va-drivers-freeworld from RPM Fusion.' : ''
+  if (!p.h264 && !p.av1) return (linux ? 'No GPU encoder for H.264 or AV1 found.' : 'No supported GPU encoder found (AMD GPUs only).') + freeworld
+  if (!p.h264) return 'This GPU or driver can\'t encode H.264, so only AV1 shares use it.' + freeworld
+  if (!p.av1) return 'This GPU can\'t encode AV1, so only H.264 shares use it.'
+  return null
+}
 const nativeShareOn = () => nativeShareSupported() &&
   (process.env.SHARKORD_NATIVE_SHARE === '1' || !!loadUserSettings().nativeShare)
 
+// Windows: its own GStreamer only -- no GST_* from an installed GStreamer, and a registry of its
+// own. Linux uses the system's GStreamer, environment included.
+function helperEnv () {
+  if (process.platform !== 'win32') return process.env
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GST(REAMER)?_/i.test(k)))
+  env.GST_REGISTRY_1_0 = path.join(app.getPath('userData'), 'gstreamer-registry.bin')
+  return env
+}
+
+// Which codecs this machine really encodes: the helper opens each encoder (`--check`). Once per
+// run; a share only goes native with a codec it found (native-share-pick / native-share-target).
+// The first run on Windows also builds the helper's plugin registry, hence the long timeout.
 function probeNativeShare () {
   const exe = nativeShareExe()
-  if (process.platform !== 'linux' || !isWayland || !exe) return
-  execFile(exe, ['--check'], { timeout: 10000 }, (err, stdout) => {
-    try { _nativeProbe = JSON.parse(stdout) } catch { _nativeProbe = null }
-    log('[native-share] probe', err && !_nativeProbe ? err.message : stdout.trim())
-    if (_nativeProbe?.missing?.length) _nativeProbe = null
+  if (!exe || (process.platform === 'linux' && !isWayland)) return
+  execFile(exe, ['--check'], { timeout: 30000, windowsHide: true, env: helperEnv() }, (err, stdout) => {
+    try { _nativeProbe = JSON.parse(stdout) } catch { _nativeProbe = { error: err?.message || 'no answer' } }
+    log('[native-share] probe', stdout.trim() || _nativeProbe.error)
     updateTrayMenu()
   })
 }
@@ -287,14 +320,7 @@ function stopNativeShare () {
 // 'cancelled', or 'error' (also when it exits or is stopped first).
 function spawnHelper () {
   stopNativeShare()
-  // Windows: its own GStreamer only -- no GST_* from an installed GStreamer, and a registry of its
-  // own. Linux uses the system's GStreamer, environment included.
-  let env = process.env
-  if (process.platform === 'win32') {
-    env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GST(REAMER)?_/i.test(k)))
-    env.GST_REGISTRY_1_0 = path.join(app.getPath('userData'), 'gstreamer-registry.bin')
-  }
-  const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env })
+  const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env: helperEnv() })
   const { port1: port, port2 } = new MessageChannelMain()
   let settle
   const ready = new Promise(resolve => { settle = resolve })
@@ -340,10 +366,12 @@ function spawnHelper () {
 }
 
 // Page → Linux: a share picked by the helper instead of Chromium. 'chromium' when it doesn't
-// apply here (the page calls Chromium's getDisplayMedia), 'cancelled' when the user cancelled a
-// dialog, 'ok' when the helper holds the screen and the audio step is done.
-ipcMain.handle('native-share-pick', async e => {
+// apply here (the page calls Chromium's getDisplayMedia), including a `codec` the startup probe
+// found no encoder for (AV1 on older GPUs), 'cancelled' when the user cancelled a dialog, 'ok'
+// when the helper holds the screen and the audio step is done.
+ipcMain.handle('native-share-pick', async (e, codec) => {
   if (e.sender !== win?.webContents || process.platform !== 'linux' || !nativeShareOn()) return 'chromium'
+  if (!canEncode(codec)) { log('[native-share] no', codec, 'encoder here: Chromium\'s share'); return 'chromium' }
   venmicUnlink(); _nativeTarget = null
   if (_pickerWin && !_pickerWin.isDestroyed()) _pickerWin.close()
   const answer = await spawnHelper().ready
@@ -356,7 +384,9 @@ ipcMain.handle('native-share-pick', async e => {
   _nativeTarget = {}
   return 'ok'
 })
-ipcMain.handle('native-share-target', e => e.sender === win?.webContents ? _nativeTarget : null)
+// Windows: the picked monitor, or null (Chromium's share) when the probe found no `codec` encoder
+ipcMain.handle('native-share-target', (e, codec) =>
+  e.sender === win?.webContents && canEncode(codec) ? _nativeTarget : null)
 ipcMain.on('native-share-start', (e, opts) => {
   if (e.sender !== win?.webContents || !_nativeTarget) return
   // Linux: the helper from the pick, already holding the screen; Windows: spawned now
@@ -579,10 +609,12 @@ function setOpenAtLogin (on) {
   ].join('\n'))
 }
 
-// nativeShare is left out where the helper can't run, which hides its switch and tray item
+// nativeShare is left out where the helper can't run, which hides its tray item and greys out its
+// switch; nativeShareNote says why (or which codecs it covers)
 const desktopSettings = () => ({
   openAtLogin:openAtLogin(), minimizeToTray:!!loadUserSettings().minimizeToTray,
   ...(nativeShareSupported() ? { nativeShare:nativeShareOn() } : {}),
+  ...(nativeShareNote() ? { nativeShareNote:nativeShareNote() } : {}),
 })
 function setDesktopSettings (s) {
   try {

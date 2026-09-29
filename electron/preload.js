@@ -12,9 +12,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // share should stay Chromium's own; start hands the page a MessagePort (below)
   // Linux: pick asks the helper to pick the screen (instead of Chromium): 'ok', 'cancelled', or
   // 'chromium' to use Chromium's getDisplayMedia; stop is for a share that ends before start
-  nativeShareTarget: () => ipcRenderer.invoke('native-share-target'),
+  nativeShareTarget: codec => ipcRenderer.invoke('native-share-target', codec),
   nativeShareStart:  opts => ipcRenderer.send('native-share-start', opts),
-  nativeSharePick:   () => ipcRenderer.invoke('native-share-pick'),
+  nativeSharePick:   codec => ipcRenderer.invoke('native-share-pick', codec),
   nativeShareStop:   () => ipcRenderer.send('native-share-stop'),
 })
 
@@ -176,16 +176,17 @@ function installNativeShare (workerSource, helperPicks) {
   // them is picked explicitly; anything else (VP8, VP9, auto, a setting it can't read) is
   // Chromium's share from the start, on both platforms.
   const nativeCodec = () => {
-    try { return !!CODECS[JSON.parse(localStorage.getItem('sharkord-devices-settings'))?.screenCodec] }
-    catch { return false }
+    try { return CODECS[JSON.parse(localStorage.getItem('sharkord-devices-settings'))?.screenCodec] || null }
+    catch { return null }
   }
 
   md.getDisplayMedia = async (constraints) => {
     // Linux: the helper picks and captures the screen, Chromium doesn't (one portal dialog, not
     // two). Sharkord gets a stream the page builds: the preview is the helper's frames, decoded.
     // Any other codec (VP8, VP9, auto) stays entirely Chromium's: its own capture and encoder.
-    if (helperPicks && !nativeOff && constraints?.video && nativeCodec()) {
-      const pick = await api.nativeSharePick().catch(() => 'chromium')
+    const codec = nativeCodec()
+    if (helperPicks && !nativeOff && constraints?.video && codec) {
+      const pick = await api.nativeSharePick(codec).catch(() => 'chromium')
       if (pick === 'cancelled') throw new DOMException('Permission denied by user', 'NotAllowedError')
       if (pick === 'ok') {
         const preview = new MediaStreamTrackGenerator({ kind: 'video' })
@@ -195,9 +196,10 @@ function installNativeShare (workerSource, helperPicks) {
     }
     const real = await gdm(constraints)
     const video = real.getVideoTracks()[0]
-    const target = video && await api.nativeShareTarget().catch(() => null)
-    // A window, no helper, another codec, or it failed earlier: Chromium's own share
-    if (!target || nativeOff || !nativeCodec()) return real
+    // A window, no helper, another codec or one this GPU can't encode, or it failed earlier:
+    // Chromium's own share
+    const target = video && codec && await api.nativeShareTarget(codec).catch(() => null)
+    if (!target || nativeOff) return real
     startShare(video, constraints, false)
     return real
   }
@@ -576,9 +578,8 @@ const DESKTOP_OPTIONS = [
   { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
   { key: 'nativeShare',    label: 'Native screen share (experimental)',
-    description: process.platform === 'linux'
-      ? 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. VA-API (AMD, Intel; on Fedora, RPM Fusion\'s mesa-va-drivers-freeworld), Wayland. Used for H.264 and AV1 shares (Sharkord\'s Devices settings); takes effect on the next share.'
-      : 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. AMD GPUs; takes effect on the next share.' },
+    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in Devices. ' +
+      (process.platform === 'linux' ? 'AMD and Intel GPUs (VA-API), Wayland.' : 'AMD GPUs, whole screens.') + ' Takes effect on the next share.' },
 ]
 
 function el (tag, className, text) {
@@ -593,7 +594,7 @@ function addDesktopSettings () {
   if (!others?.classList.contains('bg-accent')) return   // Others isn't the open tab
   const content = others.closest('nav')?.parentElement.querySelector('main [data-slot="card-content"]')
   if (!content || content.querySelector(`[${DESKTOP}]`) || addDesktopSettings.pending) return
-  // Options the main process leaves out (nativeShare without a helper) get no row
+  // Options the main process leaves out get no row (nativeShare in a build without the helper)
   addDesktopSettings.pending = true
   ipcRenderer.invoke('desktop-settings-get').then(s => {
     addDesktopSettings.pending = false
@@ -612,14 +613,18 @@ function buildDesktopSettings (content, initial) {
       switches[key].firstChild.dataset.state = state
     }
   }
-  const rows = DESKTOP_OPTIONS.filter(({ key }) => key in initial).map(({ key, label, description }) => {
+  // An option with only a note (the native share where it can't run here) shows greyed out, with
+  // the note saying why
+  const rows = DESKTOP_OPTIONS.filter(({ key }) => key in initial || initial[key + 'Note']).map(({ key, label, description }) => {
     const group = el('div', 'flex flex-col gap-2')
     group.setAttribute(DESKTOP, key)
     const text = el('div', 'flex flex-col')
     text.append(el('label', 'flex items-center gap-2 text-sm leading-none font-medium', label))
     if (description) text.append(el('span', 'text-sm text-muted-foreground', description))
+    if (initial[key + 'Note']) text.append(el('span', 'text-sm text-muted-foreground', initial[key + 'Note']))
     const sw = el('button', SWITCH_CLASS)
     sw.type = 'button'
+    sw.disabled = !(key in initial)
     sw.setAttribute('role', 'switch')
     sw.append(el('span', THUMB_CLASS))
     sw.addEventListener('click', async () => {

@@ -75,7 +75,7 @@ Electron can rename or drop them without any error.
 |---|-----|------|--------|-------|
 | 7 | P0 | NVIDIA encoder (NVENC) | 📋 | Only AMD AMF is supported (`main.rs:188-199`). GStreamer 1.28's Windows build ships `nvcodec`; `nvh264enc` changes bitrate with NVENC `Reconfigure()`, no new keyframe. |
 | 8 | P0 | Intel encoder (Quick Sync) | 📋 | `qsvh264enc` / `qsvav1enc` (shipped in 1.28). Bitrate changes via `Reset` without a new sequence (briefly drains queued frames). |
-| 9 | P0 | Startup capability probe | 📋 | A probe that instantiates each encoder (unlike `--check`, #77), run once at startup: usable encoders and codecs per GPU. Offer the native path only for those, and turn the setting on by default when it passes. |
+| 9 | P0 | Startup capability probe | 🚧 | `--check` opens each codec's encoder (#77) and the app runs it once at startup on both platforms: the option appears only when an encoder opens, and a share goes native only with a codec it opened. Left: turn the setting on by default when it passes. |
 | 10 | P1 | Media Foundation fallback | 📋 | `mfh264enc` (shipped in 1.28) as a vendor-neutral H.264 fallback. |
 | 11 | P1 | Hybrid-GPU laptops | 📋 | Capture on the iGPU, encode on the dGPU: choose the adapter per monitor, avoid slow cross-adapter copies. |
 | 12 | P1 | Monitor edge cases | 📋 | HDR (tone-map or refuse), >60 Hz panels, portrait, mixed DPI, hotplug and resize mid-share. The monitor size is read once at start (`main.rs:215-216`). |

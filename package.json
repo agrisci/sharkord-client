@@ -42,6 +42,9 @@
       "category": "Network",
       "extraResources": [{ "from": "build/native", "to": "native" }]
     },
+    "rpm": {
+      "fpm": ["--rpm-tag", "Recommends: gstreamer1-plugins-bad-free", "--rpm-tag", "Recommends: pipewire-gstreamer"]
+    },
     "deb": {
       "depends": ["libgtk-3-0", "libnss3", "libxss1"],
       "recommends": ["gstreamer1.0-plugins-bad", "gstreamer1.0-pipewire", "mesa-va-drivers"]

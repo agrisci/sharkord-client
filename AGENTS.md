@@ -38,8 +38,9 @@ belongs to rather than adding files.
   `serverUrl` (saved without a trailing slash — use `savedServerUrl()`), `theme`
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `nativeShare` (default
-  off; offered on Windows when the helper exists, on Linux Wayland when its `--check` probe at
-  startup finds the elements and a VA-API encoder). *Open at login* is not
+  off; offered only when the helper's `--check` probe at startup opens an encoder -- AMF on
+  Windows, VA-API on Linux Wayland -- and a share goes native only with a codec it opened; where it
+  can't run, or runs for one codec only, `nativeShareNote` says why under its greyed-out switch). *Open at login* is not
   stored: the OS login item / `~/.config/autostart/sharkord.desktop` is the source of truth.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
@@ -89,52 +90,82 @@ belongs to rather than adding files.
 
 ### Native screen share (Windows, Linux Wayland; experimental)
 
-With the `nativeShare` setting on (or `SHARKORD_NATIVE_SHARE=1`), a share's video is captured and
+With the `nativeShare` setting on (or `SHARKORD_NATIVE_SHARE=1`), some shares are captured and
 encoded outside Chromium by the helper in `native/`, while Sharkord and Chromium keep everything
-else (connection, packetization, bandwidth estimate). Only when **H.264 or AV1** is picked in
-Sharkord's Devices settings: the page reads `screenCodec` from `sharkord-devices-settings` in its
-localStorage before the share starts, and anything else (VP8, VP9, `auto`, a value it can't read)
-is Chromium's own share, as with the setting off. This is the one place the client reads
-Sharkord's state; a renamed key only turns the helper off.
+else (connection, packetization, bandwidth estimate). **Chromium's own share is the default**; the
+helper is opt-in per share, so nothing it can't handle ever reaches it.
 
-- **Windows** (whole screens, AMD): `d3d11screencapturesrc` → `d3d11convert` → AMF H.264/AV1.
-  Chromium's capture still runs for the local preview and share audio.
-- **Linux** (Wayland, VA-API): the helper owns the pick, so the portal asks once. The page's
-  `getDisplayMedia` hook calls `native-share-pick` instead of Chromium's; main spawns the helper,
-  which opens its own ScreenCast portal session at once (`native/src/portal.rs`, `ashpd`; monitors
-  and windows, nothing persisted) and answers `selected` or `cancelled`, then main shows the
-  picker's audio step. The page builds Sharkord's stream itself: the video is a
-  `MediaStreamTrackGenerator` fed with the helper's frames decoded by `VideoDecoder` (the local
-  preview), the audio venmic's virtual mic (`withShareAudio`). The graph: `pipewiresrc` (no
-  clock, buffers re-stamped on arrival, `keepalive-time` at the frame period) → `vapostproc`
-  copy into VA memory at once (the compositor lends only a few buffers) → the same
-  videorate/queue → `vapostproc` → `vah264enc`/`vaav1enc` (VBR at 100% of the target: CBR pads a
-  still screen; AV1 without reordering). These were measured on KWin (Renoir
-  and RX 9060 XT), and took a Renoir iGPU from ~41 to 60 fps. With no Chromium capture in a native share there is
-  nothing to fall back to, so every fallback below **ends** it (the `ended` event is sent again
-  every second until Sharkord stops the track: at the very start Sharkord isn't listening yet);
-  later shares use Chromium's path. Tried and dropped: reading Chromium's own PipeWire stream (one portal pick too) -- Chromium
-  fixes a tiled DMA-BUF modifier VA can't import, and the GL read-back pinned a CPU core.
+**Which path a share takes.** At startup `probeNativeShare` runs the helper's `--check` once: it
+opens each codec's encoder (AMF on Windows, VA-API on Linux) and reports `h264`/`av1`. No codec →
+the option isn't offered. When a share starts, the page reads `screenCodec` from Sharkord's
+Devices settings (`sharkord-devices-settings` in its localStorage -- the one place the client
+reads Sharkord's state; a renamed key only turns the helper off):
+
+| Sharkord's screen codec | Encoder opened at startup | Share |
+|---|---|---|
+| H.264 or AV1 | yes | **helper** |
+| H.264 or AV1 | no (e.g. AV1 on a GPU without AV1 encoding) | Chromium |
+| VP8, VP9 | -- (the helper never encodes them) | Chromium |
+| `auto`, missing, unreadable | -- (codec not known in advance) | Chromium |
+
+"Chromium" is exactly the share with the option off: Chromium's picker, capture and encoders.
+Simulcast only comes with VP8 here, so it never reaches the helper either.
+
+**How a helper share runs.**
+
+| | Windows (AMD, whole screens) | Linux (Wayland, VA-API) |
+|---|---|---|
+| The rule is applied | after the pick (`native-share-target`, with the codec) | before the pick (`native-share-pick`, with the codec) |
+| Pickers | our source grid, then the audio step | the helper's portal dialog (once), then the audio step |
+| Capture | helper **and** Chromium's own, still running | helper only |
+| Local preview | Chromium's capture | the helper's frames, decoded in the page |
+| Graph | `d3d11screencapturesrc` → `d3d11convert` → AMF | `pipewiresrc` → `vapostproc` → VA (below) |
+| Windows (app windows) | Chromium's share | helper (the portal offers them) |
+
+**When it fails anyway** (the `s.fallback` cases; a share is never left on the black placeholder):
+
+| Failure | Windows | Linux |
+|---|---|---|
+| Before the first native frame (the encoder won't start despite the probe, simulcast) | the connection gets Chromium's capture; the share goes on | the share **ends** (nothing to fall back to); later shares that session are Chromium's |
+| Mid-share (helper error or exit, watchdog: no frame for 10 s / none swapped for 6 s) | the share ends; later shares that session are Chromium's | same |
+| A picker or the audio step cancelled | no share | no share; the helper is stopped |
+
+A share ends through `ended` on Sharkord's track, sent again every second until Sharkord stops it
+(at the very start Sharkord isn't listening yet).
+
+**Linux details.** The page's `getDisplayMedia` hook calls `native-share-pick` instead of
+Chromium's; main spawns the helper, which opens its own ScreenCast portal session at once
+(`native/src/portal.rs`, `ashpd`; monitors and windows, nothing persisted) and answers `selected`
+or `cancelled`, then main shows the picker's audio step. The page builds Sharkord's stream itself:
+a `MediaStreamTrackGenerator` fed with the helper's frames decoded by `VideoDecoder`, and venmic's
+virtual mic (`withShareAudio`). The graph: `pipewiresrc` (no clock, buffers re-stamped on arrival,
+`keepalive-time` at the frame period) → `vapostproc` copy into VA memory at once (the compositor
+lends only a few buffers) → the same videorate/queue → `vapostproc` → `vah264enc`/`vaav1enc` (VBR
+at 100% of the target: CBR pads a still screen; AV1 without reordering). Measured on KWin (Renoir
+and RX 9060 XT): a Renoir iGPU went from ~41 to 60 fps. Tried and dropped: reading Chromium's own
+PipeWire stream (one portal pick too) -- Chromium fixes a tiled DMA-BUF modifier VA can't import,
+and the GL read-back pinned a CPU core.
+
+**Step by step:**
 
 1. Windows: `picker-go-live` records the picked monitor (`_nativeTarget`); windows stay on
    Chromium. Linux: `native-share-pick` sets it once the helper has a pick.
-2. The page hook (`installNativeShare`) returns Sharkord the real stream but substitutes a
+2. The page hook (`installNativeShare`) returns Sharkord its stream (Windows: Chromium's capture;
+   Linux: the one it built) but substitutes a
    placeholder track (`MediaStreamTrackGenerator`, 320x180 black) wherever it is handed to a
    connection (`addTransceiver`/`addTrack`/`replaceTrack`), and attaches an encoded transform.
    Placeholder frames are built in memory (I420), not on a canvas: a canvas frame is read back from
    the GPU for the software encoder and stalled at 15 fps while the GPU was busy. The track has no
    `contentHint`: as screen content Chromium's periodic probes kept knocking the estimate down.
 3. The worker learns the negotiated codec from the first encoded frame; for H.264/AV1 the page
-   calls `native-share-start` and main spawns the helper and hands the page a `MessagePort`.
-   Anything else is handled by `s.fallback`: VP8/VP9, simulcast, a helper `error` event (the
-   helper sends one for every failure after `start`, e.g. no AMD GPU), the helper exiting on its
-   own (main reports it as an `error`), and the watchdog (no helper frame for 10 s, or none swapped
-   for 6 s). Before any native frame went out, the connection just gets the real track. Mid-share
-   the share **ends** (`ended` on the real track, which Sharkord handles like a stopped capture)
-   and later shares in the session use Chromium's own path: continuing in place froze viewers
-   (swapping the track in restarts the RTP timestamps from the capture's older clock) or stalled
-   (the hardware encoder Chromium switches to mid-share at <= 1080p). A share must never be left
-   on the black placeholder.
+   calls `native-share-start` and main spawns the helper (Linux: reuses the one from the pick) and
+   hands the page a `MessagePort`. Anything unexpected goes through `s.fallback` (the failure
+   table above): a codec other than the one read from the settings, simulcast, a helper `error`
+   event (the helper sends one for every failure after `start`), the helper exiting on its own
+   (main reports it as an `error`), and the watchdog. Continuing a failed share in place didn't
+   work: swapping a capture track in restarts the RTP timestamps from its older clock (viewers
+   dropped every frame as stale), and the hardware encoder Chromium switches to mid-share at
+   <= 1080p stalled.
    For H.264 the helper pins `profile=constrained-baseline` in caps (what Sharkord's `42e01f`
    promises; AMF takes the profile from downstream caps) and reports the first keyframe's SPS as
    a `stream` event, so the log shows what viewers really get.
@@ -259,11 +290,13 @@ There are no automated tests. After a change, check what it touches:
   `[native-share] sent …` lines should keep `lost`/`resync` near zero. A window share, VP8, or
   the setting off must behave exactly as before.
 - **Native screen share (Linux Wayland, VA-API)**: the switch appears only when the startup probe
-  passes (`[native-share] probe` in the log). Share with H.264, simulcast off: **one** portal
-  dialog then the audio step, the local preview moves, a viewer gets 60 fps, stats show
+  passes (`[native-share] probe` in the log). Share with H.264: **one** portal dialog then the
+  audio step, the local preview moves, a viewer gets 60 fps, stats show
   `sharkord-share (vah264enc)`. Cancelling the portal dialog or the audio step cancels the share
-  and the desktop's sharing indicator goes away; stopping the share ends the helper. VP8 in
-  Sharkord's Devices settings: Chromium's picker, not the helper's, and a moving preview.
+  and the desktop's sharing indicator goes away; stopping the share ends the helper.
+- **Codec routing (both platforms)**: VP8, VP9 and `auto` in Sharkord's Devices settings, and a
+  codec the probe didn't open (AV1 on a GPU without AV1 encoding), are Chromium's share: its
+  picker, a moving preview, no `sharkord-share` process and Chromium's encoder in the stats.
 
 ## Commits and privacy
 
