@@ -8,10 +8,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Desktop notifications
   notificationShown:   () => ipcRenderer.send('notification-shown'),
   notificationClicked: () => ipcRenderer.send('notification-clicked'),
-  // Native screen share (SHARKORD_NATIVE_SHARE=1): the picked monitor, or null when the
+  // Native screen share (the nativeShare setting): the picked monitor, or null when the
   // share should stay Chromium's own; start hands the page a MessagePort (below)
-  nativeShareTarget: () => ipcRenderer.invoke('native-share-target'),
+  // Linux: pick asks the helper to pick the screen (instead of Chromium): 'ok', 'cancelled', or
+  // 'chromium' to use Chromium's getDisplayMedia; stop is for a share that ends before start
+  nativeShareTarget: codec => ipcRenderer.invoke('native-share-target', codec),
   nativeShareStart:  opts => ipcRenderer.send('native-share-start', opts),
+  nativeSharePick:   codec => ipcRenderer.invoke('native-share-pick', codec),
+  nativeShareStop:   () => ipcRenderer.send('native-share-stop'),
 })
 
 // The helper's frame port can't cross contextBridge; the page world takes it from a
@@ -41,8 +45,8 @@ function installShareAudioHooks (VIRTMIC) {
     return null
   }
 
-  md.getDisplayMedia = async (constraints) => {
-    const stream = await gdm(constraints)
+  // Also used on the stream the native share builds itself (Linux), which never calls Chromium's
+  const withShareAudio = async (stream) => {
     const api    = window.electronAPI
 
     if (await api.virtmicActive()) {
@@ -71,11 +75,13 @@ function installShareAudioHooks (VIRTMIC) {
     })
     return stream
   }
+  md.getDisplayMedia = async (constraints) => withShareAudio(await gdm(constraints))
+  md.getDisplayMedia.withShareAudio = withShareAudio
 }
 
 contextBridge.executeInMainWorld({ func: installShareAudioHooks, args: ['vencord-screen-share'] })
 
-// ── Native screen share (SHARKORD_NATIVE_SHARE=1) ──
+// ── Native screen share (the nativeShare setting, or SHARKORD_NATIVE_SHARE=1) ──
 // Sharkord keeps the real capture track (its preview); the connection gets a placeholder whose
 // every outgoing encoded frame is swapped, by an encoded transform, for a frame the native helper
 // (native/) captured and encoded with the GPU. Chromium keeps the connection, packetization and
@@ -136,12 +142,13 @@ self.onrtctransform = e => {
   setInterval(() => self.postMessage({ type: 'stats', stats }), 1000)
 }`
 
-function installNativeShare (workerSource) {
+function installNativeShare (workerSource, helperPicks) {
   const md = navigator.mediaDevices
+  const withShareAudio = md.getDisplayMedia.withShareAudio
   const gdm = md.getDisplayMedia.bind(md)
   const api = window.electronAPI
   const log = (...a) => console.log('[native-share]', ...a)
-  const shares = new Map()   // real capture track → share state
+  const shares = new Map()   // Sharkord's track (the capture, or on Linux the preview) → share state
   const CODECS = { 'video/H264': 'h264', 'video/AV1': 'av1' }
   const now = () => Math.round(performance.now() * 1000)   // one clock for every placeholder
   const num = v => typeof v === 'number' ? v : (v?.ideal ?? v?.exact ?? v?.max)
@@ -164,11 +171,61 @@ function installNativeShare (workerSource) {
     else { e.ports[0].postMessage({ cmd: 'stop' }); e.ports[0].close() }   // its share is gone
   })
 
+  // Whether the server allows simulcast: one of its public settings, which reach the page only over
+  // Sharkord's WebSocket (on joining, and again when an admin changes them). Read from each message
+  // as Sharkord receives it, never changed. null until seen
+  let serverSimulcast = null
+  const WS = window.WebSocket
+  window.WebSocket = class WebSocket extends WS {
+    constructor (...args) {
+      super(...args)
+      this.addEventListener('message', e => {
+        const m = typeof e.data === 'string' && e.data.match(/"webRtcSimulcastEnabled":(true|false)/)
+        if (m && serverSimulcast !== (m[1] === 'true')) { serverSimulcast = m[1] === 'true'; log('server simulcast:', serverSimulcast) }
+      })
+    }
+  }
+
+  // The screen codec picked in Sharkord's Devices settings (its localStorage). The helper encodes
+  // only H.264 and AV1, and on Linux it has to know before the pick, so it's used only when one of
+  // them is picked explicitly and the share won't be simulcast: Sharkord shares VP8 when the server
+  // allows simulcast and the user's switch is on (while the server's setting hasn't been seen, the
+  // switch alone decides). Anything else (VP8, VP9, auto, a setting it can't read) is Chromium's
+  // share from the start, on both platforms.
+  const nativeCodec = () => {
+    try {
+      const devices = JSON.parse(localStorage.getItem('sharkord-devices-settings'))
+      const simulcast = serverSimulcast !== false && devices?.simulcastEnabled !== false
+      return simulcast ? null : CODECS[devices?.screenCodec] || null
+    } catch { return null }
+  }
+
   md.getDisplayMedia = async (constraints) => {
+    // Linux: the helper picks and captures the screen, Chromium doesn't (one portal dialog, not
+    // two). Sharkord gets a stream the page builds: the preview is the helper's frames, decoded.
+    // Any other share (VP8, VP9, auto, simulcast) stays entirely Chromium's: its capture and encoder.
+    const codec = nativeCodec()
+    if (helperPicks && !nativeOff && constraints?.video && codec) {
+      const pick = await api.nativeSharePick(codec).catch(() => 'chromium')
+      if (pick === 'cancelled') throw new DOMException('Permission denied by user', 'NotAllowedError')
+      if (pick === 'ok') {
+        const preview = new MediaStreamTrackGenerator({ kind: 'video' })
+        startShare(preview, constraints, true)
+        return withShareAudio(new MediaStream([preview]))
+      }
+    }
     const real = await gdm(constraints)
     const video = real.getVideoTracks()[0]
-    const target = video && await api.nativeShareTarget().catch(() => null)
-    if (!target || nativeOff) return real   // a window, no helper, or it failed earlier: Chromium's own share
+    // A window, no helper, another codec or one this GPU can't encode, or it failed earlier:
+    // Chromium's own share
+    const target = video && codec && await api.nativeShareTarget(codec).catch(() => null)
+    if (!target || nativeOff) return real
+    startShare(video, constraints, false)
+    return real
+  }
+
+  // `owned`: the helper's capture is the only one (Linux), `video` its decoded preview
+  const startShare = (video, constraints, owned) => {
     const set = video.getSettings(), c = constraints?.video || {}
     const want = {
       width: num(c.width) || set.width || 1920, height: num(c.height) || set.height || 1080,
@@ -191,7 +248,7 @@ function installNativeShare (workerSource) {
       return blanks.get(k)
     }
     const worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })))
-    const s = { id: nextId++, want, gen, worker, port: null, sender: null, stopped: false, fell: false, anchored: false, tag: 0, stats: {}, helper: {}, size: 0, kbps: 2000, kbpsAt: 0, pending: [], lastPush: 0, pacer: null }
+    const s = { id: nextId++, owned, want, gen, worker, port: null, sender: null, stopped: false, fell: false, anchored: false, tag: 0, stats: {}, helper: {}, size: 0, kbps: 2000, kbpsAt: 0, pending: [], lastPush: 0, pacer: null }
     shares.set(video, s)
 
     const pushPlaceholder = (key, data) => {
@@ -232,11 +289,13 @@ function installNativeShare (workerSource) {
     const closeHelper = () => {
       clearInterval(s.boot)
       portWaiters.delete(s.id)
+      if (!s.port) api.nativeShareStop()   // Linux: the helper from the pick is waiting for start
       try { s.port?.postMessage({ cmd: 'stop' }); s.port?.close() } catch {}
       s.port = null
     }
     // Before any native frame went out (an unsupported codec, a helper that never started) the
-    // connection just gets Chromium's own capture. Mid-share, the share ends instead, as if the
+    // connection just gets Chromium's own capture -- if there is one: a share the helper picked
+    // (Linux) has nothing else, and ends. Mid-share, the share ends instead, as if the
     // capture had stopped: Sharkord cleans up on the track's `ended`, viewers see the share end, and
     // shares for the rest of the session use Chromium's own path. Continuing in place didn't work:
     // swapping the capture track in restarted the RTP timestamps from its older clock (viewers
@@ -246,14 +305,40 @@ function installNativeShare (workerSource) {
       if (s.fell || s.stopped) return
       s.fell = true
       closeHelper()
-      if (!s.sender || !s.stats.swapped) {
+      if (!s.owned && (!s.sender || !s.stats.swapped)) {
         log('using Chromium capture:', why)
         if (s.sender) { s.sender.transform = null; replaceTrack.call(s.sender, video).catch(e => log('fallback:', e.message)) }
         return
       }
       log('ending the share:', why)
       nativeOff = true
-      video.dispatchEvent(new Event('ended'))
+      // Again every second until Sharkord stops the track: a fallback right at the start (a codec
+      // the helper can't encode) comes before Sharkord listens for the end, and the share was
+      // left running on a black preview
+      let tries = 0
+      const end = () => {
+        if (s.trackStopped || tries++ >= 10) return
+        video.dispatchEvent(new Event('ended'))
+        setTimeout(end, 1000)
+      }
+      setTimeout(end)
+    }
+
+    // The preview of a share the helper picked: its frames, decoded by Chromium (on the GPU where
+    // it can). Decoding starts at the first keyframe.
+    const previewWriter = owned && video.writable.getWriter()
+    const decoder = owned && new VideoDecoder({
+      output: f => previewWriter.write(f).catch(() => f.close()),
+      error: e => log('preview:', e.message),
+    })
+    const preview = (codec, msg) => {
+      if (!decoder || decoder.state === 'closed') return
+      if (decoder.state === 'unconfigured') {
+        if (!msg.key) return
+        decoder.configure({ codec: codec === 'h264' ? 'avc1.42e034' : 'av01.0.13M.08', optimizeForLatency: true })
+      }
+      try { decoder.decode(new EncodedVideoChunk({ type: msg.key ? 'key' : 'delta', timestamp: msg.pts, data: msg.data })) }
+      catch (e) { log('preview:', e.message) }
     }
 
     worker.onmessage = e => {
@@ -271,6 +356,7 @@ function installNativeShare (workerSource) {
             if (msg.type === 'frame') {
               clearInterval(s.boot)
               s.lastFrameAt = performance.now()
+              preview(codec, msg)   // before its buffer moves to the worker
               const d = msg.data
               s.pending.push({ key: msg.key, data: d.byteOffset === 0 && d.byteLength === d.buffer.byteLength ? d.buffer : d.slice().buffer })
               pace()
@@ -293,13 +379,13 @@ function installNativeShare (workerSource) {
       if (s.stopped) return
       s.stopped = true; clearInterval(s.timer); clearTimeout(s.pacer); clearTimeout(s.keyTimer); closeHelper()
       worker.terminate(); gen.stop(); shares.delete(video); bySender.delete(s.sender)
+      try { if (decoder && decoder.state !== 'closed') decoder.close() } catch {}
       log('stopped', JSON.stringify(s.stats))
     }
     // Sharkord ends a share with track.stop(), which fires no 'ended'
     const stop = video.stop.bind(video)
-    video.stop = () => { s.stop(); stop() }
+    video.stop = () => { s.trackStopped = true; s.stop(); stop() }
     video.addEventListener('ended', () => s.stop())
-    return real
   }
 
   // Put the placeholder on the sender, attach the transform, and lift the resolution-based
@@ -410,9 +496,9 @@ function installNativeShare (workerSource) {
   }
 }
 
-// Installed on Windows always; each share asks the main process whether to go native
-if (process.platform === 'win32')
-  contextBridge.executeInMainWorld({ func: installNativeShare, args: [NATIVE_SHARE_WORKER] })
+// Installed on Windows and Linux always; each share asks the main process whether to go native
+if (process.platform === 'win32' || process.platform === 'linux')
+  contextBridge.executeInMainWorld({ func: installNativeShare, args: [NATIVE_SHARE_WORKER, process.platform === 'linux'] })
 
 // Sharkord shows plain `new Notification(...)` without an onclick, so hook the
 // constructor: flash the taskbar when one is shown, bring the window back on click.
@@ -498,21 +584,36 @@ function addChangeServerControls () {
   }
 }
 
-// ── Desktop options at the top of Sharkord's Settings → Others ─────────
-//   Found through the "Others" sidebar entry (the only one with the
-//   sliders-horizontal icon, so server settings don't get them). The rows are
-//   built from Sharkord's Group / Label / Switch class strings and apply
-//   immediately, outside Sharkord's Save bar. The tray menu has the same
-//   toggles if the anchor ever disappears.
-const DESKTOP = 'data-client-desktop-settings'
+// ── "Desktop Client" tab in Sharkord's user settings ──────────────────────────
+//   A sidebar entry after "Others" (found by its sliders-horizontal icon, so
+//   server settings don't get one), cloned from it so it keeps Sharkord's
+//   styling. Selecting it hides Sharkord's content area (its own elements are
+//   never changed, only hidden) and shows ours in the same place, built from
+//   Sharkord's card / label / switch / save-bar class strings. Changes wait
+//   for Save Changes like Sharkord's own; any other entry puts Sharkord's
+//   content back and drops an unsaved draft. The tray menu has the same
+//   toggles, applied at once, if the anchor ever disappears.
+const DESKTOP = 'data-client-desktop-tab'
 const SWITCH_CLASS = 'peer data-[state=checked]:bg-primary data-[state=unchecked]:bg-input focus-visible:border-ring focus-visible:ring-ring/50 dark:data-[state=unchecked]:bg-input/80 inline-flex h-[1.15rem] w-8 shrink-0 items-center rounded-full border border-transparent shadow-xs transition-all outline-none focus-visible:ring-[3px] disabled:cursor-not-allowed disabled:opacity-50'
 const THUMB_CLASS  = 'bg-background dark:data-[state=unchecked]:bg-foreground dark:data-[state=checked]:bg-primary-foreground pointer-events-none block size-4 rounded-full ring-0 transition-transform data-[state=checked]:translate-x-[calc(100%-2px)] data-[state=unchecked]:translate-x-0'
+const BUTTON_CLASS = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 py-2"
+const ACTIVE_ENTRY = ['bg-accent', 'font-medium']
+// lucide "check" and "x", for the codecs the GPU encodes
+const CHECK_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-check h-4 w-4 shrink-0 text-green-500"><path d="M20 6 9 17l-5-5"/></svg>'
+const X_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-x h-4 w-4 shrink-0 text-muted-foreground"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>'
+const svg = markup => new DOMParser().parseFromString(markup, 'image/svg+xml').documentElement
+// lucide "monitor"
+const MONITOR_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-monitor h-4 w-4 shrink-0"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>'
 const DESKTOP_OPTIONS = [
   { key: 'openAtLogin',    label: 'Open Sharkord when your computer starts up' },
+  // Only for launches at login: greyed out while Open at login is off (its value is kept)
+  { key: 'startMinimized', label: 'Start minimized', requires: 'openAtLogin',
+    description: 'When Sharkord opens at login, it starts in the system tray instead of showing its window.' },
   { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
   { key: 'nativeShare',    label: 'Native screen share (experimental)',
-    description: 'Captures and encodes whole-screen shares with the GPU outside the browser, for a steady frame rate. AMD GPUs; takes effect on the next share.' },
+    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
+      (process.platform === 'linux' ? 'AMD and Intel GPUs (VA-API), Wayland.' : 'AMD GPUs, whole screens.') + ' Takes effect on the next share.' },
 ]
 
 function el (tag, className, text) {
@@ -522,51 +623,220 @@ function el (tag, className, text) {
   return e
 }
 
-function addDesktopSettings () {
-  const others = document.querySelector('svg.lucide-sliders-horizontal')?.closest('[data-testid="settings-sidebar-entry"]')
-  if (!others?.classList.contains('bg-accent')) return   // Others isn't the open tab
-  const content = others.closest('nav')?.parentElement.querySelector('main [data-slot="card-content"]')
-  if (!content || content.querySelector(`[${DESKTOP}]`) || addDesktopSettings.pending) return
-  // Options the main process leaves out (nativeShare without a helper) get no row
-  addDesktopSettings.pending = true
-  ipcRenderer.invoke('desktop-settings-get').then(s => {
-    addDesktopSettings.pending = false
-    if (s && !content.querySelector(`[${DESKTOP}]`)) buildDesktopSettings(content, s)
-  }).catch(() => { addDesktopSettings.pending = false })
+// The open Desktop tab: { entry, panel, main, was, dirty } -- our entry and content, Sharkord's
+// hidden content area and the entry that was selected, and whether there are unsaved changes
+let _desktopOpen = null
+const OUTLINE_BUTTON_CLASS = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50 h-9 px-4 py-2"
+
+function closeDesktopTab () {
+  const o = _desktopOpen
+  if (!o) return
+  _desktopOpen = null
+  o.panel.remove()
+  o.main.hidden = false
+  o.entry.classList.remove(...ACTIVE_ENTRY)
+  if (o.was?.isConnected) o.was.classList.add(...ACTIVE_ENTRY)   // Sharkord re-renders it anyway when another is picked
 }
 
-function buildDesktopSettings (content, initial) {
+// Sharkord's "Discard unsaved changes?" dialog, rebuilt from its AlertDialog class strings and
+// words (its own is React state we can't open). true: Discard; false: Cancel. Like Sharkord's, only
+// its buttons answer it: Escape and a click on the backdrop do nothing
+function confirmDiscard () {
+  return new Promise(resolve => {
+    const root = el('div')
+    root.setAttribute(DESKTOP, 'dialog')
+    const overlay = el('div', 'fixed inset-0 z-50 bg-black/50')
+    const box = el('div', 'bg-background fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg sm:max-w-lg')
+    box.setAttribute('role', 'alertdialog')
+    box.setAttribute('aria-modal', 'true')
+    const header = el('div', 'flex flex-col gap-2 text-center sm:text-left')
+    header.append(el('h2', 'text-lg font-semibold', 'Discard unsaved changes?'),
+      el('p', 'text-muted-foreground text-sm', 'You have unsaved changes. If you leave now, they will be lost.'))
+    const footer = el('div', 'flex flex-col-reverse gap-2 sm:flex-row sm:justify-end')
+    const cancel = el('button', OUTLINE_BUTTON_CLASS, 'Cancel')
+    const discard = el('button', BUTTON_CLASS, 'Discard')
+    cancel.type = discard.type = 'button'
+    footer.append(cancel, discard)
+    box.append(header, footer)
+    root.append(overlay, box)
+    const done = answer => { root.remove(); document.removeEventListener('keydown', onKey, true); resolve(answer) }
+    // Escape stays here: not answering, and not reaching Sharkord (which would close its settings)
+    const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation() } }
+    cancel.addEventListener('click', () => done(false))
+    discard.addEventListener('click', () => done(true))
+    document.addEventListener('keydown', onKey, true)
+    document.body.append(root)
+    discard.focus()
+  })
+}
+
+const SAVE_BAR = '.sticky.bottom-4'   // Sharkord's SaveBar: its tab has unsaved changes
+const CONFIRM_DIALOG = '[data-slot="alert-dialog-content"]'
+
+// Sharkord's own tab has unsaved changes: let Sharkord ask, with its own "discard changes?" dialog,
+// by switching to another of its entries, and run `open` in the same mutation that drops them --
+// before the browser paints, so that other entry never shows. Cancel keeps the changes and the tab.
+// The dialog closes a moment before Sharkord drops the changes, hence the grace period.
+function afterSharkordTab (nav, main, open) {
+  if (!main.querySelector(SAVE_BAR)) return open()
+  const other = [...nav.querySelectorAll('[data-testid="settings-sidebar-entry"]')].find(b => !b.classList.contains('bg-accent'))
+  if (!other) return
+  let asked = false, timer = null
+  const stop = () => { watch.disconnect(); clearTimeout(timer) }
+  const watch = new MutationObserver(() => {
+    if (!main.isConnected) return stop()
+    if (!main.querySelector(SAVE_BAR)) { stop(); return open() }
+    if (document.querySelector(CONFIRM_DIALOG)) { asked = true; clearTimeout(timer); timer = null }
+    else if (asked && !timer) timer = setTimeout(stop, 1000)   // cancelled: the changes stay
+  })
+  watch.observe(document.body, { childList: true, subtree: true })
+  timer = setTimeout(() => { if (!asked) stop() }, 2000)   // no dialog came
+  other.click()
+}
+
+function addDesktopTab () {
+  // Sharkord re-rendered its content area, or the settings closed: ours goes too
+  if (_desktopOpen && (!_desktopOpen.main.isConnected || !_desktopOpen.panel.isConnected || !_desktopOpen.main.hidden)) closeDesktopTab()
+  const others = document.querySelector('svg.lucide-sliders-horizontal')?.closest('[data-testid="settings-sidebar-entry"]')
+  const nav = others?.closest('nav')
+  if (!nav || nav.querySelector(`[${DESKTOP}]`)) return
+  // Built fresh (an icon and a truncated label, as Sharkord's SidebarEntry renders) with the
+  // entry's own class string, so it looks like Sharkord's whatever Others carries
+  const entry = el('button', others.className)
+  entry.type = 'button'
+  entry.setAttribute(DESKTOP, '')
+  entry.classList.remove(...ACTIVE_ENTRY)
+  entry.append(svg(MONITOR_ICON), el('span', 'truncate', 'Desktop Client'))
+  others.after(entry)
+
+  entry.addEventListener('click', async () => {
+    const main = nav.parentElement?.querySelector(':scope > main')
+    if (_desktopOpen || !main) return
+    // Fetched first, so opening needs no wait once Sharkord lets go of its tab
+    const initial = await ipcRenderer.invoke('desktop-settings-get').catch(() => null)
+    if (!initial) return
+    afterSharkordTab(nav, main, () => {
+      if (_desktopOpen || !entry.isConnected || !main.isConnected) return
+      const was = nav.querySelector('[data-testid="settings-sidebar-entry"].bg-accent')
+      was?.classList.remove(...ACTIVE_ENTRY)
+      entry.classList.add(...ACTIVE_ENTRY)
+      const { panel, dirty } = buildDesktopPanel(main.className, initial)
+      main.hidden = true
+      main.after(panel)
+      _desktopOpen = { entry, panel, main, was, dirty }
+      // On a narrow window the sidebar is a drawer: close it through Sharkord's own backdrop
+      nav.parentElement.querySelector(':scope > div.absolute.inset-0')?.click()
+    })
+  })
+
+  // Another sidebar entry or the back button: Sharkord's content comes back, after asking if there
+  // are unsaved changes (capture, before Sharkord's handlers see the click)
+  const shell = nav.parentElement.parentElement
+  shell.addEventListener('click', e => {
+    if (!_desktopOpen || entry.contains(e.target)) return
+    // A sidebar entry, or a button in the settings header (back)
+    const leaving = e.target.closest('nav button') || (shell.firstElementChild?.contains(e.target) && e.target.closest('button'))
+    if (!leaving) return
+    if (!_desktopOpen.dirty()) return closeDesktopTab()
+    // Unsaved changes: hold the click, ask, and on Discard make it again
+    e.preventDefault(); e.stopPropagation()
+    confirmDiscard().then(discard => { if (discard && _desktopOpen) { closeDesktopTab(); leaving.click() } })
+  }, true)
+}
+
+// Escape closes Sharkord's settings: ask first when our tab has unsaved changes
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !_desktopOpen || document.querySelector(`[${DESKTOP}=dialog]`)) return
+  if (!_desktopOpen.dirty()) return closeDesktopTab()
+  e.preventDefault(); e.stopImmediatePropagation()
+  confirmDiscard().then(discard => {
+    if (!discard || !_desktopOpen) return
+    closeDesktopTab()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  })
+}, true)
+
+// Our content area: one card like Sharkord's, and its save bar while there are unsaved changes
+function buildDesktopPanel (mainClass, initial) {
+  let saved = initial, draft = { ...initial }
+  const panel = el('main', mainClass)
+  panel.setAttribute(DESKTOP, 'panel')
+  const wrap = el('div', 'mx-auto max-w-4xl space-y-6 p-4 md:p-6')
+  const card = el('div', 'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm')
+  const header = el('div', '@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6')
+  header.append(el('div', 'leading-none font-semibold', 'Desktop Client'),
+    el('div', 'text-muted-foreground text-sm', 'Options of this desktop client, kept on this computer.'))
+  const content = el('div', 'px-6 space-y-4')
+  card.append(header, content)
+  wrap.append(card)
+
+  const bar = el('div', 'pointer-events-none sticky bottom-4 z-20 px-4 md:px-6')
+  const barInner = el('div', 'pointer-events-auto mx-auto flex max-w-4xl items-center justify-between gap-4 rounded-xl border bg-card px-4 py-3 shadow-lg')
+  const save = el('button', BUTTON_CLASS, 'Save Changes')
+  save.type = 'button'
+  barInner.append(el('span', 'text-sm font-medium', 'You have unsaved changes'), save)
+  bar.append(barInner)
+  panel.append(wrap, bar)
+
   const switches = {}
-  const render = s => {
-    if (!s) return
-    for (const key of Object.keys(switches)) {
-      const state = s[key] ? 'checked' : 'unchecked'
-      switches[key].setAttribute('aria-checked', String(!!s[key]))
-      switches[key].dataset.state = state
-      switches[key].firstChild.dataset.state = state
+  const render = () => {
+    for (const [key, sw] of Object.entries(switches)) {
+      const requires = DESKTOP_OPTIONS.find(o => o.key === key)?.requires
+      sw.disabled = !(key in initial) || (!!requires && !draft[requires])
+      sw.closest(`[${DESKTOP}=row]`)?.classList.toggle('opacity-50', !!requires && !draft[requires])
+      const state = draft[key] ? 'checked' : 'unchecked'
+      sw.setAttribute('aria-checked', String(!!draft[key]))
+      sw.dataset.state = state
+      sw.firstChild.dataset.state = state
     }
+    bar.hidden = !changed().length
   }
-  const rows = DESKTOP_OPTIONS.filter(({ key }) => key in initial).map(({ key, label, description }) => {
+  const changed = () => Object.keys(switches).filter(k => !!draft[k] !== !!saved[k])
+  save.addEventListener('click', async () => {
+    save.disabled = true; save.textContent = 'Saving...'
+    const next = await ipcRenderer.invoke('desktop-settings-set', Object.fromEntries(changed().map(k => [k, !!draft[k]]))).catch(() => null)
+    save.disabled = false; save.textContent = 'Save Changes'
+    // A failed save keeps the draft, and the bar, to try again
+    if (next) { saved = next; draft = { ...draft, ...Object.fromEntries(Object.keys(switches).map(k => [k, next[k]])) } }
+    render()
+  })
+
+  // An option with only a note (the native share where it can't run here) shows greyed out, with
+  // the note saying why. Options the main process leaves out get no row (nativeShare in a build
+  // without the helper).
+  for (const { key, label, description } of DESKTOP_OPTIONS.filter(({ key }) => key in initial || initial[key + 'Note'])) {
     const group = el('div', 'flex flex-col gap-2')
-    group.setAttribute(DESKTOP, key)
+    group.setAttribute(DESKTOP, 'row')
     const text = el('div', 'flex flex-col')
     text.append(el('label', 'flex items-center gap-2 text-sm leading-none font-medium', label))
     if (description) text.append(el('span', 'text-sm text-muted-foreground', description))
+    // What the startup probe found the GPU encodes: a check or a cross per codec
+    const codecs = initial[key + 'Codecs']
+    if (codecs) {
+      const list = el('div', 'flex flex-wrap items-center gap-x-4 gap-y-1 pt-1 text-sm text-muted-foreground')
+      list.append(el('span', '', 'This GPU can hardware encode:'))
+      for (const [id, name] of [['h264', 'H.264'], ['av1', 'AV1']]) {
+        const item = el('span', 'flex items-center gap-1')
+        item.append(svg(codecs[id] ? CHECK_ICON : X_ICON), el('span', codecs[id] ? 'text-foreground' : '', name))
+        item.title = codecs[id] ? name + ' shares use the GPU encoder' : name + ' shares use the browser\'s encoder'
+        list.append(item)
+      }
+      text.append(list)
+    }
+    if (initial[key + 'Note']) text.append(el('span', 'text-sm text-muted-foreground', initial[key + 'Note']))
     const sw = el('button', SWITCH_CLASS)
     sw.type = 'button'
     sw.setAttribute('role', 'switch')
     sw.append(el('span', THUMB_CLASS))
-    sw.addEventListener('click', async () => {
-      render(await ipcRenderer.invoke('desktop-settings-set', { [key]: sw.dataset.state !== 'checked' }))
-    })
+    sw.addEventListener('click', () => { draft[key] = !draft[key]; render() })
     switches[key] = sw
     const control = el('div', 'flex flex-col gap-2')
     control.append(sw)
     group.append(text, control)
-    return group
-  })
-  content.prepend(...rows)
-  render(initial)
+    content.append(group)
+  }
+  render()
+  return { panel, dirty: () => changed().length > 0 }
 }
 
 let _clientControlsQueued = false
@@ -576,6 +846,6 @@ new MutationObserver(() => {
   requestAnimationFrame(() => {
     _clientControlsQueued = false
     addChangeServerControls()
-    addDesktopSettings()
+    addDesktopTab()
   })
 }).observe(document, { childList: true, subtree: true })

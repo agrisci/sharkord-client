@@ -1,5 +1,5 @@
 {
-  "name": "sharkord-client",
+  "name": "sharkord",
   "version": "0.1.0",
   "description": "Standalone Sharkord desktop client",
   "author": { "name": "Sharkord Client", "email": "noreply@sharkord.example.com" },
@@ -9,7 +9,7 @@
     "start":        "electron .",
     "stage:native": "node scripts/stage-native.js",
     "dist:win":     "node scripts/stage-native.js && electron-builder --win --publish never",
-    "dist:linux":   "electron-builder --linux --publish never",
+    "dist:linux":   "node scripts/stage-native.js && electron-builder --linux --publish never",
     "dist:all":     "node scripts/stage-native.js && electron-builder --win --linux --publish never"
   },
   "build": {
@@ -39,10 +39,15 @@
         { "target": "rpm",      "arch": ["x64"] }
       ],
       "icon": "build/icons",
-      "category": "Network"
+      "category": "Network",
+      "extraResources": [{ "from": "build/native", "to": "native" }]
+    },
+    "rpm": {
+      "fpm": ["--rpm-tag", "Recommends: gstreamer1-plugins-bad-free", "--rpm-tag", "Recommends: pipewire-gstreamer"]
     },
     "deb": {
-      "depends": ["libgtk-3-0", "libnss3", "libxss1"]
+      "depends": ["libgtk-3-0", "libnss3", "libxss1"],
+      "recommends": ["gstreamer1.0-plugins-bad", "gstreamer1.0-pipewire", "mesa-va-drivers"]
     }
   },
   "optionalDependencies": {

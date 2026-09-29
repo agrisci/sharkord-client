@@ -513,6 +513,7 @@
       $('title').textContent = 'Screen Share'
       $('subtitle').textContent = 'Choose what audio to include, then go live'
       $('preview-img').src = src.thumbnail
+      $('preview-img').hidden = !src.thumbnail   // the native share's pick has none (Linux)
       $('preview-name').textContent = src.name
       $('step1').hidden = true; $('step2').hidden = false
       $('back').hidden = state.skipPicker; $('golive').hidden = false

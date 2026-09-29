@@ -12,5 +12,9 @@ gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"
 
+# Linux: the xdg-desktop-portal ScreenCast session (zbus is pure Rust; no tokio)
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["screencast", "async-io"] }
+
 [profile.release]
 debug = "line-tables-only"

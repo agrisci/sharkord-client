@@ -19,13 +19,21 @@ on:
 env:
   BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.bump || 'none' }}
 
+# A newer push to the same PR or to dev cancels the run still going for the older commit. Release
+# runs each get their own group and are never cancelled: stopping one halfway could leave the bump
+# committed without its release.
+concurrency:
+  group: build-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # 22.04: the native helper needs the build's glibc (2.35 runs on Debian 12 too)
+          - os: ubuntu-22.04
             dist: linux
           - os: windows-latest
             dist: win
@@ -49,9 +57,18 @@ jobs:
         if: env.BUMP != 'none'
         run: npm version ${{ env.BUMP }} --no-git-tag-version
 
-      - name: Install rpm tools
+      # rpm tools, plus GStreamer's development files for the native helper; the plugins only make
+      # its self-check's output complete (without a GPU it runs either way, and the installed app
+      # uses the user's own GStreamer)
+      - name: Install rpm tools and GStreamer
         if: matrix.dist == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y rpm
+        run: |
+          sudo apt-get update
+          # The image's libunwind-14-dev (LLVM) conflicts with the libunwind-dev GStreamer needs
+          sudo apt-get remove -y libunwind-14-dev
+          sudo apt-get install -y rpm pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-bad gstreamer1.0-pipewire
+          echo "SHARKORD_REQUIRE_NATIVE=1" >> "$GITHUB_ENV"
 
       # The native screen share helper (native/) builds against GStreamer MSVC and ships a subset
       # of its runtime (scripts/stage-native.js). Rust comes from native/rust-toolchain.toml.
