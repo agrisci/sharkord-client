@@ -346,7 +346,8 @@ fn build(start: &Start, out: &Out, capture: Capture) -> Result<Share> {
     let fps = start.fps;
     // A keyframe a minute: viewers joining and packet loss get one on request (PLI), and a
     // scheduled 1080p keyframe (~400 KB measured on real desktop content) is a burst larger than a
-    // second's budget, which kept Chromium's bandwidth estimate from ever rising
+    // second's budget, which kept Chromium's bandwidth estimate from ever rising. VA's encoders
+    // allow at most 1024 frames (`set_int` clamps to it): ~17 s at 60 fps
     let key_interval = fps * 60;
 
     let pipeline = gst::Pipeline::with_name("share");

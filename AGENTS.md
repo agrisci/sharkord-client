@@ -192,8 +192,9 @@ and the GL read-back pinned a CPU core.
    the encoder target, and its estimate only grows to 1.5x what is acknowledged. While loss, round
    trip and Chromium's pacer queue stay clean it only steps up with the estimate (which dips 15-50%
    every few seconds on a clean LAN with mediasoup); on congestion (loss, a growing round trip, or
-   packets waiting over 50 ms in the pacer, i.e. the estimate really below what goes out) it drops
-   to 0.85x. Capped by Sharkord's bitrate
+   packets waiting over 250 ms in the pacer, i.e. the estimate really below what goes out; a
+   keyframe's 50-180 ms doesn't count) it drops to 0.85x.
+   Every bitrate change restarts the encoder with a keyframe (`vah264enc` and AMF), so changes are rare. Capped by Sharkord's bitrate
    setting and ~25 Mbps at 4K60; the resolution stays what the user picked.
    `getStats` is rewritten so Sharkord's stats show the helper's encoder and size. Main kills the
    helper on every exit path (`stopNativeShare`; the page sends `native-share-stop` for a share
@@ -327,7 +328,8 @@ There are no automated tests. After a change, check what it touches:
 - **Native screen share (Windows, AMD)**: turn it on in Settings → Desktop Client (or the tray). Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `GPU (Native: AMF, amf…)`. The `[native-share] sent …` lines (DevTools console, and the app's log,
-  `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero. A window share, VP8, or
+  `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero
+  (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for). A window share, VP8, or
   the setting off must behave exactly as before.
 - **Native screen share (Linux Wayland, VA-API)**: the switch is usable only when the startup
   probe passes (`[native-share] probe` in the log); otherwise it's greyed out with the reason, and

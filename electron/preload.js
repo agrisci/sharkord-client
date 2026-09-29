@@ -285,7 +285,7 @@ function installNativeShare (workerSource, helperPicks) {
     const requestKeyframe = () => {
       if (s.keyTimer) return
       const wait = Math.max(0, (s.keyAt || 0) + 1000 - performance.now())
-      s.keyTimer = setTimeout(() => { s.keyTimer = null; s.keyAt = performance.now(); s.port?.postMessage({ cmd: 'keyframe' }) }, wait)
+      s.keyTimer = setTimeout(() => { s.keyTimer = null; s.keyAt = performance.now(); s.keyReqs = (s.keyReqs || 0) + 1; s.port?.postMessage({ cmd: 'keyframe' }) }, wait)
     }
     const closeHelper = () => {
       clearInterval(s.boot)
@@ -431,15 +431,18 @@ function installNativeShare (workerSource, helperPicks) {
       // dropping 15-30% every few seconds on a clean LAN (no loss, no NACKs, 1 ms RTT, iperf clean
       // to 100 Mbps), so while the path is clean the helper works up to its cap and the estimate follows
       // what is really sent; on real congestion it drops to 0.85x the estimate until 10 s without.
-      // Congestion: loss, the round trip growing, or packets waiting in Chromium's pacer. The pacer
-      // only queues when the estimate is really below what goes out: after a quiet stretch it fell
-      // 32 -> 5.6 Mbps and stayed, and holding 25 Mbps through that queued 0.8 s of lag. The
-      // cap: Sharkord's bitrate setting (x-google-max-bitrate in the answer) and 0.05 bits per
-      // pixel per frame (~25 Mbps at 4K60). A change costs an AMF keyframe, so down at once, up
-      // only in 30% steps at least 4 s apart.
+      // Congestion: loss, the round trip growing, or packets kept waiting in Chromium's pacer. The
+      // pacer stays queued when the estimate is really below what goes out: after a quiet stretch
+      // it fell 32 -> 5.6 Mbps and stayed, and holding 25 Mbps through that queued 0.8 s of lag.
+      // A keyframe queues 50-180 ms on a clean path (over two ticks on Wi-Fi), so only over 250 ms
+      // counts: counted, each keyframe lowered the bitrate, and the change itself restarts the
+      // encoder with a keyframe (vah264enc and AMF reconfigure on any bitrate change) -- a
+      // keyframe every few seconds. The cap: Sharkord's bitrate setting (x-google-max-bitrate in
+      // the answer) and 0.05 bits per pixel per frame (~25 Mbps at 4K60). So down at once, up only
+      // in 30% steps at least 4 s apart.
       const rtt = r?.roundTripTime
       if (rtt != null) s.minRtt = Math.min(s.minRtt ?? rtt, rtt)
-      if ((r?.fractionLost ?? 0) > 0.02 || (rtt != null && rtt > s.minRtt + 0.02) || pacerMs > 50) s.congestedAt = performance.now()
+      if ((r?.fractionLost ?? 0) > 0.02 || (rtt != null && rtt > s.minRtt + 0.02) || pacerMs > 250) s.congestedAt = performance.now()
       if (bwe && s.port && s.encoder) {
         const mid = pc?.getTransceivers().find(t => t.sender === sender)?.mid
         const sec = mid != null && pc.remoteDescription?.sdp.split(/(?=^m=)/m).find(m => m.includes('a=mid:' + mid + '\r'))
@@ -456,7 +459,7 @@ function installNativeShare (workerSource, helperPicks) {
           s.kbps = aim; s.kbpsAt = performance.now(); s.port.postMessage({ cmd: 'bitrate', kbps: aim })
         }
       }
-      if (o) log(`sent ${o.framesPerSecond ?? 0} fps, estimate ${bwe} kbps, target ${Math.round((o.targetBitrate || 0) / 1000)} kbps, asked ${s.kbps} kbps (cap ${s.cap}), pacer ${pacerMs} ms, rtt ${Math.round((r?.roundTripTime ?? 0) * 1000)} ms, jitter ${Math.round((r?.jitter ?? 0) * 1000)} ms, lost ${r?.packetsLost ?? 0} (${Math.round((r?.fractionLost ?? 0) * 1000) / 10}%), nack ${o?.nackCount ?? 0}, retx ${o?.retransmittedPacketsSent ?? 0}, helper ${JSON.stringify(s.helper)}, worker ${JSON.stringify(s.stats)}`)
+      if (o) log(`sent ${o.framesPerSecond ?? 0} fps, estimate ${bwe} kbps, target ${Math.round((o.targetBitrate || 0) / 1000)} kbps, asked ${s.kbps} kbps (cap ${s.cap}), pacer ${pacerMs} ms, rtt ${Math.round((r?.roundTripTime ?? 0) * 1000)} ms, jitter ${Math.round((r?.jitter ?? 0) * 1000)} ms, lost ${r?.packetsLost ?? 0} (${Math.round((r?.fractionLost ?? 0) * 1000) / 10}%), nack ${o?.nackCount ?? 0}, retx ${o?.retransmittedPacketsSent ?? 0}, pli ${o.pliCount ?? 0}, fir ${o.firCount ?? 0}, keys ${o.keyFramesEncoded ?? 0}, keyreq ${s.keyReqs || 0}, helper ${JSON.stringify(s.helper)}, worker ${JSON.stringify(s.stats)}`)
     }, 2000)
   }
   // Stats describe the helper's encode, not the placeholder's: Sharkord's stats panel would
