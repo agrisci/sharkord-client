@@ -208,6 +208,11 @@ and the GL read-back pinned a CPU core.
   optional (`obtainVenmic()` returns `null` when it can't load).
 - Clean up on every exit path: close the picker, `venmicUnlink()` and deny pending
   display-media callbacks when windows close or the server changes.
+- **Every change checks for stale documentation** in the same commit: search `AGENTS.md`,
+  `README.md`, `ROADMAP.md`, code comments and the settings / picker texts for what changed —
+  names, paths, file and package names, settings keys, IPC channels, option labels, behaviour
+  and platform notes — and fix every mention, including the manual test checklist. Comments
+  describe the code as it is, never how it used to be.
 
 ### Code style
 
