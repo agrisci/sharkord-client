@@ -115,7 +115,7 @@ shares* on (off by default):
 |---|-----|------|--------|-------|
 | 23 | P1 | Test on real internet uploads | 🧪 | Only tested on a LAN. Try a slow and a bufferbloated home upload: does the loss / round-trip check back off early enough? |
 | 24 | P1 | Faster start | 📋 | Reaching full rate takes ~30 s from Chromium's ~5 Mbps start. Start from the last good rate per server (still guarded by the congestion check). |
-| 25 | P2 | Fewer keyframes on AMD bitrate changes | 💡 | GStreamer's AMF element re-initialises the encoder on any property change (`property_updated`), a 4K keyframe per step. Use fewer, larger steps. NVENC/QSV (#7, #8) don't have this. |
+| 25 | P2 | Fewer keyframes on bitrate changes | 💡 | GStreamer's AMF element re-initialises the encoder on any property change (`property_updated`), a 4K keyframe per step; `vah264enc` does the same (`bitrate` sets `reconf`, the next frame drains and reopens the encoder, in 1.28 and `main`). #27 now keeps keyframes from lowering the bitrate. Use fewer, larger steps. NVENC/QSV (#7, #8) don't have this. |
 | 26 | P2 | Slider vs resolution cap | 💡 | Decide whether Sharkord's slider alone should limit; today 4K60 stops at ~25 Mbps (0.05 bits per pixel per frame) even with a higher slider. |
 
 ## Viewers
@@ -195,7 +195,7 @@ shares* on (off by default):
 | 83 | Fixed resolution | The share keeps the resolution the user picked instead of following bandwidth. |
 | 84 | Hardware H.264/AV1 on the Chromium path (Windows) | `PlatformH264CbpEncoding`, `WebRtcAllowWgcUsingTexture`, `WebRtcAV1HWEncode`. |
 | 1 | Stall watchdog | No helper frame for 10 s, or none swapped for 6 s: before the first frame on Windows the share switches to Chromium's capture, otherwise it ends. |
-| 27 | Pacer delay as a congestion signal | Over 50 ms counts as congestion: after a quiet stretch the estimate fell 32 → 5.6 Mbps and holding the rate queued 0.8 s of lag. |
+| 27 | Pacer delay as a congestion signal | A queue that stays counts as congestion (over 250 ms, or over 50 ms on two readings running): after a quiet stretch the estimate fell 32 → 5.6 Mbps and holding the rate queued 0.8 s of lag. A single keyframe's spike (50-135 ms) no longer does: it lowered the bitrate, the change restarted the encoder with another keyframe, and a 1080p share keyed every 5-10 s on a clean cable (replayed on the logged shares: 18 false alarms → 1, the sustained queue still caught). |
 | 69 | EPIPE on the helper's stdin | `proc.stdin` has an `error` listener. |
 | 70 | Helper start failure reported | Every failure after `start` sends an `error` event; `started` is sent once capture runs. |
 | 71 | Helper crash ends the share cleanly | Main reports an unexpected exit to the page; mid-share the share ends like a stopped capture and the session falls back to Chromium's own path (verified by ending the helper mid-share). |

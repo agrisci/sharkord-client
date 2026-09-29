@@ -431,15 +431,20 @@ function installNativeShare (workerSource, helperPicks) {
       // dropping 15-30% every few seconds on a clean LAN (no loss, no NACKs, 1 ms RTT, iperf clean
       // to 100 Mbps), so while the path is clean the helper works up to its cap and the estimate follows
       // what is really sent; on real congestion it drops to 0.85x the estimate until 10 s without.
-      // Congestion: loss, the round trip growing, or packets waiting in Chromium's pacer. The pacer
-      // only queues when the estimate is really below what goes out: after a quiet stretch it fell
-      // 32 -> 5.6 Mbps and stayed, and holding 25 Mbps through that queued 0.8 s of lag. The
-      // cap: Sharkord's bitrate setting (x-google-max-bitrate in the answer) and 0.05 bits per
-      // pixel per frame (~25 Mbps at 4K60). A change costs an AMF keyframe, so down at once, up
-      // only in 30% steps at least 4 s apart.
+      // Congestion: loss, the round trip growing, or packets kept waiting in Chromium's pacer. The
+      // pacer stays queued when the estimate is really below what goes out: after a quiet stretch
+      // it fell 32 -> 5.6 Mbps and stayed, and holding 25 Mbps through that queued 0.8 s of lag.
+      // One keyframe queues 50-135 ms for a single tick on a clean path, so that alone isn't
+      // congestion (over 250 ms, or over 50 ms two ticks running): counted, each keyframe lowered
+      // the bitrate, and the change itself restarts the encoder with a keyframe (vah264enc and
+      // AMF reconfigure on any bitrate change) -- a keyframe every few seconds. The cap: Sharkord's
+      // bitrate setting (x-google-max-bitrate in the answer) and 0.05 bits per pixel per frame
+      // (~25 Mbps at 4K60). So down at once, up only in 30% steps at least 4 s apart.
       const rtt = r?.roundTripTime
       if (rtt != null) s.minRtt = Math.min(s.minRtt ?? rtt, rtt)
-      if ((r?.fractionLost ?? 0) > 0.02 || (rtt != null && rtt > s.minRtt + 0.02) || pacerMs > 50) s.congestedAt = performance.now()
+      const queued = pacerMs > 250 || (pacerMs > 50 && (s.lastPacerMs ?? 0) > 50)
+      s.lastPacerMs = pacerMs
+      if ((r?.fractionLost ?? 0) > 0.02 || (rtt != null && rtt > s.minRtt + 0.02) || queued) s.congestedAt = performance.now()
       if (bwe && s.port && s.encoder) {
         const mid = pc?.getTransceivers().find(t => t.sender === sender)?.mid
         const sec = mid != null && pc.remoteDescription?.sdp.split(/(?=^m=)/m).find(m => m.includes('a=mid:' + mid + '\r'))
