@@ -140,7 +140,7 @@ shares* on (off by default):
 
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
-| 33 | P0 | Always-on log files | 📋 | Main-process and `[native-share]` logs to `userData/logs` (rotated), independent of launch flags. The helper's stderr is discarded today (`spawnHelper` in `main.js`). |
+| 33 | P0 | Always-on log files | ✅ | `log()` also writes `userData/logs/main.log` on every launch (menu, tray, login), with the previous run in `main.old.log`: two files of at most 5 MB, rotated at startup and when full (checked with a `GST_DEBUG=9` flood). The helper's stderr goes in as `[helper]` lines; the startup probe streams it too (`execFile` killed it past 1 MB). |
 | 34 | P0 | "Copy diagnostics" button | 📋 | Settings → Desktop Client: GPU and encoder list (#9), Electron/Chromium version, OS, last share stats, recent log. Turns "it's black for me" into a fixable report. |
 | 35 | P1 | Quieter share logging | 📋 | One summary line every ~10 s by default, per-2 s detail behind a debug switch; drop the worker's debug counters (`ckNoNk`, `nkNoCk`). |
 | 36 | P2 | Hardware test matrix | 💡 | A checklist for volunteers (GPU vendor × codec × resolution × OS) plus the diagnostics output, collected in an issue. |

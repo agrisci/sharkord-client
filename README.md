@@ -113,6 +113,7 @@ Windows builds aren't code-signed, so SmartScreen may warn on first run (**More 
 | **Change server** | Sharkord's **☰** menu → **Change server**, the button on the login screen, `Ctrl+Shift+O`, or the tray menu |
 | **Tray and startup** | In the **Desktop Client** tab of Sharkord's user settings (saved with **Save Changes**, like Sharkord's own tabs), or in the tray menu: **Open at login**, **Start minimized** (a login launch starts in the tray; only with Open at login) and **Minimize to tray** (X keeps Sharkord running; quit from the tray, even during a call). Launching Sharkord again brings the running window to the front |
 | **DevTools** | `Ctrl+Shift+I` |
+| **Logs (for bug reports)** | `logs/main.log` in the settings folder (`~/.config/sharkord`, `%APPDATA%\sharkord`), and the previous run in `main.old.log`; at most 5 MB each. Written on every launch, from the menu or at login too |
 
 ---
 
@@ -122,7 +123,7 @@ Windows builds aren't code-signed, so SmartScreen may warn on first run (**More 
 the list:
 
 - **Never break a share, on any hardware:** a clean fallback for every capture failure, and
-  always-on logs plus a "Copy diagnostics" button for bug reports.
+  a "Copy diagnostics" button for bug reports (the log files are already written).
 - **More GPUs for the native share:** NVIDIA (NVENC) and Intel (Quick Sync) on Windows, where
   only AMD is supported today.
 - **4K at 120 fps:** lift the remaining frame-rate limits (WebRTC's default 60 fps cap per
