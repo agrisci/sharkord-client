@@ -19,6 +19,13 @@ on:
 env:
   BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.bump || 'none' }}
 
+# A newer push to the same PR or to dev cancels the run still going for the older commit. Release
+# runs each get their own group and are never cancelled: stopping one halfway could leave the bump
+# committed without its release.
+concurrency:
+  group: build-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
   build:
     strategy:

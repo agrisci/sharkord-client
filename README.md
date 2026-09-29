@@ -77,7 +77,8 @@ can't be reached, the error page has **Retry** and **Change server** buttons.
 Work happens on feature branches that are merged into `dev` through pull requests. GitHub
 Actions (`.github/workflows/build.yml`) builds the Windows installer and the Linux packages on
 native runners for every PR into `dev` or `main` and every push to `dev`, and uploads them as
-workflow artifacts. Both jobs install GStreamer and build the native helper (the Linux job on
+workflow artifacts; a newer push to the same PR or to `dev` cancels the run still going for the
+older commit (release runs are never cancelled). Both jobs install GStreamer and build the native helper (the Linux job on
 Ubuntu 22.04, so the helper runs on older glibc too).
 
 **Versioning:** [SemVer](https://semver.org), independent of the Sharkord server's version (the

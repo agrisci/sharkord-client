@@ -330,7 +330,7 @@ This repo is public: `agrisci/sharkord-client`.
   (use `https://sharkord.example.com`).
 - Branches: work on a feature branch off `dev` and open the PR against `dev` (not `main`);
   don't commit straight to `dev`. **Open the PR only when the branch is ready to merge**: CI
-  builds both platforms for every push to a branch with an open PR, so an early PR spends a full
-  build on each work-in-progress commit. Test locally until then (`npm start`, `cargo build`,
+  builds both platforms for every push to a branch with an open PR (a newer push cancels the run
+  still going for the older commit), so an early PR spends a build on each work-in-progress commit. Test locally until then (`npm start`, `cargo build`,
   `npm run dist:*`); the PR's CI run then checks the final state, and must pass.
 - Commit messages: short imperative subject, blank line, `-` bullet body describing each change.
