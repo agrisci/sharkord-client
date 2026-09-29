@@ -149,7 +149,7 @@ ipcMain.on('change-server', e => { if (e.sender === win?.webContents) changeServ
 ipcMain.on('notification-shown',   e => { if (e.sender === win?.webContents && !win.isFocused()) win.flashFrame(true) })
 ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) showWindow() })
 
-// Page → "Desktop" tab added to Sharkord's user settings (preload.js)
+// Page → "Desktop Client" tab added to Sharkord's user settings (preload.js)
 ipcMain.handle('desktop-settings-get', e => e.sender === win?.webContents ? desktopSettings() : null)
 ipcMain.handle('desktop-settings-set', (e, s) => e.sender === win?.webContents ? setDesktopSettings(s) : null)
 
@@ -253,9 +253,15 @@ const canEncode = codec => !_nativeProbe?.missing?.length && !!_nativeProbe?.[co
 const nativeShareSupported = () => !!nativeShareExe() &&
   (process.platform !== 'linux' || isWayland) && (canEncode('h264') || canEncode('av1'))
 
-// Why the native share is off, or only for one codec, on this machine: shown under its switch in
-// Settings, so a missing driver or plugin doesn't just make the option vanish. null: nothing to say
-// (or the probe hasn't answered yet).
+// What the startup probe found the GPU encodes, once it ran cleanly: a list under the switch
+const nativeShareCodecs = () => {
+  const p = _nativeProbe
+  return nativeShareExe() && p && !p.error && !p.missing?.length ? { h264: !!p.h264, av1: !!p.av1 } : null
+}
+
+// Why the native share is off on this machine, or how to get H.264: shown under its switch in
+// Settings next to that list, so a missing driver or plugin doesn't just make the option vanish.
+// null: nothing to say (or the probe hasn't answered yet).
 function nativeShareNote () {
   const linux = process.platform === 'linux', p = _nativeProbe
   if (!nativeShareExe()) return null
@@ -268,9 +274,8 @@ function nativeShareNote () {
   if (p.missing?.length && linux) return 'No VA-API GPU found, or GStreamer\'s va plugin is missing: gstreamer1-plugins-bad-free (Fedora) or gstreamer1.0-plugins-bad (Debian/Ubuntu).'
   if (p.missing?.length) return 'The helper is incomplete; reinstalling Sharkord should fix it.'
   const freeworld = linux ? ' On Fedora with an AMD GPU, H.264 needs mesa-va-drivers-freeworld from RPM Fusion.' : ''
-  if (!p.h264 && !p.av1) return (linux ? 'No GPU encoder for H.264 or AV1 found.' : 'No supported GPU encoder found (AMD GPUs only).') + freeworld
-  if (!p.h264) return 'This GPU or driver can\'t encode H.264, so only AV1 shares use it.' + freeworld
-  if (!p.av1) return 'This GPU can\'t encode AV1, so only H.264 shares use it.'
+  if (!p.h264 && !p.av1) return linux ? freeworld.trim() || null : 'Only AMD GPUs are supported.'
+  if (!p.h264) return freeworld.trim() || null
   return null
 }
 const nativeShareOn = () => nativeShareSupported() &&
@@ -615,6 +620,7 @@ const desktopSettings = () => ({
   openAtLogin:openAtLogin(), minimizeToTray:!!loadUserSettings().minimizeToTray,
   ...(nativeShareSupported() ? { nativeShare:nativeShareOn() } : {}),
   ...(nativeShareNote() ? { nativeShareNote:nativeShareNote() } : {}),
+  ...(nativeShareCodecs() ? { nativeShareCodecs:nativeShareCodecs() } : {}),
 })
 function setDesktopSettings (s) {
   try {

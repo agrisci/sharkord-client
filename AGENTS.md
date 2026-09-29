@@ -17,7 +17,7 @@ client is ~1300 lines on purpose.
 | Path                         | What it is                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
 | `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, main window, server check, first launch / change server, open at login + tray, lifecycle |
-| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hook that adds share audio, `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls and desktop options in Settings → Others |
+| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hook that adds share audio, `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls and a **Desktop Client** tab in the user settings |
 | `electron/picker.html`       | Screen share picker (source grid + audio step), styled like Sharkord                          |
 | `electron/picker-preload.js` | `pickerAPI` bridge for the picker window                                                      |
 | `electron/first-launch.html` | Server URL prompt (first run and Change server)                                               |
@@ -40,7 +40,8 @@ belongs to rather than adding files.
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `nativeShare` (default
   off; offered only when the helper's `--check` probe at startup opens an encoder -- AMF on
   Windows, VA-API on Linux Wayland -- and a share goes native only with a codec it opened; where it
-  can't run, or runs for one codec only, `nativeShareNote` says why under its greyed-out switch). *Open at login* is not
+  can't run, `nativeShareNote` says why under its greyed-out switch, and `nativeShareCodecs` lists
+  what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross). *Open at login* is not
   stored: the OS login item / `~/.config/autostart/sharkord.desktop` is the source of truth.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
@@ -267,10 +268,14 @@ There are no automated tests. After a change, check what it touches:
   site, an unreachable host (error shown, nothing saved), a valid server, Cancel (quits).
 - **Change server**: ☰ server menu item, login-screen button, `Ctrl+Shift+O`, tray →
   **Change Server…**; Cancel returns to the current server.
-- **Desktop settings**: top of Settings → **Others** (user settings only, not server settings).
+- **Desktop settings**: user Settings → **Desktop Client** (after Others; not in server settings). Picking it
+  shows our card in place of Sharkord's, with only Desktop Client highlighted; changes show Sharkord's
+  "You have unsaved changes / Save Changes" bar and apply only on Save. Leaving with unsaved changes
+  (another entry, the back button, Escape) asks first; Desktop Client doesn't open while Sharkord's own
+  tab has unsaved changes. On a narrow window the drawer closes after picking it.
   *Open at login* creates/removes the autostart entry; *Minimize
-  to tray* makes X hide the window, tray click reopens it, tray **Quit** exits. Toggles stay in
-  sync with the tray menu. Launching again focuses the running window.
+  to tray* makes X hide the window, tray click reopens it, tray **Quit** exits. The tray menu
+  applies the same toggles at once. Launching again focuses the running window.
 - **Notifications**: enable them in Sharkord → Settings → Notifications; a message from another
   account while the channel isn't open (or the window is hidden) shows a native notification,
   flashes the taskbar until focused (X11; Wayland ignores it), and clicking it brings the window
@@ -284,7 +289,7 @@ There are no automated tests. After a change, check what it touches:
 - **Share audio (Linux)**: per-app and Entire System; the other side must not hear their own
   voice echoed; audio unlinks when the share stops or the picker is closed.
 - **Share audio (Windows)**: "Stream With Audio" loopback.
-- **Native screen share (Windows, AMD)**: turn it on in Settings → Others (or the tray). Share a
+- **Native screen share (Windows, AMD)**: turn it on in Settings → Desktop Client (or the tray). Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `sharkord-share (amf…)`. The console's
   `[native-share] sent …` lines should keep `lost`/`resync` near zero. A window share, VP8, or
