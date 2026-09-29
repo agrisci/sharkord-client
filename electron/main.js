@@ -12,15 +12,6 @@ const os   = require('os')
 
 const log = (...a) => console.log(new Date().toISOString().slice(11,23), '|', ...a)
 
-// Earlier builds were called sharkord-client: their data folder moves to the new name before
-// anything opens it (server, login and settings carry over)
-{
-  const old = path.join(app.getPath('appData'), 'sharkord-client'), now = app.getPath('userData')
-  if (old !== now && fs.existsSync(old) && !fs.existsSync(now)) {
-    try { fs.renameSync(old, now); log('[settings] moved', old, '→', now) } catch (e) { log('[settings] move failed:', e.message) }
-  }
-}
-
 // ── Settings ──────────────────────────────────────────────────────────────
 const settingsPath     = path.join(app.getPath('userData'), 'settings.json')
 // A BOM (Windows tools add one) would make JSON.parse throw and every setting read as unset
@@ -694,12 +685,6 @@ app.whenReady().then(() => {
 
   session.defaultSession.setDisplayMediaRequestHandler(handleDisplayMediaRequest)
   Menu.setApplicationMenu(null)   // no menu bar; shortcuts live in before-input-event
-  // Starting in the tray at login used to follow Minimize to tray: keep what those users had
-  const saved = loadUserSettings()
-  if (saved.startMinimized === undefined) saveUserSettings({ ...saved, startMinimized: !!saved.minimizeToTray && openAtLogin() })
-  // The login entry holds this program's path, which a rename (sharkord-client → sharkord) or a moved
-  // AppImage changes: rewrite it from the installed app (a dev run would point it at the dev build)
-  if (process.platform === 'linux' && app.isPackaged && openAtLogin()) setOpenAtLogin(true)
   createTray()
   probeNativeShare()
   openApp()

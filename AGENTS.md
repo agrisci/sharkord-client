@@ -34,12 +34,11 @@ belongs to rather than adding files.
 
 ## How the pieces talk
 
-- **Settings**: `userData/settings.json` (`~/.config/sharkord`, `%APPDATA%\sharkord`; moved from
-  `sharkord-client` on first start, the name of earlier builds) via `loadUserSettings` / `saveUserSettings`. Keys:
+- **Settings**: `userData/settings.json` (`~/.config/sharkord`, `%APPDATA%\sharkord`) via `loadUserSettings` / `saveUserSettings`. Keys:
   `serverUrl` (saved without a trailing slash — use `savedServerUrl()`), `theme`
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `startMinimized` (a login launch stays in the
-  tray; set once from `minimizeToTray` && open at login for older settings), `nativeShare` (default
+  tray), `nativeShare` (default
   off; offered only when the helper's `--check` probe at startup opens an encoder -- AMF on
   Windows, VA-API on Linux Wayland -- and a share goes native only with a codec it opened; where it
   can't run, `nativeShareNote` says why under its greyed-out switch, and `nativeShareCodecs` lists
