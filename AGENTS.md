@@ -158,16 +158,18 @@ virtual mic (`withShareAudio`).
 
 The helper (`native/src/linux/`) has no GStreamer: `capture.rs` reads the portal's PipeWire stream
 and `encode.rs` converts and encodes with a static FFmpeg of our own (`scripts/deps/ffmpeg.sh`):
-- **Capture.** DMA-BUF with the modifiers the GPU can import (asked through Vulkan), shared memory
-  when the compositor offers nothing else. Only the newest buffer is kept, the rest go back at once,
-  and that one as soon as the GPU has read it (the compositor lends only a few and stops sending
-  while they are held). The size comes from the negotiated format, i.e. physical pixels (the
+- **Capture.** DMA-BUF with the modifiers the GPU can import (asked through Vulkan; KWin then picks
+  a tiled one), shared memory when the compositor offers nothing else. Only the newest buffer is
+  kept, the rest go back at once, and that one as soon as the GPU has read it (`Device::wait` on the
+  converted picture): KWin lends 3 buffers and stops sending while they are held, and FFmpeg's own
+  release came later -- capture stalled after 3 frames. 4K60 zero-copy measured at 6-9% CPU. The size comes from the negotiated format, i.e. physical pixels (the
   portal's is logical, #99).
 - **Conversion** on the GPU: `hwmap` of the DMA-BUF into Vulkan → `scale_vulkan` to NV12 at the
   fitted size (`fit`), no copy through memory.
 - **Encoder**: `h264_vulkan`/`av1_vulkan` (VA-API's `h264_vaapi`/`av1_vaapi` if Vulkan can't),
-  CBR with an **8-frame VBV**, keyframes only on request (no GOP), no B-frames, H.264 Constrained
-  Baseline with CAVLC. Measured offline at 4K60 21 Mbps (still desktop, scrolling text, Big Buck
+  CBR with an **8-frame VBV**, and no frame larger than that buffer (Vulkan's `maxFrameSize`, which
+  FFmpeg leaves off: RADV let scene cuts in a video burst to 740-921 KB, now at most ~190 KB),
+  keyframes only on request (no GOP), no B-frames, H.264 Constrained Baseline with CAVLC, BT.709. Measured offline at 4K60 21 Mbps (still desktop, scrolling text, Big Buck
   Bunny, RX 9060 XT): VMAF 95.9 on video against 91.8 for GStreamer's `vah264enc` CBR, the rate on
   target, keyframes ~370-515 KB. `vah264enc` couldn't cap frame size (`cpb-size` is inert): a still
   4K screen keyed at 1.1-1.8 MB, more than Chromium's hardware decoder path absorbs (the viewer
@@ -177,16 +179,18 @@ and `encode.rs` converts and encodes with a static FFmpeg of our own (`scripts/d
   screen is still (the compositor only sends on damage); pts come from that tick, so the
   compositor's clock never meets ours, and a busy encoder skips a tick instead of queueing. This
   replaced GStreamer's `videorate`, leaky queue, `keepalive-time` and clock-less pipeline.
-- **Bitrate** changes apply to the next frame without a keyframe: `scripts/deps/ffmpeg-*.patch`
-  (FFmpeg otherwise sends rate control only with the first picture on Vulkan, and only with IDRs on
-  VA-API; the drivers accept it on any frame).
+- **Bitrate** changes apply to the next frame without a keyframe (FFmpeg otherwise sends rate
+  control only with the first picture on Vulkan, and only with IDRs on VA-API; the drivers accept it
+  on any frame). Our FFmpeg patches (`scripts/deps/ffmpeg-*.patch`) do that and the frame cap.
 - **Drivers**: the system's Mesa first. Fedora and openSUSE build Mesa without H.264 (VA-API and
   Vulkan), so the package ships RADV and ANV built with it (`scripts/deps/mesa.sh`, `resources/
   native/mesa/`): when the system's can't encode H.264, the helper re-runs itself with the Vulkan
   loader pointed at them (`VK_DRIVER_FILES`, `SHARKORD_BUNDLED_DRIVER=1`). Only the helper loads
   them. NVIDIA needs NVIDIA's own driver (nouveau can't encode).
 - For testing: `SHARKORD_TEST_NODE=<PipeWire node id>` captures that node without the portal's
-  dialog, `SHARKORD_ENCODE_API=vulkan|vaapi` forces an API. `cargo test -- --ignored` runs a GPU
+  dialog, `SHARKORD_PORTAL_TOKEN=<file>` keeps the portal's restore token there (one dialog, then
+  none), `SHARKORD_ENCODE_API=vulkan|vaapi` forces an API. The helper's stderr (`capture:` lines:
+  the modifiers offered and the format agreed) goes to the app's log as `[helper]`. `cargo test -- --ignored` runs a GPU
   test (4K, keyframes on request only and ≤ 600 KB, a bitrate change applied without one).
 
 Tried and dropped: reading Chromium's own PipeWire stream (one portal pick too) -- Chromium fixes a

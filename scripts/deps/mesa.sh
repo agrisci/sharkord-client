@@ -31,6 +31,11 @@ common=(--buildtype=release -Db_ndebug=true -Dgallium-drivers= -Dplatforms= -Dop
 
 # From ffmpeg.sh (run it first): glslangValidator (Mesa needs >= 12.2) and SPIRV-Tools >= 2024.1
 # for mesa-clc; Ubuntu 22.04's are older
+# Mesa 26.2's Intel compiler uses C23 (typed enums), which GCC only has from 13: Ubuntu 22.04's
+# GCC 11 can't build it, its clang 15 can
+if ! gcc -std=c11 -fsyntax-only -x c - <<<'enum e : unsigned char { A };' 2>/dev/null; then
+  export CC=${CC:-$(command -v clang-15 || command -v clang)} CXX=${CXX:-$(command -v clang++-15 || command -v clang++)}
+fi
 TOOLS=$SRC/mesa/tools
 export PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig:${PKG_CONFIG_PATH:-}
 export PATH=$PREFIX/bin:$TOOLS/bin:$PATH

@@ -121,20 +121,64 @@ impl Device {
             let static_fn = ash::StaticFn { get_instance_proc_addr: std::mem::transmute::<_, vk::PFN_vkGetInstanceProcAddr>(gipa) };
             let instance = ash::Instance::load(&static_fn, vk::Instance::from_raw((*vkctx).inst as u64));
             let pd = vk::PhysicalDevice::from_raw((*vkctx).phys_dev as u64);
-            let query = |mods: &mut [vk::DrmFormatModifierPropertiesEXT]| {
-                let mut list = vk::DrmFormatModifierPropertiesListEXT::default().drm_format_modifier_properties(mods);
-                let mut props = vk::FormatProperties2::default().push_next(&mut list);
-                instance.get_physical_device_format_properties2(pd, vk::Format::B8G8R8A8_UNORM, &mut props);
-                list.drm_format_modifier_count as usize
-            };
-            let mut mods = vec![vk::DrmFormatModifierPropertiesEXT::default(); query(&mut [])];
-            let n = query(&mut mods);
+            // First the count (a null array: an empty one would be read as room for none), then the list
+            let mut count = vk::DrmFormatModifierPropertiesListEXT::default();
+            let mut props = vk::FormatProperties2::default().push_next(&mut count);
+            instance.get_physical_device_format_properties2(pd, vk::Format::B8G8R8A8_UNORM, &mut props);
+            let mut mods = vec![vk::DrmFormatModifierPropertiesEXT::default(); count.drm_format_modifier_count as usize];
+            let mut list = vk::DrmFormatModifierPropertiesListEXT::default().drm_format_modifier_properties(&mut mods);
+            let mut props = vk::FormatProperties2::default().push_next(&mut list);
+            instance.get_physical_device_format_properties2(pd, vk::Format::B8G8R8A8_UNORM, &mut props);
+            let n = list.drm_format_modifier_count as usize;
             mods.truncate(n);
             mods.iter()
                 .filter(|m| m.drm_format_modifier_plane_count == 1 && m.drm_format_modifier_tiling_features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE))
                 .map(|m| m.drm_format_modifier)
                 .collect()
         }
+    }
+
+    /// Waits until the GPU has finished writing `frame` (a converted picture): by then it has read
+    /// the captured buffer it came from, which can go back to the compositor. FFmpeg's own release
+    /// of that buffer comes only when its filter reuses the work slot, later than the compositor's
+    /// few buffers last (KWin lends 3: capture stopped after 3 frames).
+    pub fn wait(&self, frame: &Frame) -> Result<()> {
+        use ash::vk::{self, Handle};
+        unsafe extern "C" {
+            fn vaSyncSurface(dpy: *mut std::ffi::c_void, surface: u32) -> c_int;
+        }
+        unsafe {
+            let ctx = (*(self.hw.as_ptr())).data as *mut ff::AVHWDeviceContext;
+            match self.api {
+                Api::Vulkan => {
+                    let vkctx = (*ctx).hwctx as *mut ff::AVVulkanDeviceContext;
+                    let Some(gipa) = (*vkctx).get_proc_addr else { bail!("no Vulkan loader") };
+                    let static_fn = ash::StaticFn { get_instance_proc_addr: std::mem::transmute::<_, vk::PFN_vkGetInstanceProcAddr>(gipa) };
+                    let instance = ash::Instance::load(&static_fn, vk::Instance::from_raw((*vkctx).inst as u64));
+                    let device = ash::Device::load(instance.fp_v1_0(), vk::Device::from_raw((*vkctx).act_dev as u64));
+                    let vkf = (*frame.0).data[0] as *const ff::AVVkFrame;
+                    let (mut sems, mut values) = (Vec::new(), Vec::new());
+                    for i in 0..8 {
+                        if (*vkf).img[i] == 0 {
+                            break;
+                        }
+                        sems.push(vk::Semaphore::from_raw((*vkf).sem[i] as u64));
+                        values.push((*vkf).sem_value[i]);
+                    }
+                    device
+                        .wait_semaphores(&vk::SemaphoreWaitInfo::default().semaphores(&sems).values(&values), 1_000_000_000)
+                        .map_err(|e| anyhow!("waiting for the conversion: {e}"))?;
+                }
+                Api::Vaapi => {
+                    let va = (*ctx).hwctx as *mut ff::AVVAAPIDeviceContext;
+                    let r = vaSyncSurface((*va).display as *mut _, (*frame.0).data[3] as usize as u32);
+                    if r != 0 {
+                        bail!("waiting for the conversion: VA error {r}");
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Render nodes, in the kernel's order (the first is usually the GPU driving the desktop).
@@ -165,6 +209,17 @@ impl Frame {
 impl Drop for Frame {
     fn drop(&mut self) {
         unsafe { ff::av_frame_free(&mut self.0) }
+    }
+}
+
+/// What a captured screen is: full-range RGB, converted with BT.709 (the scaler needs to be told;
+/// the encoder signals the same in the stream).
+fn rgb_screen(frame: &Frame) {
+    unsafe {
+        (*frame.0).colorspace = ff::AVColorSpace::AVCOL_SPC_BT709;
+        (*frame.0).color_range = ff::AVColorRange::AVCOL_RANGE_JPEG;
+        (*frame.0).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT709;
+        (*frame.0).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_IEC61966_2_1;
     }
 }
 
@@ -202,6 +257,7 @@ pub fn drm_frame<R>(frames: &BufRef, size: (u32, u32), alpha: bool, fd: i32, len
             0,
         );
         (*frame.0).hw_frames_ctx = frames.new_ref();
+        rgb_screen(&frame);
         Ok(frame)
     }
 }
@@ -219,6 +275,7 @@ pub fn memory_frame(size: (u32, u32), alpha: bool, data: &[u8], stride: usize) -
             let src = data.get(y * stride..y * stride + row).ok_or_else(|| anyhow!("short frame"))?;
             std::ptr::copy_nonoverlapping(src.as_ptr(), (*frame.0).data[0].add(y * dst_stride), row);
         }
+        rgb_screen(&frame);
         Ok(frame)
     }
 }
@@ -254,11 +311,17 @@ impl Convert {
                 Input::Drm => ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME,
                 Input::Memory => format,
             };
-            let args = cstr(&format!("video_size={}x{}:pix_fmt={}:time_base=1/1000000:pixel_aspect=1/1", size.0, size.1, in_fmt as i32));
-            check(
-                ff::avfilter_graph_create_filter(&mut me.src, ff::avfilter_get_by_name(c"buffer".as_ptr()), c"in".as_ptr(), args.as_ptr(), ptr::null_mut(), graph),
-                "buffer source",
-            )?;
+            // The source is described before it is initialized: a DRM PRIME one needs its frame pool then
+            me.src = ff::avfilter_graph_alloc_filter(graph, ff::avfilter_get_by_name(c"buffer".as_ptr()), c"in".as_ptr());
+            if me.src.is_null() {
+                bail!("buffer source");
+            }
+            let par = ff::av_buffersrc_parameters_alloc();
+            (*par).format = in_fmt as c_int;
+            (*par).width = size.0 as c_int;
+            (*par).height = size.1 as c_int;
+            (*par).time_base = ff::AVRational { num: 1, den: 1_000_000 };
+            (*par).sample_aspect_ratio = ff::AVRational { num: 1, den: 1 };
             if let Input::Drm = input {
                 let frames = ff::av_hwframe_ctx_alloc(dev.drm.as_ptr());
                 let fc = (*frames).data as *mut ff::AVHWFramesContext;
@@ -268,13 +331,15 @@ impl Convert {
                 (*fc).height = size.1 as c_int;
                 let frames = BufRef(frames);
                 check(ff::av_hwframe_ctx_init(frames.as_ptr()), "DRM frame pool")?;
-                let par = ff::av_buffersrc_parameters_alloc();
                 (*par).hw_frames_ctx = frames.as_ptr();
-                let ret = ff::av_buffersrc_parameters_set(me.src, par);
-                ff::av_free(par as *mut _);
-                check(ret, "buffer source frames")?;
                 me.drm_frames = Some(frames);
             }
+            (*par).color_space = ff::AVColorSpace::AVCOL_SPC_BT709;
+            (*par).color_range = ff::AVColorRange::AVCOL_RANGE_JPEG;
+            let ret = ff::av_buffersrc_parameters_set(me.src, par);
+            ff::av_free(par as *mut _);
+            check(ret, "buffer source parameters")?;
+            check(ff::avfilter_init_str(me.src, ptr::null()), "buffer source")?;
             check(
                 ff::avfilter_graph_create_filter(&mut me.sink, ff::avfilter_get_by_name(c"buffersink".as_ptr()), c"out".as_ptr(), ptr::null(), ptr::null_mut(), graph),
                 "buffer sink",
@@ -373,6 +438,11 @@ impl Encoder {
             (*ctx).framerate = ff::AVRational { num: s.fps as c_int, den: 1 };
             (*ctx).pix_fmt = (*((*frames).data as *mut ff::AVHWFramesContext)).format;
             (*ctx).sw_pix_fmt = ff::AVPixelFormat::AV_PIX_FMT_NV12;
+            // BT.709, limited range: what the scaler converts to and what the stream says
+            (*ctx).colorspace = ff::AVColorSpace::AVCOL_SPC_BT709;
+            (*ctx).color_range = ff::AVColorRange::AVCOL_RANGE_MPEG;
+            (*ctx).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT709;
+            (*ctx).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
             (*ctx).hw_frames_ctx = ff::av_buffer_ref(frames);
             // Keyframes only on request (a viewer joining or losing packets asks with a PLI): a
             // scheduled one is a burst for nothing

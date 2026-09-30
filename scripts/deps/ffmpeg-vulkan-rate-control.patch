@@ -73,7 +73,7 @@ index cf5f255..0617cb5 100644
      /* Session parameters object, initialized by each codec independently
       * and set here. */
 diff --git a/libavcodec/vulkan_encode_av1.c b/libavcodec/vulkan_encode_av1.c
-index d98b3a5..cf71760 100644
+index d98b3a5..0a4f380 100644
 --- a/libavcodec/vulkan_encode_av1.c
 +++ b/libavcodec/vulkan_encode_av1.c
 @@ -134,7 +134,7 @@ static int init_pic_rc(AVCodecContext *avctx, FFHWBaseEncodePicture *pic,
@@ -85,8 +85,20 @@ index d98b3a5..cf71760 100644
          rc_info->initialVirtualBufferSizeInMs = (enc->initial_buffer_fullness * 1000LL) / avctx->bit_rate;
  
          ap->vkrc_layer_info = (VkVideoEncodeAV1RateControlLayerInfoKHR) {
+@@ -150,7 +150,10 @@ static int init_pic_rc(AVCodecContext *avctx, FFHWBaseEncodePicture *pic,
+             .maxQIndex.predictiveQIndex = avctx->qmax > 0 ? avctx->qmax : 0,
+             .maxQIndex.bipredictiveQIndex = avctx->qmax > 0 ? avctx->qmax : 0,
+ 
+-            .useMaxFrameSize = 0,
++            /* A cap on any frame: the VBV, so a scene cut can't burst past it */
++            .useMaxFrameSize = avctx->rc_buffer_size > 0,
++            .maxFrameSize = { .intraFrameSize = avctx->rc_buffer_size / 8, .predictiveFrameSize = avctx->rc_buffer_size / 8,
++                              .bipredictiveFrameSize = avctx->rc_buffer_size / 8 },
+         };
+         rc_layer->pNext = &ap->vkrc_layer_info;
+         ap->vkrc_info.temporalLayerCount = 1;
 diff --git a/libavcodec/vulkan_encode_h264.c b/libavcodec/vulkan_encode_h264.c
-index 33a9b0a..45ae45b 100644
+index 33a9b0a..4686ed4 100644
 --- a/libavcodec/vulkan_encode_h264.c
 +++ b/libavcodec/vulkan_encode_h264.c
 @@ -134,7 +134,7 @@ static int init_pic_rc(AVCodecContext *avctx, FFHWBaseEncodePicture *pic,
@@ -98,3 +110,15 @@ index 33a9b0a..45ae45b 100644
          rc_info->initialVirtualBufferSizeInMs = (enc->unit_opts.initial_buffer_fullness * 1000LL) / avctx->bit_rate;
  
          hp->vkrc_layer_info = (VkVideoEncodeH264RateControlLayerInfoKHR) {
+@@ -150,7 +150,10 @@ static int init_pic_rc(AVCodecContext *avctx, FFHWBaseEncodePicture *pic,
+             .maxQp.qpP = avctx->qmax > 0 ? avctx->qmax : 0,
+             .maxQp.qpB = avctx->qmax > 0 ? avctx->qmax : 0,
+ 
+-            .useMaxFrameSize = 0,
++            /* A cap on any frame: the VBV, so a scene cut can't burst past it */
++            .useMaxFrameSize = avctx->rc_buffer_size > 0,
++            .maxFrameSize = { .frameISize = avctx->rc_buffer_size / 8, .framePSize = avctx->rc_buffer_size / 8,
++                              .frameBSize = avctx->rc_buffer_size / 8 },
+         };
+         rc_layer->pNext = &hp->vkrc_layer_info;
+         hp->vkrc_info.temporalLayerCount = 1;

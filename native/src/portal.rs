@@ -22,7 +22,11 @@ pub struct Portal {
 }
 
 /// Shows the portal's dialog and opens the picked screen or window. `Ok(None)`: the user cancelled.
+/// For development only, `SHARKORD_PORTAL_TOKEN=<file>` keeps the portal's restore token there, so
+/// repeated test runs skip the dialog after the first.
 pub fn select() -> Result<Option<Portal>> {
+    let token_file = std::env::var_os("SHARKORD_PORTAL_TOKEN");
+    let token = token_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok());
     ashpd::zbus::block_on(async {
         let proxy = Screencast::new().await.context("no screen cast portal")?;
         let session = proxy.create_session(Default::default()).await?;
@@ -33,7 +37,8 @@ pub fn select() -> Result<Option<Portal>> {
                     .set_cursor_mode(CursorMode::Embedded)
                     .set_sources(BitFlags::from(SourceType::Monitor) | SourceType::Window)
                     .set_multiple(false)
-                    .set_persist_mode(PersistMode::DoNot),
+                    .set_persist_mode(if token_file.is_some() { PersistMode::ExplicitlyRevoked } else { PersistMode::DoNot })
+                    .set_restore_token(token.as_deref().map(str::trim)),
             )
             .await?;
         let streams = match proxy.start(&session, None, Default::default()).await?.response() {
@@ -41,6 +46,9 @@ pub fn select() -> Result<Option<Portal>> {
             Err(ashpd::Error::Response(ResponseError::Cancelled)) => return Ok(None),
             Err(e) => return Err(e).context("screen selection"),
         };
+        if let (Some(f), Some(t)) = (&token_file, streams.restore_token()) {
+            let _ = std::fs::write(f, t);
+        }
         let stream = streams.streams().first().context("the portal returned no stream")?;
         let (node, size) = (stream.pipe_wire_node_id(), stream.size());
         let fd = proxy.open_pipe_wire_remote(&session, Default::default()).await?;

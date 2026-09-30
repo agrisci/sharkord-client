@@ -257,7 +257,13 @@ pub fn run(
                 return;
             }
             let (size, alpha) = ((info.size().width, info.size().height), info.format() == VideoFormat::BGRA);
-            let modifier = match modifier_of(param) {
+            let m = modifier_of(param);
+            eprintln!("capture: format {}x{} {:?}, modifier {}", size.0, size.1, info.format(), match &m {
+                Modifier::None => "none (shared memory)".to_owned(),
+                Modifier::Fixed(m) => format!("{m:#x}"),
+                Modifier::Open(list) => format!("open, {} to pick from", list.len()),
+            });
+            let modifier = match m {
                 // The compositor's modifier list, still open: fixate its first pick
                 Modifier::Open(mods) => {
                     let fixed = format_pod(fps, None, Some(Format { size, alpha, modifier: mods.first().copied() }));
@@ -298,6 +304,8 @@ pub fn run(
         })
         .register()?;
 
+    // stderr goes to the app's log as [helper] lines
+    eprintln!("capture: offering DMA-BUF with {} modifiers {:x?}, and shared memory", modifiers.len(), &modifiers[..modifiers.len().min(8)]);
     let formats = [format_pod(fps, Some(&modifiers), None), format_pod(fps, None, None)];
     let mut params: Vec<&Pod> = formats.iter().map(|p| Pod::from_bytes(p).expect("pod")).collect();
     stream.connect(

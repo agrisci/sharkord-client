@@ -181,19 +181,25 @@ impl Share {
                             conv = Some((Convert::new(&device, input, pix, format.size, fit(format.size, max))?, format));
                         }
                         let (c, _) = conv.as_mut().expect("converter");
-                        let frame = match captured.data {
+                        match captured.data {
                             capture::Data::Dmabuf { fd, size, offset, stride } => {
+                                // Converted on the GPU straight from the compositor's buffer, which
+                                // goes back as soon as that is done (`Device::wait`)
                                 let frames = c.drm_frames.as_ref().expect("DRM frame pool");
-                                encode::drm_frame(frames, format.size, format.alpha, fd, size, offset, stride, format.modifier.unwrap_or(0), captured.into_release())?
+                                let release = captured.into_release();
+                                let frame = encode::drm_frame(frames, format.size, format.alpha, fd, size, offset, stride, format.modifier.unwrap_or(0), ())?;
+                                let out = c.convert(&frame)?;
+                                device.wait(&out)?;
+                                drop(release);
+                                Ok(out)
                             }
                             capture::Data::Memory { ptr, len, stride } => {
                                 let data = unsafe { std::slice::from_raw_parts(ptr, len) };
                                 let frame = encode::memory_frame(format.size, format.alpha, data, stride as usize)?;
                                 drop(captured);
-                                frame
+                                c.convert(&frame)
                             }
-                        };
-                        c.convert(&frame)
+                        }
                     })();
                     match converted {
                         Ok(frame) => {
