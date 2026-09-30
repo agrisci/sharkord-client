@@ -11,6 +11,7 @@
 //! B-frames, and bitrate changes applied to the next frame without a keyframe (our FFmpeg patches,
 //! `scripts/deps/ffmpeg-*.patch`).
 
+use std::cell::Cell;
 use std::ffi::{CStr, CString, c_int};
 use std::ptr;
 use std::sync::Mutex;
@@ -130,6 +131,7 @@ pub struct Encoder {
     codec: Codec,
     size: (u32, u32),
     fps: u32,
+    kbps: Cell<u32>,
 }
 
 unsafe impl Send for Encoder {}
@@ -143,7 +145,7 @@ impl Encoder {
                 bail!("{name} is not in this FFmpeg");
             }
             let ctx = ff::avcodec_alloc_context3(codec);
-            let me = Encoder { ctx, pkt: ff::av_packet_alloc(), name: name.clone(), api, codec: s.codec, size: s.size, fps: s.fps };
+            let me = Encoder { ctx, pkt: ff::av_packet_alloc(), name: name.clone(), api, codec: s.codec, size: s.size, fps: s.fps, kbps: Cell::new(s.kbps) };
             let fc = (*frames).data as *mut ff::AVHWFramesContext;
             (*ctx).width = s.size.0 as c_int;
             (*ctx).height = s.size.1 as c_int;
@@ -261,14 +263,10 @@ impl Encoder {
     }
 
     /// The target `kbps` (the peak; VBR's average a little under it), with 8 frames of it as the
-    /// VBV (see the module comment). AMF also gets a floor under its quantizer: its rate control
-    /// ignores the VBV, HRD and `max_au_size` on an RX 9060 XT, so a mostly still screen banks the
-    /// budget and a scroll then came out as a 1.2 MB frame (more than an IDR of the same picture).
-    /// QP 18 at 0.05 bits per pixel (25 Mbps at 4K60) held a 4K desktop's scroll bursts to 297 KB,
-    /// but at the ~6 Mbps a share starts with it made 600 KB keyframes, and the viewer asked for
-    /// keyframes 8 times in 15 s. So 6 more per halving of the rate (half the bits per QP step of 6);
-    /// AV1's q-index 60 at 0.05 bpp (118 KB bursts), 24 more per halving.
+    /// VBV (see the module comment).
     pub fn set_rate(&self, kbps: u32) {
+        self.kbps.set(kbps);
+        self.apply_floor();
         let bps = i64::from(kbps.max(100)) * 1000;
         let vbv = bps * 8 / i64::from(self.fps.max(1));
         unsafe {
@@ -277,20 +275,34 @@ impl Encoder {
             (*self.ctx).bit_rate = if self.api == Api::Vaapi { bps } else { bps * 94 / 100 };
             (*self.ctx).rc_max_rate = bps;
             (*self.ctx).rc_buffer_size = vbv as c_int;
-            if self.api == Api::Amf {
-                let bpp = bps as f64 / (f64::from(self.size.0 * self.size.1) * f64::from(self.fps.max(1)));
-                let halvings = (0.05 / bpp).log2().max(0.0);
-                (*self.ctx).qmin = match self.codec {
-                    Codec::H264 => (18.0 + 6.0 * halvings).round().min(36.0) as c_int,
-                    Codec::Av1 => (60.0 + 24.0 * halvings).round().min(140.0) as c_int,
-                };
-            }
             if self.api == Api::Qsv {
                 // Quick Sync's frame cap, in bytes: the VBV (read on every frame)
                 let cap = cstr(&(vbv / 8).to_string());
                 ff::av_opt_set((*self.ctx).priv_data, c"max_frame_size".as_ptr(), cap.as_ptr(), 0);
             }
         }
+    }
+
+    /// AMF's floor under the quantizer, following the rate (our AMF patch applies a change on the
+    /// next frame). Its rate control ignores the VBV, HRD and `max_au_size` on an RX 9060 XT: a mostly
+    /// still screen banks the budget, and a scroll then came out as a 1.2 MB frame (more than an IDR
+    /// of the same picture). QP 18 at 0.05 bits per pixel (25 Mbps at 4K60) held a 4K desktop's scroll
+    /// bursts to 297 KB; a fixed 18 made 600 KB keyframes at the ~6 Mbps a share starts with (8
+    /// keyframe requests in 15 s), so 6 more per halving of the rate (half the bits per QP step of
+    /// 6); AV1 q-index 60 and 24 more. It also makes a lower rate take hold at once: without it AMF
+    /// took over 2 s to follow a cut (21 -> 12 Mbps: 19, then 17 Mbps).
+    fn apply_floor(&self) {
+        if self.api != Api::Amf {
+            return;
+        }
+        let bps = f64::from(self.kbps.get().max(100)) * 1000.0;
+        let bpp = bps / (f64::from(self.size.0 * self.size.1) * f64::from(self.fps.max(1)));
+        let halvings = (0.05 / bpp).log2().max(0.0);
+        let qmin = match self.codec {
+            Codec::H264 => (18.0 + 6.0 * halvings).min(36.0),
+            Codec::Av1 => (60.0 + 24.0 * halvings).min(140.0),
+        };
+        unsafe { (*self.ctx).qmin = qmin.round() as c_int };
     }
 
     /// Encodes `frame` as picture number `index`; `key` forces an IDR.
@@ -357,6 +369,44 @@ pub fn can_encode(api: Api, codec: Codec, frame: &Frame) -> bool {
     attempt().is_ok()
 }
 
+/// `data` with filler appended up to `min` bytes, or `None` when it is that large already. Decoders
+/// skip it, Chromium's packetizers keep it: an H.264 filler NAL unit; for AV1 a metadata OBU of an
+/// unregistered private type (Chromium's AV1 packetizer drops padding OBUs), after the temporal
+/// delimiter.
+fn padded(codec: Codec, data: &[u8], min: usize) -> Option<Vec<u8>> {
+    let n = min.checked_sub(data.len())?.max(8);
+    let mut v = Vec::with_capacity(data.len() + n + 8);
+    match codec {
+        Codec::H264 => {
+            v.extend_from_slice(data);
+            v.extend_from_slice(&[0, 0, 0, 1, 0x0c]);
+            v.resize(v.len() + n, 0xff);
+            v.push(0x80);
+        }
+        Codec::Av1 => {
+            // metadata_type 31 (unregistered, private), filler, trailing bits
+            let payload = 1 + n + 1;
+            let at = if data.len() >= 2 && (data[0] >> 3) & 0xf == 2 && data[1] == 0 { 2 } else { 0 };
+            v.extend_from_slice(&data[..at]);
+            v.push(5 << 3 | 0x02);
+            let mut size = payload;
+            loop {
+                let byte = (size & 0x7f) as u8;
+                size >>= 7;
+                v.push(if size > 0 { byte | 0x80 } else { byte });
+                if size == 0 {
+                    break;
+                }
+            }
+            v.push(31);
+            v.resize(v.len() + n, 0);
+            v.push(0x80);
+            v.extend_from_slice(&data[at..]);
+        }
+    }
+    Some(v)
+}
+
 /// The newest converted picture, from the capture thread to the encoder thread.
 pub struct Latest {
     pub frame: Option<Frame>,
@@ -420,6 +470,12 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
     let (mut frames, mut keys, mut bytes, mut since) = (0u64, 0u64, 0u64, Instant::now());
     let mut reported_sps = p.codec != Codec::H264;
     let mut started = false;
+    // Padding while the screen is still, up to this share of the rate: the helper's VBR sends almost
+    // nothing then, Chromium's estimate fell to what was acknowledged (25 -> 5 Mbps), and only grew
+    // ~8%/s again once motion resumed (15-20 s of lower quality); its screen-content mode and a
+    // bandwidth probe didn't hold or restore it. SHARKORD_PAD sets the share (0 turns it off)
+    let pad = std::env::var("SHARKORD_PAD").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.9).clamp(0.0, 1.0);
+    let mut padding = 0u64;
     while !stop.load(Ordering::Relaxed) {
         if let Some(e) = shared.failed.lock().expect("failed").take() {
             bail!(e);
@@ -468,6 +524,7 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
         e.send(&frame, tick, key)?;
         tick += 1;
         sent += 1;
+        let rate = kbps;
         e.receive(|data, key, pts| {
             if !started {
                 started = true;
@@ -488,7 +545,12 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
                 reported_sps = true;
             }
             let pts_us = (pts.max(0) as u64) * 1_000_000 / u64::from(fps);
-            write_record(out, 1, u8::from(key), pts_us, data).map_err(|e| anyhow!("stdout closed: {e}"))?;
+            let min = (pad * f64::from(rate) * 1000.0 / 8.0 / f64::from(fps)) as usize;
+            let filled = padded(p.codec, data, min);
+            if let Some(f) = &filled {
+                padding += (f.len() - data.len()) as u64;
+            }
+            write_record(out, 1, u8::from(key), pts_us, filled.as_deref().unwrap_or(data)).map_err(|e| anyhow!("stdout closed: {e}"))?;
             frames += 1;
             keys += u64::from(key);
             bytes += data.len() as u64;
@@ -503,10 +565,11 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
                 "type": "stats",
                 "fps": (frames as f64 / s * 10.0).round() / 10.0,
                 "kbps": (bytes as f64 * 8.0 / 1000.0 / s).round(),
+                "padding": (padding as f64 * 8.0 / 1000.0 / s).round(),
                 "keyframes": keys,
                 "rate": rate,
             }));
-            (frames, keys, bytes, since) = (0, 0, 0, Instant::now());
+            (frames, keys, bytes, padding, since) = (0, 0, 0, 0, Instant::now());
         }
     }
     Ok(())
@@ -520,6 +583,7 @@ pub mod bench {
     /// Two 4K pictures in memory (BGRx) to alternate, i.e. motion in every frame: a real desktop
     /// (SHARKORD_TEST_FRAME: raw BGRx at that size, e.g. a screenshot through `ffmpeg -i shot.png
     /// -pix_fmt bgr0 -f rawvideo`) against grey with sparse text-like dots, or two such dot patterns.
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn pictures(w: u32, h: u32) -> [Frame; 2] {
         let raw = std::env::var("SHARKORD_TEST_FRAME").ok().map(|p| std::fs::read(p).expect("test frame"));
         [1u32, 7].map(|seed| unsafe {
@@ -569,6 +633,38 @@ pub mod bench {
         eprintln!("{} keyframes (picture, bytes): {keys:?}; kbps per second (P frames): {kbps:?}", enc.name);
         assert_eq!(keys.iter().map(|k| k.0).collect::<Vec<_>>(), vec![0, 120], "{}", enc.name);
         assert!(keys.iter().all(|k| k.1 < 600 * 1024), "{}: keyframe over 600 KB", enc.name);
-        assert!(kbps[1] < 14000, "{}: bitrate change not applied", enc.name);
+        // The same content before and after the cut (44% lower): the rate falls with it, whatever the
+        // content (a busy desktop may not fit the new rate within the second)
+        assert!(kbps[2] * 10 < kbps[0] * 8, "{}: bitrate change not applied", enc.name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn padding_is_a_filler_nal_or_a_private_metadata_obu() {
+        // H.264: the access unit, then a filler NAL unit (type 12) up to the size
+        let au = [0, 0, 0, 1, 0x41, 0x9a, 0x02];
+        let h = padded(Codec::H264, &au, 100).expect("padded");
+        assert!(h.len() >= 100);
+        assert_eq!(&h[..au.len()], &au);
+        assert_eq!(&h[au.len()..au.len() + 5], &[0, 0, 0, 1, 0x0c]);
+        assert_eq!(*h.last().unwrap(), 0x80);
+        assert!(padded(Codec::H264, &au, 4).is_none());
+        // AV1: after the temporal delimiter (0x12 0x00), a metadata OBU (type 5, with a size) of
+        // private type 31, its size in LEB128 (2 bytes over 127)
+        let tu = [0x12, 0x00, 0x32, 0x02, 0xaa, 0xbb];
+        let a = padded(Codec::Av1, &tu, 300).expect("padded");
+        assert_eq!(&a[..2], &[0x12, 0x00]);
+        assert_eq!(a[2], 5 << 3 | 0x02);
+        let size = usize::from(a[3] & 0x7f) | usize::from(a[4]) << 7;
+        assert!(a[3] & 0x80 != 0 && a[4] & 0x80 == 0);
+        assert_eq!(a[5], 31);
+        assert_eq!(a[5 + size - 1], 0x80);
+        assert_eq!(&a[5 + size..], &tu[2..]);
+        // No temporal delimiter: in front
+        assert_eq!(padded(Codec::Av1, &tu[2..], 50).unwrap()[0], 5 << 3 | 0x02);
     }
 }

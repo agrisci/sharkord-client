@@ -8,7 +8,7 @@ about never leaving a share broken and being able to debug machines we have neve
 P3 = ideas
 **Status:** ✅ Done · 🚧 In progress · 🧪 Needs testing · 📋 Planned · 💡 Idea · ⛔ Won't do
 **#** is a stable ID for referring to an item in commits and issues, not its rank; new items take
-the next free number (currently 106).
+the next free number (currently 107).
 
 ## Bugs
 
@@ -121,6 +121,7 @@ shares* on (off by default):
 |---|-----|------|--------|-------|
 | 23 | P1 | Test on real internet uploads | 🧪 | Only tested on a LAN. Try a slow and a bufferbloated home upload: does the loss / round-trip check back off early enough? |
 | 24 | P1 | Faster start | 📋 | Reaching full rate takes ~30 s from Chromium's ~5 Mbps start. Start from the last good rate per server (still guarded by the congestion check). |
+| 106 | P1 | Full quality right after a still screen | 🧪 | The helper pads a still screen to 90% of its rate (H.264 filler NAL, AV1 private metadata OBU), so Chromium's estimate doesn't collapse (25 -> 5 Mbps) and motion is back at 25 Mbps at once instead of ~8%/s over 15-20 s. Measured 4K60 H.264 and AV1 to the Renoir laptop: estimate held, pacer < 15 ms at motion. Cost: full rate while still. Its periodic dips (#28) can still meet motion: once, 0.7 s in the pacer for ~4 s. Screen-content mode and a `maxBitrate` probe didn't help. Could become a setting (bandwidth vs. instant quality). |
 | 25 | P2 | Fewer keyframes on bitrate changes | ✅ | FFmpeg patched to apply a bitrate change on the next frame without an IDR: Vulkan re-issues only its rate control, VA-API re-sends its rate-control parameter (#104), AMF sets its rate properties, NVENC reconfigures without reset, Quick Sync resets without a new sequence (#103). The page steps 10% every 2 s on both platforms. |
 | 26 | P2 | Slider vs resolution cap | 💡 | Decide whether Sharkord's slider alone should limit; today 4K60 stops at ~25 Mbps (0.05 bits per pixel per frame) even with a higher slider. |
 
@@ -128,7 +129,7 @@ shares* on (off by default):
 
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
-| 29 | P1 | Weak decoders | 📋 | Everyone gets the same stream; a Ryzen 4000 iGPU fell behind at 4K60 25 Mbps H.264. Suggest a lower resolution when the slider is high, and document which GPUs decode what (#66). |
+| 29 | P1 | Weak decoders | 📋 | Everyone gets the same stream; a Ryzen 4000 iGPU fell behind at 4K60 25 Mbps H.264 on heavy content, and decodes AV1 in software (dav1d): at 4K 21-27 Mbps it runs 46-52 fps with a 0.8-2.5 s jitter buffer. Suggest a lower resolution when the slider is high, and document which GPUs decode what (#66). |
 | 30 | P2 | Simulcast for native shares | 💡 | The helper encodes two layers (e.g. 4K + 1080p) and mediasoup picks per viewer. Big change; only once people hit #29. |
 
 ## Linux

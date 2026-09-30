@@ -52,8 +52,9 @@ On first launch Sharkord asks for your server's address (e.g. `https://sharkord.
 | **What you can share** | whole screens (windows use the normal share) | screens and windows |
 | **Anything to install** | no | no: the app brings what it needs, even where the distribution leaves H.264 out (Fedora, openSUSE) |
 
-Some older AMD graphics keep sending at the full bitrate while the screen is still: more
-bandwidth, no effect on smoothness.
+While the screen is still, the native share keeps sending at close to its full bitrate, so the
+picture is sharp the moment something moves again. A still screen therefore uses as much upload
+(and download for each viewer) as a moving one.
 
 ### Tested setups
 

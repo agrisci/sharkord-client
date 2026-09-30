@@ -173,8 +173,10 @@ Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18
   the same picture. A floor under the quantizer caps it, following the rate (our AMF patch changes
   it in place): QP 18 at 0.05 bits per pixel (25 Mbps at 4K60; scroll bursts 297 KB), 6 more per
   halving of the rate (AV1: q-index 60, 24 more) -- a fixed 18 made 600 KB keyframes at the ~6 Mbps
-  a share starts with, and the viewer asked for 8 in 15 s; now 50-86 KB there, ~165 KB at 21 Mbps.
-  H.264 is real Constrained Baseline (`424033`, the constraint flag set: #86).
+  a share starts with (8 keyframe requests in 15 s). It also makes a lower rate take hold at once:
+  without it AMF took over 2 s to follow a cut. FFmpeg's default `qmax` (31) is lifted to the
+  codec's maximum: it reached AMF as its maximum QP, and 4K motion then couldn't get under 16-20
+  Mbps. H.264 is real Constrained Baseline (`424033`, the constraint flag set: #86).
 - **Pacing and bitrate** as on Linux (`src/ffmpeg.rs`): our patches change AMF's, NVENC's and Quick
   Sync's rate in place, without a keyframe. `cargo test -- --ignored` encodes this desktop
   (scrolled every other frame): keyframes on request only, ≤ 600 KB, a bitrate change without one.
@@ -267,9 +269,18 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
    trip and Chromium's pacer queue stay clean it only steps up with the estimate (which dips 15-50%
    every few seconds on a clean LAN with mediasoup); on congestion (loss, a growing round trip, or
    packets waiting over 250 ms in the pacer, i.e. the estimate really below what goes out; a
-   keyframe's 50-180 ms doesn't count) it drops to 0.85x. After a still screen it follows the
-   estimate down too: the helper then sends a fraction of its rate, Chromium's estimate falls to
-   what is acknowledged, and motion at the old rate queued 1.4 s in the pacer (Windows, AV1 at 4K).
+   keyframe's 50-180 ms doesn't count) it drops to 0.85x.
+   **While the screen is still the helper pads** (`padded` in `src/ffmpeg.rs`): frames are filled
+   up to 90% of the rate with data decoders skip (an H.264 filler NAL unit; for AV1 a private
+   metadata OBU, as Chromium's AV1 packetizer drops padding OBUs), and the page counts it as sent.
+   Without it the encoder sends ~0.1 Mbps, Chromium's estimate falls to 0.85x what was acknowledged
+   (25 -> 5 Mbps), and after motion resumes it only grows ~8%/s: 15-20 s of lower quality, or, sent
+   at the old rate anyway, 1.4 s in the pacer. With it, motion is back at 25 Mbps at once (4K60,
+   H.264 and AV1). The cost: a still screen uses the full rate, for the sender and each viewer.
+   Tried and dropped: screen-content mode (`contentHint 'detail'`: the estimate still fell, and its
+   pacing added 600-860 ms), and a probe by lowering and raising `maxBitrate` (no effect).
+   `SHARKORD_PAD=<0..1>` sets the share (0: off); the page still follows the estimate down when the
+   helper sends under half its rate, padding included.
    The helper changes it in place, without a keyframe, so it steps 10% at least 2 s apart; keyframe
    requests go to it at most every 300 ms. Capped by Sharkord's bitrate
    setting and ~25 Mbps at 4K60; the resolution stays what the user picked.
@@ -429,7 +440,9 @@ There are no automated tests. After a change, check what it touches:
   out with the reason, and "This GPU can hardware encode" lists H.264 / AV1. Share with H.264:
   **one** portal dialog then the audio step, the local preview moves, a viewer gets 60 fps, stats
   show `GPU (Native: Vulkan (hardware), h264_vulkan)`, and the `sent` lines show `native keys` only
-  on request (`req`) and none after a bitrate change. At 4K a still screen then motion: no storm of
+  on request (`req`) and none after a bitrate change. A still screen shows the helper's `padding`
+  near the rate and the estimate staying up; motion after it is at full rate at once, with the
+  pacer under 250 ms. At 4K a still screen then motion: no storm of
   keyframe requests on the viewer (`watching … pli` near 0). On a clean Fedora install (no RPM
   Fusion drivers) the probe says `"driver":"bundled"` and H.264 still works. Cancelling the portal dialog or the audio step cancels the share
   and the desktop's sharing indicator goes away; stopping the share ends the helper. Suspending

@@ -379,7 +379,7 @@ function installNativeShare (workerSource, helperPicks) {
               }
               s.pending.push({ key: msg.key, data: d.byteOffset === 0 && d.byteLength === d.buffer.byteLength ? d.buffer : d.slice().buffer })
               pace()
-            } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps }
+            } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps, padding: msg.padding }
             else if (msg.event === 'error') s.fallback('helper failed: ' + msg.message)
             else if (msg.event === 'suspend') { s.suspended = true; log('system suspending') }
             else if (msg.event === 'started') { s.encoder = { name: msg.encoder, width: msg.size?.[0], height: msg.size?.[1] }; log(msg.event, JSON.stringify(msg)) }
@@ -475,7 +475,8 @@ function installNativeShare (workerSource, helperPicks) {
         // hundred kbps), Chromium's estimate fell to what was acknowledged (32 -> 5.8 Mbps), and
         // motion then went out at the old 25 Mbps into it: 1.4 s in the pacer for ~6 s. Then down
         // to the estimate, and up with it again
-        const idle = (s.helper.kbps ?? Infinity) < s.kbps * 0.5 && bwe < s.kbps
+        // (The helper's padding counts: it holds the estimate up while the screen is still)
+        const idle = (s.helper.kbps ?? Infinity) + (s.helper.padding ?? 0) < s.kbps * 0.5 && bwe < s.kbps
         const aim = clean && !idle ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * (clean ? 1 : 0.85)))
         s.cap = cap
         // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under the step
