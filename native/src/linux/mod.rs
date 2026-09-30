@@ -76,10 +76,52 @@ fn pick() -> Option<(Device, bool, bool)> {
 }
 
 pub fn check() -> Value {
+    let driver = if std::env::var_os(BUNDLED).is_some() { "bundled" } else { "system" };
     match pick() {
-        Some((dev, h264, av1)) => json!({ "missing": [], "h264": h264, "av1": av1, "api": dev.api.name(), "device": dev.render_node }),
-        None => json!({ "missing": ["encoder"], "h264": false, "av1": false }),
+        Some((dev, h264, av1)) => {
+            json!({ "missing": [], "h264": h264, "av1": av1, "api": dev.api.name(), "device": dev.render_node, "driver": driver })
+        }
+        None => json!({ "missing": ["encoder"], "h264": false, "av1": false, "driver": driver }),
     }
+}
+
+/// Set when the helper runs on the bundled Mesa Vulkan drivers
+const BUNDLED: &str = "SHARKORD_BUNDLED_DRIVER";
+
+/// The bundled Mesa Vulkan drivers' loader manifests: `resources/native/mesa` next to the packaged
+/// helper (`bin/`), or `build/deps/mesa` (scripts/deps/mesa.sh) for the development build.
+fn bundled_drivers() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    [dir.join("../mesa"), dir.join("../../../build/deps/mesa")].into_iter().find_map(|d| {
+        let icds: Vec<String> = ["radeon_icd.json", "intel_icd.json"]
+            .iter()
+            .map(|f| d.join(f))
+            .filter(|p| p.exists())
+            .filter_map(|p| p.canonicalize().ok()?.to_str().map(str::to_owned))
+            .collect();
+        (!icds.is_empty()).then(|| icds.join(":"))
+    })
+}
+
+/// Where the system's drivers can't encode H.264 (Fedora and openSUSE build Mesa without it) and
+/// the bundled ones are here, runs this same helper again on those: only this process loads them,
+/// never the app. Called first thing, before the portal's dialog.
+pub fn prefer_bundled_driver() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var_os(BUNDLED).is_some() || pick().is_some_and(|(_, h264, _)| h264) {
+        return;
+    }
+    let Some(icds) = bundled_drivers() else { return };
+    let Ok(exe) = std::env::current_exe() else { return };
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env(BUNDLED, "1")
+        .env("VK_DRIVER_FILES", &icds)
+        .env("VK_ICD_FILENAMES", &icds)
+        .env("VK_LOADER_LAYERS_DISABLE", "~implicit~")
+        .exec();
+    eprintln!("bundled Vulkan drivers: {err}");
 }
 
 /// The newest converted picture, from the capture thread to the encoder thread.

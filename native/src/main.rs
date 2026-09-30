@@ -153,6 +153,8 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    platform::prefer_bundled_driver();
     // `--check`: can this machine capture and encode, and which codecs? The packaging self-check
     // and the app's startup probe
     if std::env::args().any(|a| a == "--check") {
