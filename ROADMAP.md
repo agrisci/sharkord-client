@@ -8,7 +8,7 @@ about never leaving a share broken and being able to debug machines we have neve
 P3 = ideas
 **Status:** ✅ Done · 🚧 In progress · 🧪 Needs testing · 📋 Planned · 💡 Idea · ⛔ Won't do
 **#** is a stable ID for referring to an item in commits and issues, not its rank; new items take
-the next free number (currently 105).
+the next free number (currently 106).
 
 ## Bugs
 
@@ -167,6 +167,7 @@ shares* on (off by default):
 | 41 | P2 | Licence notices | 🚧 | GStreamer licence texts ship per DLL on Windows (`LICENSES` in `scripts/stage-native.js`); Linux ships FFmpeg's LGPL (with source, configure line and patches in `SOURCES.md`), glslang's and Mesa's in `resources/native/LICENSES` (#104). Missing: a top-level third-party notice, an About entry, the VC++ runtime terms. |
 | 40 | P2 | Helper size | 💡 | Windows: check the staged plugin set (`PLUGINS` in `stage-native.js`) per encoder once #7/#8 add plugins (or drop it with #103). Linux: the helper is ~10 MB stripped, the bundled RADV/ANV ~21/26 MB (~4 MB each compressed). |
 | 61 | P3 | Flatpak / AUR | 💡 | electron-builder's Flatpak target makes single-file bundles only, with no auto-update; Flathub would need its own manifest. |
+| 105 | P2 | Linux builds on Ubuntu 24.04 | 📋 | The Linux job builds on Ubuntu 22.04 on purpose: its glibc (2.35) is the oldest the app then runs on (Ubuntu 22.04+, Debian 12+, Mint 21+). A newer image would drop those. Move to 24.04 (glibc 2.39) when 22.04's standard support ends in April 2027; `scripts/deps` already builds its own SPIRV-Tools, glslang and SPA headers, and Mesa with clang, because 22.04's are too old. |
 | 62 | P3 | Nightly builds from `dev` | 💡 | Artifacts exist per push; a pinned pre-release is easier for testers to find. |
 
 ## Client (general)
