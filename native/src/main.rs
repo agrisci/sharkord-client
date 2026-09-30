@@ -12,10 +12,11 @@
 //! - stdout, records: a 16-byte header (u8 kind, u8 flags, u16 reserved, u32 LE length,
 //!   u64 LE pts in microseconds) and the payload. Kind 1 is an encoded frame (flag 1 =
 //!   keyframe), kind 2 a JSON event: on Linux `selected` / `cancelled` for the portal dialog,
-//!   then `started` once capturing, `input` with the caps reaching the converter (whether frames
-//!   stay in GPU memory), `stream` with the first H.264 keyframe's SPS profile and level, `stats`
-//!   every 2 s (with videorate's in/out/duplicate/drop totals), `warning`, and `error` before the
-//!   process gives up -- every failure after `start` sends one.
+//!   then `started` with the first frame (the sizes captured and encoded), `input` with the caps
+//!   reaching the converter (whether frames stay in GPU memory), `stream` with the first H.264
+//!   keyframe's SPS profile and level, `stats` every 2 s (with videorate's in/out/duplicate/drop
+//!   totals), `warning`, and `error` before the process gives up -- every failure after `start`
+//!   sends one.
 //!
 //! Windows: each part of the graph and its settings was measured on an RX 9060 XT: DXGI capture
 //! straight into `d3d11convert` and AMF with no copies, `videorate` holding the declared rate
@@ -26,8 +27,8 @@
 //! Linux (Wayland): the same graph from a PipeWire stream the helper gets from the portal
 //! (`portal`), copied into VA memory and converted by `vapostproc` for a VA-API encoder. The
 //! helper shows the portal's dialog as soon as it starts, before `start`, and reports `selected`
-//! (with the source's size) or `cancelled`; Chromium doesn't capture at all, the page builds the
-//! share's stream (and its preview) from these frames.
+//! (with the source's size in logical pixels) or `cancelled`; Chromium doesn't capture at all,
+//! the page builds the share's stream (and its preview) from these frames.
 
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -335,7 +336,7 @@ struct Share {
     /// AMF AV1: keyframes by shortening gop-size (`poking` while one is on its way)
     poke: bool,
     poking: Arc<AtomicBool>,
-    /// The `started` event, sent once the pipeline is playing
+    /// The `started` event, sent with the first frame (with the negotiated sizes)
     started: Value,
     _capture: Capture,
 }
@@ -370,7 +371,29 @@ fn build(start: &Start, out: &Out, capture: Capture) -> Result<Share> {
         .property("max-size-time", 0u64)
         .build()?;
     let convert = make(source.convert)?;
-    let enc_caps = caps(format!("{},format=NV12,width={width},height={height},framerate={fps}/1", source.encoder_memory))?;
+    let memory = source.encoder_memory;
+    let enc_format = move |(w, h): (u32, u32)| format!("{memory},format=NV12,width={w},height={h},framerate={fps}/1");
+    let enc_caps = caps(enc_format((width, height)))?;
+    // The source's first caps have its real size: the portal's is in logical pixels (a 4K
+    // screen at 160% says 2400x1350), and the frames are physical. The caps reach this probe
+    // before `enc_caps`, so the encoder is negotiated at the right size from the start.
+    if let Some(pad) = source.head[0].static_pad("src") {
+        let (weak, max, initial) = (enc_caps.downgrade(), (start.width, start.height), (width, height));
+        pad.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, move |_, info| {
+            let Some(gst::EventView::Caps(c)) = info.event().map(|e| e.view()) else { return gst::PadProbeReturn::Ok };
+            let s = c.caps().structure(0);
+            if let Some((w, h)) = s.and_then(|s| Some((s.get::<i32>("width").ok()?, s.get::<i32>("height").ok()?)))
+                && let (Ok(w), Ok(h)) = (u32::try_from(w), u32::try_from(h))
+                && let Some(enc_caps) = weak.upgrade()
+            {
+                let size = fit((w, h), max);
+                if size != initial && let Ok(caps) = enc_format(size).parse::<gst::Caps>() {
+                    enc_caps.set_property("caps", caps);
+                }
+            }
+            gst::PadProbeReturn::Remove
+        });
+    }
 
     let encoder = encoder(start.codec)?;
     let encoder_name = encoder.factory().map(|f| f.name().to_string()).unwrap_or_default();
@@ -524,10 +547,21 @@ fn pump(share: &Share, out: &Out, stop: &AtomicBool) -> Result<()> {
             let _ = set_int(&share.encoder, "gop-size", share.key_interval);
             keys_in_a_row = 0;
         }
-        if frames_total == 0
-            && let Some(caps) = share.convert.static_pad("sink").and_then(|p| p.current_caps())
-        {
-            event(out, json!({ "type": "input", "caps": caps.to_string() }));
+        if frames_total == 0 {
+            // `started` with the first frame: only now are the sizes negotiated (see `build`)
+            let caps = |pad| share.convert.static_pad(pad).and_then(|p| p.current_caps());
+            let size = |caps: &Option<gst::Caps>| caps.as_ref().and_then(|c| {
+                let s = c.structure(0)?;
+                Some(json!([s.get::<i32>("width").ok()?, s.get::<i32>("height").ok()?]))
+            });
+            let (input, output) = (caps("sink"), caps("src"));
+            let mut started = share.started.clone();
+            if let Some(v) = size(&input) { started["source"] = v }
+            if let Some(v) = size(&output) { started["size"] = v }
+            event(out, started);
+            if let Some(caps) = input {
+                event(out, json!({ "type": "input", "caps": caps.to_string() }));
+            }
         }
         frames_total += 1;
         if key && !reported_sps && let Some(sps) = h264_sps(&map) {
@@ -650,7 +684,6 @@ fn main() -> Result<()> {
         let _ = share.pipeline.set_state(gst::State::Null);
         return fail(anyhow::Error::new(e).context("could not start the capture"));
     }
-    event(&out, share.started.clone());
 
     let share = Arc::new(share);
     let stop = Arc::new(AtomicBool::new(false));

@@ -340,7 +340,9 @@ There are no automated tests. After a change, check what it touches:
   audio step, the local preview moves, a viewer gets 60 fps, stats show
   `GPU (Native: VAAPI, vah264enc)`. Cancelling the portal dialog or the audio step cancels the share
   and the desktop's sharing indicator goes away; stopping the share ends the helper. Suspending
-  mid-share ends the share, and the next share is native again.
+  mid-share ends the share, and the next share is native again. A screen with fractional scaling
+  (a 4K panel at 160%) shares at its physical size: the `started` line's `source` and `size` say
+  3840x2160, not 2400x1350 (with Sharkord's resolution at 4K).
 - **Codec routing (both platforms)**: VP8, VP9, `auto`, or Simulcast on (on a server that allows
   it) in Sharkord's Devices settings, and a codec the probe didn't open (AV1 on a GPU without AV1 encoding), are Chromium's share: its
   picker, a moving preview, no `sharkord-share` process and Chromium's encoder in the stats.
