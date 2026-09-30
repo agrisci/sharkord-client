@@ -8,9 +8,20 @@ description = "Native screen capture + hardware encode for the Electron client's
 [dependencies]
 anyhow = "1"
 serde_json = "1"
+
+# Windows: capture and encode with GStreamer (DXGI, AMF), bundled by scripts/stage-native.js
+[target.'cfg(windows)'.dependencies]
 gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"
+
+# Linux: the xdg-desktop-portal ScreenCast session (zbus is pure Rust; no tokio), its PipeWire
+# stream, and FFmpeg's Vulkan/VA-API encoders, linked statically from scripts/deps/ffmpeg.sh
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", default-features = false, features = ["screencast", "async-io"] }
+pipewire = { version = "0.10", features = ["v0_3_33"] }
+ffmpeg-sys-next = { version = "9", default-features = false, features = ["avcodec", "avfilter", "static"] }
+ash = { version = "0.38", default-features = false, features = ["std"] }
 
 [profile.release]
 debug = "line-tables-only"

@@ -18,7 +18,8 @@ loads the real Sharkord web app, unchanged, and adds what a browser can't do.
 
 **Where this has been tested:** screen sharing at 4K 60 fps (H.264 and AV1) from Windows 11 with an
 AMD RX 9060 XT, using the native screen share, watched on a Fedora Linux laptop (AMD Ryzen 4000
-graphics). Other GPUs and setups should work but haven't been verified yet — reports welcome.
+graphics); and the native screen share from that laptop (Fedora 44 KDE Plasma, Wayland) at 1080p
+60 fps in H.264. Other GPUs and setups should work but haven't been verified yet — reports welcome.
 
 ---
 
@@ -32,6 +33,12 @@ graphics). Other GPUs and setups should work but haven't been verified yet — r
   [GStreamer 1.28 MSVC](https://gstreamer.freedesktop.org/download/) runtime **and** development
   files, and `pkg-config` (e.g. `choco install pkgconfiglite`). Without them the Windows installer
   still builds, just without the native share.
+- **For the native screen share (Linux, optional):** the same Rust, plus what the helper's own
+  FFmpeg and Mesa drivers are built with (`scripts/deps/`): cmake, meson 1.4+, ninja, clang,
+  PipeWire's development files, and LLVM 15+ with libclc and the SPIR-V translator. On Ubuntu
+  22.04 `scripts/deps/ubuntu-packages.sh` installs them; anywhere with podman,
+  `scripts/deps/container.sh ffmpeg mesa` builds in an Ubuntu 22.04 container. Without them the
+  packages still build, just without the helper.
 
 ### 1 — Install dependencies
 
@@ -56,7 +63,9 @@ npm run dist:linux
 ```
 
 Output goes to `release/`. Building deb/rpm on Fedora needs `libxcrypt-compat` (for
-electron-builder's bundled fpm) and `rpm-build`.
+electron-builder's bundled fpm) and `rpm-build`. This also builds the native share helper; on
+Linux it ships with its own FFmpeg (linked in) and Mesa Vulkan drivers (used where the system's
+can't encode H.264), so nothing needs installing.
 
 The build isn't tied to a server: on first launch the app asks for your server URL and
 saves it in the user's `settings.json` (in Electron's userData folder).
@@ -71,7 +80,9 @@ can't be reached, the error page has **Retry** and **Change server** buttons.
 Work happens on feature branches that are merged into `dev` through pull requests. GitHub
 Actions (`.github/workflows/build.yml`) builds the Windows installer and the Linux packages on
 native runners for every PR into `dev` or `main` and every push to `dev`, and uploads them as
-workflow artifacts. The Windows job installs GStreamer and builds the native helper.
+workflow artifacts; a newer push to the same PR or to `dev` cancels the run still going for the
+older commit (release runs are never cancelled). Both jobs build the native helper: Windows against GStreamer, Linux (on Ubuntu 22.04, so it runs
+on older glibc too) with its own FFmpeg and Mesa drivers, cached between runs.
 
 **Versioning:** [SemVer](https://semver.org), independent of the Sharkord server's version (the
 client loads whatever web app the server serves). While Sharkord is in alpha the client stays
@@ -97,14 +108,15 @@ Windows builds aren't code-signed, so SmartScreen may warn on first run (**More 
 
 | Feature | How |
 |---------|-----|
-| **Hardware screen sharing** | In Sharkord's Devices settings pick **H264** or **AV1** and turn **Simulcast off** (simulcast forces VP8, which most GPUs can't encode). Linux uses VA-API, Windows Media Foundation |
-| **Native screen share (Windows, AMD, experimental)** | Turn it on in **Settings → Others → Native screen share (experimental)** or the tray. A small helper (`native/`, Rust + GStreamer) captures the whole screen and encodes it on the GPU (AMD AMF); its frames go through Sharkord's own connection, so Sharkord itself is unchanged. The bitrate follows the network, capped by Sharkord's bitrate slider. Window shares, VP8/VP9 and simulcast use the normal path; if the helper fails mid-share, the share ends cleanly and the next one uses the normal path |
+| **Hardware screen sharing** | In Sharkord's Devices settings pick **H264** or **AV1** and turn **Simulcast off** (with simulcast on, and allowed by the server, Sharkord shares VP8, which most GPUs can't encode). Linux uses VA-API, Windows Media Foundation. Shares that don't use the native share are encoded on the GPU only with **Settings → Desktop Client → Hardware encoding for other shares** on (after a restart): on by default on Windows, off on Linux, where some drivers produce streams viewers can't play |
+| **Native screen share (Windows AMD, Linux Wayland; experimental)** | Turn it on in **Settings → Desktop Client → Native screen share (experimental)** or the tray. A small helper (`native/`, Rust) captures the screen and encodes it on the GPU (AMF on Windows; on Linux Vulkan video or VA-API through a bundled FFmpeg, keyframes only on request and capped in size); its frames go through Sharkord's own connection, so Sharkord itself is unchanged. The bitrate follows the network, capped by Sharkord's bitrate slider. It's used only when **H264** or **AV1** is picked in Sharkord's Devices settings without simulcast (**Simulcast off**, or disabled by the server), **and** the GPU can encode it (checked at startup; the tab lists what it found, and the switch is greyed out when it can encode neither). Every other share (VP8, VP9, auto, simulcast, a codec the GPU lacks) is the normal Chromium share. On Windows it takes whole screens (window shares stay normal) and a helper failure before the first frame falls back to the normal share; on Linux the helper shows the only portal dialog (screens or windows) and Sharkord's preview shows its frames. A helper failure mid-share ends the share on both, and later shares that session are normal ones (a suspend also ends the share, but the next one can go native again). Where it can't be used (or only for one codec) Settings says why under its switch. **Linux needs** a Wayland session and an AMD or Intel GPU that encodes video; nothing to install. Where the distro's Mesa has H.264 encoding removed (Fedora, openSUSE), the helper uses Mesa Vulkan drivers shipped with the app. NVIDIA GPUs need NVIDIA's own driver (nouveau can't encode) |
 | **Screen share picker** | Choose a screen or window, then the audio. On Wayland the system portal picks the source and the picker opens on the audio step |
 | **Share audio** | Linux: per-app or entire-system audio through PipeWire ([venmic](https://github.com/Vencord/venmic)). Windows: system loopback ("Stream With Audio") |
 | **Notifications** | Turn them on in Sharkord's **Settings → Notifications**. The taskbar flashes until you come back, and a click also brings the window back from the tray |
 | **Change server** | Sharkord's **☰** menu → **Change server**, the button on the login screen, `Ctrl+Shift+O`, or the tray menu |
-| **Tray and startup** | At the top of Sharkord's **Settings → Others**, or in the tray menu: **Open at login** (starts minimized in the tray when **Minimize to tray** is on) and **Minimize to tray** (X keeps Sharkord running; quit from the tray, even during a call). Launching Sharkord again brings the running window to the front |
+| **Tray and startup** | In the **Desktop Client** tab of Sharkord's user settings (saved with **Save Changes**, like Sharkord's own tabs), or in the tray menu: **Open at login**, **Start minimized** (a login launch starts in the tray; only with Open at login) and **Minimize to tray** (X keeps Sharkord running; quit from the tray, even during a call). Launching Sharkord again brings the running window to the front |
 | **DevTools** | `Ctrl+Shift+I` |
+| **Logs (for bug reports)** | `logs/main.log` in the settings folder (`~/.config/sharkord`, `%APPDATA%\sharkord`), and the previous run in `main.old.log`; at most 5 MB each. Written on every launch, from the menu or at login too |
 
 ---
 
@@ -114,16 +126,16 @@ Windows builds aren't code-signed, so SmartScreen may warn on first run (**More 
 the list:
 
 - **Never break a share, on any hardware:** a clean fallback for every capture failure, and
-  always-on logs plus a "Copy diagnostics" button for bug reports.
-- **More GPUs for the native share:** NVIDIA (NVENC) and Intel (Quick Sync), chosen by a startup
-  probe of what the machine can really encode.
+  a "Copy diagnostics" button for bug reports (the log files are already written).
+- **More GPUs for the native share:** NVIDIA (NVENC) and Intel (Quick Sync) on Windows, where
+  only AMD is supported today.
 - **4K at 120 fps:** lift the remaining frame-rate limits (WebRTC's default 60 fps cap per
   sender, capture on high-refresh screens) and test on a 120 Hz display.
 - **A safer normal path on Windows:** hardware encoding up to 4K on NVIDIA and Intel, the
   experimental Chromium flags only where they help, and a switch to turn them off.
 - **Better quality per bit:** H.264 High profile (the server already offers it), and a faster
   bitrate ramp at the start of a share.
-- **Linux:** measure sharing from Linux first, then decide whether it needs a native path too.
+- **Linux:** the native share on NVIDIA (NVENC) and X11, which use the normal path today.
 
 ---
 
@@ -138,15 +150,16 @@ sharkord-client/
 │   └── build.yml          ← CI: build installers; manual run on main publishes a release
 ├── electron/
 │   ├── main.js            ← window, tray, GPU flags, screen-share picker, venmic audio, native share helper
-│   ├── preload.js         ← bridge, getDisplayMedia hooks (share audio, native share), injected settings
+│   ├── preload.js         ← bridge, getDisplayMedia hooks (share audio, native share), Desktop Client settings tab
 │   ├── first-launch.html  ← server URL prompt (first run / Change Server)
 │   ├── unreachable.html   ← shown when the server can't be reached
 │   ├── theme.css          ← Sharkord's design tokens for the two pages above
 │   ├── picker.html        ← screen share picker (Sharkord look)
 │   └── picker-preload.js  ← bridge for the picker window
-├── native/                ← native screen share helper (Rust + GStreamer, Windows)
+├── native/                ← native screen share helper (Rust; Windows: GStreamer, Linux Wayland: PipeWire + FFmpeg)
 ├── scripts/
-│   └── stage-native.js    ← builds the helper and stages it with its GStreamer subset
+│   ├── stage-native.js    ← builds the helper and stages it (Windows: its GStreamer subset; Linux: Mesa drivers)
+│   └── deps/              ← Linux: builds the helper's FFmpeg and Mesa drivers
 └── build/
     ├── icon.png           ← Sharkord logo (window icon)
     ├── icon.ico           ← Windows installer/exe icon

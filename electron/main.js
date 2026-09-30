@@ -3,14 +3,49 @@
 // ═══════════════════════════════════════════════════════════════════════════
 const {
   app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, net, shell, desktopCapturer, session,
-  screen, MessageChannelMain, dialog,
+  screen, MessageChannelMain, dialog, powerMonitor,
 } = require('electron')
 const { spawn } = require('child_process')
 const path = require('path')
 const fs   = require('fs')
 const os   = require('os')
 
-const log = (...a) => console.log(new Date().toISOString().slice(11,23), '|', ...a)
+const log = (...a) => {
+  const line = [new Date().toISOString().slice(11,23), '|', ...a]
+  console.log(...line)
+  writeLog(require('util').format(...line).slice(0, 65536) + '\n')
+}
+// Also to userData/logs/main.log, for launches with no terminal (menu, tray, at login). Bounded:
+// main.log and the previous one (main.old.log), LOG_MAX each; only the primary instance writes
+// (a second launch would rotate the running app's log). Lines before openLog wait in memory.
+const LOG_MAX  = 5 * 1024 * 1024
+const logDir   = path.join(app.getPath('userData'), 'logs'), logFile = path.join(logDir, 'main.log')
+let logState   = 'pending', logPending = [], logBytes = 0
+const rotateLog = () => { try { fs.renameSync(logFile, path.join(logDir, 'main.old.log')) } catch {} logBytes = 0 }
+function writeLog (line) {
+  if (logState === 'pending') return logPending.push(line)
+  if (logState !== 'on') return
+  const bytes = Buffer.byteLength(line)
+  try {
+    if (logBytes + bytes > LOG_MAX) rotateLog()
+    fs.appendFileSync(logFile, line); logBytes += bytes
+  } catch { logState = 'off' }   // a full disk or no permission: the console still has it
+}
+function openLog (primary) {
+  const pending = logPending; logPending = []
+  logState = 'off'
+  if (!primary) return
+  try { fs.mkdirSync(logDir, { recursive: true }); rotateLog(); logState = 'on' } catch { return }
+  pending.forEach(writeLog)
+  log('[log]', logFile)
+}
+// A child's stderr into the log, a line at a time (the helper's, its libraries' and drivers' messages)
+function logLines (stream, tag) {
+  let rest = ''
+  stream.setEncoding('utf8')
+  stream.on('data', d => { const lines = (rest + d).split(/\r?\n/); rest = lines.pop(); lines.forEach(l => l && log(tag, l)) })
+  stream.on('end', () => { if (rest) log(tag, rest) })
+}
 
 // ── Settings ──────────────────────────────────────────────────────────────
 const settingsPath     = path.join(app.getPath('userData'), 'settings.json')
@@ -26,36 +61,52 @@ const saveUserSettings = s  => {
 const savedServerUrl   = () => loadUserSettings().serverUrl?.replace(/\/+$/, '') || ''
 
 // ── Chromium flags ────────────────────────────────────────────────────────
-// Hardware video encode/decode for WebRTC screen share (VA-API on Linux, Media
-// Foundation on Windows). Only one enable-features switch may be set — a
-// second call overrides the first.
-if (process.platform === 'linux') {
-  app.commandLine.appendSwitch('enable-features', [
-    'AcceleratedVideoEncoder',               // VA-API encode (was VaapiVideoEncoder before Chromium 131)
-    'AcceleratedVideoDecodeLinuxGL',
-    'AcceleratedVideoDecodeLinuxZeroCopyGL',
-    'VaapiIgnoreDriverChecks',               // AMD radeonsi isn't on Chromium's driver allow list
-  ].join(','))
-  app.commandLine.appendSwitch('ignore-gpu-blocklist')
-  app.commandLine.appendSwitch('enable-gpu-rasterization')
-  app.commandLine.appendSwitch('enable-zero-copy')
-} else if (process.platform === 'win32') {
-  app.commandLine.appendSwitch('enable-features', [
-    // Media Foundation encodes Baseline H.264 in hardware, but WebRTC's usual
-    // Constrained Baseline (42e01f, what Sharkord negotiates) falls back to
-    // OpenH264 unless this is on (off by default in Chromium, pending rollout)
-    'PlatformH264CbpEncoding',
-    // Screen capture (WGC on Win11 24H2+) copies every frame to CPU memory and
-    // is throttled to half the CPU time; at 4K that caps it near 36 fps. GPU
-    // textures keep it at 60.
-    'WebRtcAllowWgcUsingTexture',
-    // AV1 hardware encoding for WebRTC (libaom otherwise)
-    'WebRtcAV1HWEncode',
-  ].join(','))
-  // Chromium asks each encoder for its max resolutions and drops the ones that
-  // don't answer, like AMD's AV1 encoder. Without the query every hardware
-  // encoder is limited to 1080p (above that WebRTC falls back to software).
-  app.commandLine.appendSwitch('disable-features', 'ExpandMediaFoundationEncodingResolutions')
+// Hardware video encoding for Chromium's own share (shares the native helper doesn't take), behind
+// the chromiumHwEncode setting: on by default on Windows, off on Linux, where the helper is the
+// hardware path and Chromium's VA-API encoder has no fallback for a driver that opens but encodes
+// garbage (viewers load forever, Vesktop #1004). SHARKORD_CHROMIUM_DEFAULTS=1 turns it off.
+// Nothing else is overridden: decode is on by default, and the GPU blocklist stays in force (it
+// lists nouveau, software GL and VMs).
+// The saved choice (what the settings show) takes effect at the next launch
+const chromiumHwEncodeSetting = () => loadUserSettings().chromiumHwEncode ?? process.platform === 'win32'
+const chromiumHwEncodeSource  = () => process.env.SHARKORD_CHROMIUM_DEFAULTS === '1' ? 'env'
+  : typeof loadUserSettings().chromiumHwEncode === 'boolean' ? 'setting' : 'default'
+const chromiumHwEncode        = () => chromiumHwEncodeSource() !== 'env' && chromiumHwEncodeSetting()
+{
+  const enable = [], disable = []
+  if (chromiumHwEncode() && process.platform === 'linux') {
+    enable.push('AcceleratedVideoEncoder')   // VA-API encode (was VaapiVideoEncoder before Chromium 131)
+  } else if (chromiumHwEncode() && process.platform === 'win32') {
+    enable.push(
+      // Media Foundation encodes Baseline H.264 in hardware, but WebRTC's usual
+      // Constrained Baseline (42e01f, what Sharkord negotiates) falls back to
+      // OpenH264 unless this is on (off by default in Chromium, pending rollout)
+      'PlatformH264CbpEncoding',
+      // Screen capture (WGC on Win11 24H2+) copies every frame to CPU memory and
+      // is throttled to half the CPU time; at 4K that caps it near 36 fps. GPU
+      // textures keep it at 60.
+      'WebRtcAllowWgcUsingTexture',
+      // AV1 hardware encoding for WebRTC (libaom otherwise)
+      'WebRtcAV1HWEncode',
+    )
+    // Chromium asks each encoder for its max resolutions and drops the ones that
+    // don't answer, like AMD's AV1 encoder. Without the query every hardware
+    // encoder is limited to 1080p (above that WebRTC falls back to software).
+    disable.push('ExpandMediaFoundationEncodingResolutions')
+  }
+  // Merged with the command line's, which a second appendSwitch would override; a feature
+  // disabled there wins, so --disable-features=... always works for support
+  const merge = (name, ours) => {
+    const all = new Set([...app.commandLine.getSwitchValue(name).split(','), ...ours].filter(Boolean))
+    app.commandLine.removeSwitch(name)
+    return all
+  }
+  const disabled = merge('disable-features', disable)
+  const enabled = [...merge('enable-features', enable)].filter(f => !disabled.has(f))
+  if (enabled.length) app.commandLine.appendSwitch('enable-features', enabled.join(','))
+  if (disabled.size) app.commandLine.appendSwitch('disable-features', [...disabled].join(','))
+  log('[flags] hardware encoding for Chromium\'s share:', chromiumHwEncode() ? 'on' : 'off', `(${chromiumHwEncodeSource()})`)
+  log('[flags] enable-features:', enabled.join(',') || '-', '| disable-features:', [...disabled].join(',') || '-')
 }
 
 // ── venmic (Linux per-app share audio via PipeWire) ──────────────────────
@@ -149,7 +200,7 @@ ipcMain.on('change-server', e => { if (e.sender === win?.webContents) changeServ
 ipcMain.on('notification-shown',   e => { if (e.sender === win?.webContents && !win.isFocused()) win.flashFrame(true) })
 ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) showWindow() })
 
-// Page → "Desktop" tab added to Sharkord's user settings (preload.js)
+// Page → "Desktop Client" tab added to Sharkord's user settings (preload.js)
 ipcMain.handle('desktop-settings-get', e => e.sender === win?.webContents ? desktopSettings() : null)
 ipcMain.handle('desktop-settings-set', (e, s) => e.sender === win?.webContents ? setDesktopSettings(s) : null)
 
@@ -187,6 +238,34 @@ ipcMain.handle('picker-go-live', (_e, { id, audio, include, exclude }) => {
 })
 ipcMain.on('picker-cancelled', () => finishPick(null))
 
+// Opens the picker on `sources`; `done` gets the streams, or null when it is cancelled or closed
+async function openPicker (sources, done) {
+  _displayCallback = done
+  _pickerSources   = sources
+  const theme = await pageTheme()
+  _pickerWin = new BrowserWindow({
+    width:720, height:660, parent:win, modal:false,
+    title:'Share Screen', backgroundColor: theme === 'light' ? '#ffffff' : '#0a0a0a', resizable:false,
+    ...(fs.existsSync(APP_ICON) ? { icon:APP_ICON } : {}),
+    webPreferences:{ preload:path.join(__dirname,'picker-preload.js'), contextIsolation:true, nodeIntegration:false },
+  })
+  _pickerWin.setMenuBarVisibility(false)
+  _pickerWin.loadFile(path.join(__dirname,'picker.html'))
+  _pickerWin.webContents.on('did-finish-load', () => {
+    _pickerWin.webContents.send('init', {
+      sources: sources.map(s=>({id:s.id,name:s.name,thumbnail:s.thumbnail?.toDataURL() || ''})),
+      skipPicker: isWayland,
+      platform: process.platform,
+      theme,
+    })
+  })
+  _pickerWin.on('closed', () => {
+    const cb = _displayCallback; _displayCallback = null
+    if (cb) cb(null)
+    _pickerWin = null
+  })
+}
+
 async function handleDisplayMediaRequest (_req, callback) {
   try {
     venmicUnlink()   // a previous share's link must not leak into this one
@@ -197,51 +276,99 @@ async function handleDisplayMediaRequest (_req, callback) {
       types:['screen','window'], thumbnailSize:{ width, height:Math.round(width*9/16) },
     })
     if (!sources.length) { callback(null); return }   // portal cancelled
-    _displayCallback = callback
-    _pickerSources   = sources
-    const theme = await pageTheme()
-    _pickerWin = new BrowserWindow({
-      width:720, height:660, parent:win, modal:false,
-      title:'Share Screen', backgroundColor: theme === 'light' ? '#ffffff' : '#0a0a0a', resizable:false,
-      ...(fs.existsSync(APP_ICON) ? { icon:APP_ICON } : {}),
-      webPreferences:{ preload:path.join(__dirname,'picker-preload.js'), contextIsolation:true, nodeIntegration:false },
-    })
-    _pickerWin.setMenuBarVisibility(false)
-    _pickerWin.loadFile(path.join(__dirname,'picker.html'))
-    _pickerWin.webContents.on('did-finish-load', () => {
-      _pickerWin.webContents.send('init', {
-        sources: sources.map(s=>({id:s.id,name:s.name,thumbnail:s.thumbnail.toDataURL()})),
-        skipPicker: isWayland,
-        platform: process.platform,
-        theme,
-      })
-    })
-    _pickerWin.on('closed', () => {
-      const cb = _displayCallback; _displayCallback = null
-      if (cb) cb(null)
-      _pickerWin = null
-    })
+    await openPicker(sources, callback)
   } catch (e) { log('[screen-share] error:', e.message); _displayCallback = null; callback(null) }
 }
 
-// ── Native screen share (Windows, experimental) ────────────────────────────
-//   A helper (native/, Rust + GStreamer) captures the picked monitor and encodes
-//   it with the GPU; the preload swaps its frames into Sharkord's own share.
+// ── Native screen share (Windows; Linux on Wayland; experimental) ─────────
+//   A helper (native/, Rust: GStreamer on Windows, PipeWire + FFmpeg on Linux) captures the
+//   picked monitor (Windows) or portal pick (Linux: a screen or a window) and encodes it with
+//   the GPU; the preload swaps its frames into Sharkord's own share.
 //   Frames go straight to the page over a MessagePort; the page sends keyframe
 //   and bitrate requests back the same way. The `nativeShare` setting turns it
 //   on (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
+//   Linux: the helper owns the pick. The page asks for it (native-share-pick)
+//   instead of calling Chromium's getDisplayMedia, so the portal asks once: the
+//   helper shows it, then the picker's audio step, and the page builds the
+//   share's stream (its preview decoded from the helper's frames).
 let _nativeTarget = null, _nativeShare = null
+let _nativeProbe = null   // the helper's --check ({ missing, h264, av1 } or { error }), once per run
 
-const nativeShareExe = () => process.platform === 'win32' && [
-  path.join(process.resourcesPath || '', 'native', 'bin', 'sharkord-share.exe'),   // installed (scripts/stage-native.js)
-  path.join(__dirname, '..', 'native', 'target', 'release', 'sharkord-share.exe'),
+const EXE_NAME = process.platform === 'win32' ? 'sharkord-share.exe' : 'sharkord-share'
+const nativeShareExe = () => ['win32', 'linux'].includes(process.platform) && [
+  path.join(process.resourcesPath || '', 'native', 'bin', EXE_NAME),   // installed (scripts/stage-native.js)
+  path.join(__dirname, '..', 'native', 'target', 'release', EXE_NAME),
 ].find(p => fs.existsSync(p))
-const nativeShareOn = () => !!nativeShareExe() &&
+// Only where the startup probe encoded a frame (an AMD GPU on Windows; on Linux one with Vulkan
+// video or VA-API encoding -- for AMD and Intel the helper brings Mesa drivers of its own where the
+// system's lack H.264), and on Linux only on Wayland (X11 stays Chromium's)
+const canEncode = codec => !_nativeProbe?.missing?.length && !!_nativeProbe?.[codec]
+const nativeShareSupported = () => !!nativeShareExe() &&
+  (process.platform !== 'linux' || isWayland) && (canEncode('h264') || canEncode('av1'))
+
+// What the startup probe found the GPU encodes, once it ran cleanly: a list under the switch
+const nativeShareCodecs = () => {
+  const p = _nativeProbe
+  return nativeShareExe() && p && !p.error && !p.missing?.length ? { h264: !!p.h264, av1: !!p.av1 } : null
+}
+
+// Why the native share is off on this machine, or how to get H.264: shown under its switch in
+// Settings next to that list, so a missing driver or plugin doesn't just make the option vanish.
+// null: nothing to say (or the probe hasn't answered yet).
+function nativeShareNote () {
+  const linux = process.platform === 'linux', p = _nativeProbe
+  if (!nativeShareExe()) return null
+  if (linux && !isWayland) return 'Needs a Wayland session; on X11 shares use the browser\'s capture.'
+  if (!p) return null
+  if (p.error) return linux
+    ? 'The helper could not run: it needs PipeWire and VA-API\'s libraries (libpipewire, libva), which desktops normally have.'
+    : 'The helper could not run; reinstalling Sharkord should fix it.'
+  if (p.missing?.length && linux) return 'No GPU here encodes video (Vulkan video or VA-API). NVIDIA GPUs need NVIDIA\'s own driver, not nouveau.'
+  if (p.missing?.length) return 'The helper is incomplete; reinstalling Sharkord should fix it.'
+  if (!p.h264 && !p.av1) return linux ? null : 'Only AMD GPUs are supported.'
+  if (!p.h264) return 'This GPU\'s driver can\'t encode H.264 here: H.264 shares use the browser\'s capture; AV1 shares go native.'
+  return null
+}
+const nativeShareOn = () => nativeShareSupported() &&
   (process.env.SHARKORD_NATIVE_SHARE === '1' || !!loadUserSettings().nativeShare)
 
-// Only whole screens: the helper captures monitors, not windows
+// Windows: its own GStreamer only -- no GST_* from an installed GStreamer, and a registry of its
+// own. Linux: the environment as it is (the helper switches to its bundled drivers itself).
+function helperEnv () {
+  if (process.platform !== 'win32') return process.env
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GST(REAMER)?_/i.test(k)))
+  env.GST_REGISTRY_1_0 = path.join(app.getPath('userData'), 'gstreamer-registry.bin')
+  return env
+}
+
+// Which codecs this machine really encodes: the helper opens each encoder (`--check`). Once per
+// run; a share only goes native with a codec it found (native-share-pick / native-share-target).
+// The first run on Windows also builds the helper's plugin registry, hence the long timeout.
+function probeNativeShare () {
+  const exe = nativeShareExe()
+  if (!exe || (process.platform === 'linux' && !isWayland)) return
+  // spawn, not execFile: its stderr goes to the log as it comes (execFile buffers it and kills
+  // the helper past 1 MB, which a chatty driver or GST_DEBUG reaches)
+  const proc = spawn(exe, ['--check'], { windowsHide: true, env: helperEnv() })
+  let stdout = '', finished = false
+  proc.stdout.on('data', d => { stdout += d })
+  logLines(proc.stderr, '[helper]')
+  const timer = setTimeout(() => proc.kill(), 30000)
+  const done = why => {
+    if (finished) return
+    finished = true; clearTimeout(timer)
+    try { _nativeProbe = JSON.parse(stdout) } catch { _nativeProbe = { error: why || 'no answer' } }
+    log('[native-share] probe', stdout.trim() || _nativeProbe.error)
+    updateTrayMenu()
+  }
+  proc.on('close', (code, signal) => done(signal ? 'killed (' + signal + ')' : code ? 'exit ' + code : null))
+  proc.on('error', err => done(err.message))
+}
+
+// Windows: only whole screens, the helper captures monitors. Linux goes native through
+// native-share-pick instead, never through Chromium's pick.
 function nativeTargetFor (src) {
-  if (!src.id.startsWith('screen:') || !nativeShareOn()) return null
+  if (process.platform !== 'win32' || !src.id.startsWith('screen:') || !nativeShareOn()) return null
   const display = screen.getAllDisplays().find(d => String(d.id) === src.display_id)
   return display ? { label: display.label, primary: display.id === screen.getPrimaryDisplay().id } : { primary: true }
 }
@@ -252,18 +379,20 @@ function stopNativeShare () {
   try { s.proc.stdin.end() } catch {}
   setTimeout(() => { if (s.proc.exitCode === null) s.proc.kill() }, 2000)
   s.port.close()
+  s.settle('error')
 }
 
-ipcMain.handle('native-share-target', e => e.sender === win?.webContents ? _nativeTarget : null)
-ipcMain.on('native-share-start', (e, opts) => {
-  if (e.sender !== win?.webContents || !_nativeTarget) return
+// Spawns the helper and wires its records to a MessagePort that native-share-start hands the page.
+// `ready` settles on its first answer on Linux, where it opens the portal at once: 'selected',
+// 'cancelled', or 'error' (also when it exits or is stopped first).
+function spawnHelper () {
   stopNativeShare()
-  // Its own GStreamer only: no GST_* from an installed GStreamer, and a registry of its own
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GST(REAMER)?_/i.test(k)))
-  env.GST_REGISTRY_1_0 = path.join(app.getPath('userData'), 'gstreamer-registry.bin')
-  const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true, env })
+  const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: helperEnv() })
+  logLines(proc.stderr, '[helper]')
   const { port1: port, port2 } = new MessageChannelMain()
-  const share = _nativeShare = { proc, port }
+  let settle
+  const ready = new Promise(resolve => { settle = resolve })
+  const share = _nativeShare = { proc, port, port2, ready, settle, started: false }
   // Records: u8 kind, u8 flags, u16 reserved, u32 LE length, u64 LE pts, payload
   let buf = Buffer.alloc(0)
   proc.stdout.on('data', chunk => {
@@ -279,6 +408,7 @@ ipcMain.on('native-share-start', (e, opts) => {
         try {
           const ev = JSON.parse(payload.toString())
           if (ev.type !== 'stats') log('[native-share]', JSON.stringify(ev))
+          if (['selected', 'cancelled', 'error'].includes(ev.type)) settle(ev.type)
           port.postMessage({ ...ev, type: 'event', event: ev.type })
         } catch {}
       }
@@ -288,6 +418,7 @@ ipcMain.on('native-share-start', (e, opts) => {
   // page, or the share stays on its placeholder and viewers see black
   const gone = why => {
     log('[native-share] helper', why)
+    settle('error')
     if (_nativeShare !== share) return   // stopped by the page
     port.postMessage({ type: 'event', event: 'error', message: 'helper ' + why })
     stopNativeShare()
@@ -299,11 +430,54 @@ ipcMain.on('native-share-start', (e, opts) => {
   port.on('message', ({ data }) => { try { proc.stdin.write(JSON.stringify(data) + '\n') } catch {} })
   port.on('close', () => { if (_nativeShare === share) stopNativeShare() })
   port.start()
-  proc.stdin.write(JSON.stringify({ cmd: 'start', ...opts, ..._nativeTarget }) + '\n')
+  return share
+}
+
+// Page → Linux: a share picked by the helper instead of Chromium. 'chromium' when it doesn't
+// apply here (the page calls Chromium's getDisplayMedia), including a `codec` the startup probe
+// found no encoder for (AV1 on older GPUs), 'cancelled' when the user cancelled a dialog, 'ok'
+// when the helper holds the screen and the audio step is done.
+ipcMain.handle('native-share-pick', async (e, codec) => {
+  if (e.sender !== win?.webContents || process.platform !== 'linux' || !nativeShareOn()) return 'chromium'
+  if (!canEncode(codec)) { log('[native-share] no', codec, 'encoder here: Chromium\'s share'); return 'chromium' }
+  venmicUnlink(); _nativeTarget = null
+  if (_pickerWin && !_pickerWin.isDestroyed()) _pickerWin.close()
+  const answer = await spawnHelper().ready
+  log('[native-share] pick', answer)
+  if (answer === 'cancelled') return 'cancelled'
+  if (answer !== 'selected') return 'chromium'   // the helper failed before a pick: Chromium's own
+  // The audio step only: the helper already has the screen
+  const streams = await new Promise(resolve => openPicker([{ id: 'native', name: 'Screen' }], resolve))
+  if (!streams) { stopNativeShare(); return 'cancelled' }
+  _nativeTarget = {}
+  return 'ok'
+})
+// Windows: the picked monitor, or null (Chromium's share) when the probe found no `codec` encoder
+ipcMain.handle('native-share-target', (e, codec) =>
+  e.sender === win?.webContents && canEncode(codec) ? _nativeTarget : null)
+ipcMain.on('native-share-start', (e, opts) => {
+  if (e.sender !== win?.webContents || !_nativeTarget) return
+  // Linux: the helper from the pick, already holding the screen; Windows: spawned now
+  const share = process.platform !== 'linux' ? spawnHelper() : _nativeShare?.started === false ? _nativeShare : null
+  if (!share) {   // it exited after the pick: the error makes the page end the share
+    const { port1, port2 } = new MessageChannelMain()
+    port1.postMessage({ type: 'event', event: 'error', message: 'helper exited before start' })
+    return e.sender.postMessage('native-share-port', { id: opts.id }, [port2])
+  }
+  share.started = true
+  share.proc.stdin.write(JSON.stringify({ cmd: 'start', ...opts, ..._nativeTarget }) + '\n')
   // The id lets the page hand the port to the share that asked for it
-  e.sender.postMessage('native-share-port', { id: opts.id }, [port2])
+  e.sender.postMessage('native-share-port', { id: opts.id }, [share.port2])
   log('[native-share] helper started', JSON.stringify({ ...opts, ..._nativeTarget }))
 })
+// Page → a share ended before native-share-start (Linux: the helper from the pick still holds
+// the portal session, and the desktop's "sharing" indicator)
+ipcMain.on('native-share-stop', e => { if (e.sender === win?.webContents) stopNativeShare() })
+// A suspend loses the capture (the portal's PipeWire stream doesn't come back on resume): the
+// page still ends the share, but doesn't count it as the helper failing
+function watchSuspend () {
+  powerMonitor.on('suspend', () => _nativeShare?.port.postMessage({ type: 'event', event: 'suspend' }))
+}
 
 // ── Main window ───────────────────────────────────────────────────────────
 const APP_ICON = path.join(__dirname,'..','build', process.platform==='win32'?'icon.ico':'icon.png')
@@ -339,6 +513,8 @@ function createWindow () {
 
   loadServer()
 
+  // The page's native share log next to the helper's, so one log shows both ends of a share
+  win.webContents.on('console-message', e => { if (e.message?.startsWith('[native-share]')) log('[page]', e.message) })
   // Load failed anyway (e.g. server went down between check and load)
   win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     if (!isMainFrame || code === -3) return   // -3: aborted by a newer navigation
@@ -374,13 +550,13 @@ function createWindow () {
     e.preventDefault()
     win.hide()
   })
-  // Launched at login: start in the tray, but only if there is a tray option to get back
+  // Launched at login with Start minimized on: start in the tray (only if there is one to get back)
   win.once('ready-to-show', () => {
-    if (!(startHidden && tray && loadUserSettings().minimizeToTray)) win.show()
+    if (!(startHidden && tray && loadUserSettings().startMinimized)) win.show()
     startHidden = false   // only the first window (not one re-created by Change server)
   })
 }
-let startHidden = process.argv.includes('--hidden')
+let startHidden = process.argv.includes('--hidden')   // launched at login (AUTOSTART_ARGS)
 
 function showWindow () {
   if (!win || win.isDestroyed()) return
@@ -483,7 +659,10 @@ function openApp () {
 
 // ── Desktop integration (open at login, tray) ─────────────────────────────
 //   Open at login lives in the OS (login item / autostart file), not in
-//   settings.json, so it stays right if the user removes it there.
+//   settings.json, so it stays right if the user removes it there. Its
+//   --hidden only marks a login launch; Start minimized (settings.json)
+//   decides whether that launch stays in the tray, so the entry never has to
+//   change (and Windows only finds its login item by the same args).
 const AUTOSTART_ARGS = ['--hidden']
 const autostartFile  = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(),'.config'), 'autostart', 'sharkord.desktop')
 
@@ -506,16 +685,22 @@ function setOpenAtLogin (on) {
   ].join('\n'))
 }
 
-// nativeShare is left out where there is no helper, which hides its switch and tray item
+// nativeShare is left out where the helper can't run, which hides its tray item and greys out its
+// switch; nativeShareNote says why (or which codecs it covers)
 const desktopSettings = () => ({
-  openAtLogin:openAtLogin(), minimizeToTray:!!loadUserSettings().minimizeToTray,
-  ...(nativeShareExe() ? { nativeShare:nativeShareOn() } : {}),
+  openAtLogin:openAtLogin(), startMinimized:!!loadUserSettings().startMinimized,
+  minimizeToTray:!!loadUserSettings().minimizeToTray, chromiumHwEncode:chromiumHwEncodeSetting(),
+  ...(nativeShareSupported() ? { nativeShare:nativeShareOn() } : {}),
+  ...(nativeShareNote() ? { nativeShareNote:nativeShareNote() } : {}),
+  ...(nativeShareCodecs() ? { nativeShareCodecs:nativeShareCodecs() } : {}),
 })
 function setDesktopSettings (s) {
   try {
     if (typeof s?.openAtLogin === 'boolean') setOpenAtLogin(s.openAtLogin)
+    if (typeof s?.startMinimized === 'boolean') saveUserSettings({ ...loadUserSettings(), startMinimized:s.startMinimized })
     if (typeof s?.minimizeToTray === 'boolean') saveUserSettings({ ...loadUserSettings(), minimizeToTray:s.minimizeToTray })
     if (typeof s?.nativeShare === 'boolean') saveUserSettings({ ...loadUserSettings(), nativeShare:s.nativeShare })
+    if (typeof s?.chromiumHwEncode === 'boolean') saveUserSettings({ ...loadUserSettings(), chromiumHwEncode:s.chromiumHwEncode })
   } catch (e) { log('[desktop] settings error:', e.message) }
   updateTrayMenu()
   return desktopSettings()
@@ -540,6 +725,7 @@ function updateTrayMenu () {
     { label:'Change Server…', click:changeServer },
     { type:'separator' },
     { label:'Open at login',    type:'checkbox', checked:s.openAtLogin,    click:i => setDesktopSettings({ openAtLogin:i.checked }) },
+    { label:'Start minimized',  type:'checkbox', checked:s.startMinimized, enabled:s.openAtLogin, click:i => setDesktopSettings({ startMinimized:i.checked }) },
     { label:'Minimize to tray', type:'checkbox', checked:s.minimizeToTray, click:i => setDesktopSettings({ minimizeToTray:i.checked }) },
     ...('nativeShare' in s ? [{ label:'Native screen share', type:'checkbox', checked:s.nativeShare, click:i => setDesktopSettings({ nativeShare:i.checked }) }] : []),
     { type:'separator' },
@@ -550,6 +736,7 @@ function updateTrayMenu () {
 // ── App startup ───────────────────────────────────────────────────────────
 // One instance only: a second launch (or autostart) brings the existing window back
 const primaryInstance = app.requestSingleInstanceLock()
+openLog(primaryInstance)
 if (!primaryInstance) app.quit()
 app.on('second-instance', showWindow)
 
@@ -569,6 +756,8 @@ app.whenReady().then(() => {
   session.defaultSession.setDisplayMediaRequestHandler(handleDisplayMediaRequest)
   Menu.setApplicationMenu(null)   // no menu bar; shortcuts live in before-input-event
   createTray()
+  probeNativeShare()
+  watchSuspend()
   openApp()
 })
 

@@ -1,0 +1,4 @@
+# The Linux helper's own FFmpeg (static) and PipeWire's SPA headers, from scripts/deps/ffmpeg.sh
+[env]
+FFMPEG_DIR = { value = "../build/deps", relative = true, force = false }
+PKG_CONFIG_PATH = { value = "../build/deps/lib/pkgconfig", relative = true, force = false }

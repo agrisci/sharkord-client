@@ -19,13 +19,21 @@ on:
 env:
   BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.bump || 'none' }}
 
+# A newer push to the same PR or to dev cancels the run still going for the older commit. Release
+# runs each get their own group and are never cancelled: stopping one halfway could leave the bump
+# committed without its release.
+concurrency:
+  group: build-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
 jobs:
   build:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # 22.04: the native helper needs the build's glibc (2.35 runs on Debian 12 too)
+          - os: ubuntu-22.04
             dist: linux
           - os: windows-latest
             dist: win
@@ -49,9 +57,21 @@ jobs:
         if: env.BUMP != 'none'
         run: npm version ${{ env.BUMP }} --no-git-tag-version
 
-      - name: Install rpm tools
+      # rpm tools, and what the Linux helper's own FFmpeg and bundled Mesa drivers are built with
+      # (scripts/deps). Those builds are cached by their scripts: on a miss stage-native.js runs them
+      - name: Install rpm tools and the native helper's build dependencies
         if: matrix.dist == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y rpm
+        run: |
+          sudo apt-get remove -y libunwind-14-dev   # the image's; it conflicts with packages below
+          sudo apt-get install -y rpm
+          bash scripts/deps/ubuntu-packages.sh
+          echo "SHARKORD_REQUIRE_NATIVE=1" >> "$GITHUB_ENV"
+      - name: Cache the native helper's FFmpeg and Mesa
+        if: matrix.dist == 'linux'
+        uses: actions/cache@v4
+        with:
+          path: build/deps
+          key: native-deps-${{ runner.os }}-${{ hashFiles('scripts/deps/**') }}
 
       # The native screen share helper (native/) builds against GStreamer MSVC and ships a subset
       # of its runtime (scripts/stage-native.js). Rust comes from native/rust-toolchain.toml.

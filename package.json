@@ -1,5 +1,5 @@
 {
-  "name": "sharkord-client",
+  "name": "sharkord",
   "version": "0.1.0",
   "description": "Standalone Sharkord desktop client",
   "author": { "name": "Sharkord Client", "email": "noreply@sharkord.example.com" },
@@ -9,7 +9,7 @@
     "start":        "electron .",
     "stage:native": "node scripts/stage-native.js",
     "dist:win":     "node scripts/stage-native.js && electron-builder --win --publish never",
-    "dist:linux":   "electron-builder --linux --publish never",
+    "dist:linux":   "node scripts/stage-native.js && electron-builder --linux --publish never",
     "dist:all":     "node scripts/stage-native.js && electron-builder --win --linux --publish never"
   },
   "build": {
@@ -39,10 +39,16 @@
         { "target": "rpm",      "arch": ["x64"] }
       ],
       "icon": "build/icons",
-      "category": "Network"
+      "category": "Network",
+      "extraResources": [{ "from": "build/native", "to": "native" }]
+    },
+    "rpm": {
+      "fpm": ["--rpm-tag", "Requires: libpipewire-0.3.so.0()(64bit)", "--rpm-tag", "Requires: libva.so.2()(64bit)",
+              "--rpm-tag", "Requires: libva-drm.so.2()(64bit)", "--rpm-tag", "Recommends: libvulkan.so.1()(64bit)"]
     },
     "deb": {
-      "depends": ["libgtk-3-0", "libnss3", "libxss1"]
+      "depends": ["libgtk-3-0", "libnss3", "libxss1", "libpipewire-0.3-0t64 | libpipewire-0.3-0", "libva2", "libva-drm2"],
+      "recommends": ["libvulkan1"]
     }
   },
   "optionalDependencies": {
