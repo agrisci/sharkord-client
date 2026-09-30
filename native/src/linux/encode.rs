@@ -32,6 +32,8 @@ impl Device {
         let kind = match api {
             Api::Vulkan => ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN,
             Api::Vaapi => ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            // The shared `Api` also lists Windows' encoders
+            _ => bail!("{} is not a Linux encode API", api.name()),
         };
         let mut hw = ptr::null_mut();
         check(unsafe { ff::av_hwdevice_ctx_create_derived(&mut hw, kind, drm.as_ptr(), 0) }, &format!("{} device", api.name()))?;
@@ -119,6 +121,7 @@ impl Device {
                         bail!("waiting for the conversion: VA error {r}");
                     }
                 }
+                _ => unreachable!("a Linux device is Vulkan or VA-API"),
             }
         }
         Ok(())
@@ -272,6 +275,7 @@ impl Convert {
                 (Api::Vulkan, Input::Memory) => format!("scale_vulkan=w={w}:h={h}:format=nv12"),
                 (Api::Vaapi, Input::Drm) => format!("hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format=nv12"),
                 (Api::Vaapi, Input::Memory) => format!("scale_vaapi=w={w}:h={h}:format=nv12"),
+                _ => unreachable!("a Linux device is Vulkan or VA-API"),
             };
             // Memory input: upload first. hwupload needs its device when it is created, which a
             // parsed graph can't give it, so it is made here and the rest is parsed after it
