@@ -1,0 +1,3 @@
+# Patches and shell scripts run in bash and `git apply` on every platform: LF even on Windows
+*.patch text eol=lf
+*.sh text eol=lf

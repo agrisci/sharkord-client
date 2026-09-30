@@ -1,0 +1,17 @@
+diff --git a/libavfilter/vsrc_ddagrab.c b/libavfilter/vsrc_ddagrab.c
+index e035ac9..b828908 100644
+--- a/libavfilter/vsrc_ddagrab.c
++++ b/libavfilter/vsrc_ddagrab.c
+@@ -906,7 +906,11 @@ static int ddagrab_config_props(AVFilterLink *outlink)
+ 
+     dda->time_base  = av_inv_q(dda->framerate);
+     dda->time_frame = av_gettime_relative() / av_q2d(dda->time_base);
+-    dda->time_timeout = av_rescale_q(1, dda->time_base, (AVRational) { 1, 1000 }) / 2;
++    /* AcquireNextFrame() holds the D3D11 device's (unfair) lock while it waits, starving
++     * everything else on the device, e.g. an encoder. When frames are duplicated anyway, poll
++     * at each tick instead of waiting in it */
++    dda->time_timeout = dda->dup_frames ? 0 :
++                        av_rescale_q(1, dda->time_base, (AVRational) { 1, 1000 }) / 2;
+ 
+     if (dda->draw_mouse) {
+         ret = init_render_resources(avctx);

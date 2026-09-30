@@ -11,7 +11,7 @@ There is no build step, no TypeScript and no bundler: plain CommonJS JavaScript 
 
 Core principle: **no over-engineering**. Follow the existing pattern, add the smallest thing
 that works, and don't introduce abstractions or dependencies for a single use case. The Electron
-side is ~2300 lines and the native helper ~2300 (`native/`, `scripts/stage-native.js`, `scripts/deps/`), on purpose.
+side is ~2500 lines and the native helper ~3300 (`native/`, `scripts/stage-native.js`, `scripts/deps/`), on purpose.
 
 ## Architecture
 
@@ -25,9 +25,9 @@ side is ~2300 lines and the native helper ~2300 (`native/`, `scripts/stage-nativ
 | `electron/unreachable.html`  | Shown when the server can't be reached or isn't a Sharkord server                             |
 | `electron/theme.css`         | Sharkord's design tokens + card/input/button styles for the two pages above                  |
 | `build/`                     | Icons packaged by electron-builder (committed so CI can build); `build/native/` is staged, not committed |
-| `native/`                    | Native screen share helper (Rust): captures a monitor (Windows: GStreamer, DXGI → AMF, `src/gst.rs`) or a portal pick (Linux Wayland: PipeWire → FFmpeg's Vulkan video or VA-API encoder, `src/linux/`), frames on stdout (see *Native screen share*) |
-| `scripts/stage-native.js`    | Builds the helper and stages it into `build/native/` (shipped as `resources/native/`): on Windows with its GStreamer runtime subset, on Linux with the bundled Mesa Vulkan drivers (`mesa/`) and licences |
-| `scripts/deps/`              | Linux: `ffmpeg.sh` (static LGPL FFmpeg with our runtime-bitrate patches), `mesa.sh` (RADV/ANV with H.264 encode, the helper's fallback), `ubuntu-packages.sh` (their build dependencies, CI), `container.sh` (the same in Ubuntu 22.04 via podman) |
+| `native/`                    | Native screen share helper (Rust + our static FFmpeg, `src/ffmpeg.rs`: encoder and paced encode loop): captures a monitor (Windows: DXGI desktop duplication → AMF, NVENC or Quick Sync, `src/windows.rs`) or a portal pick (Linux Wayland: PipeWire → Vulkan video or VA-API, `src/linux/`), frames on stdout (see *Native screen share*) |
+| `scripts/stage-native.js`    | Builds the helper and stages it into `build/native/` (shipped as `resources/native/`): on Windows one static exe, on Linux with the bundled Mesa Vulkan drivers (`mesa/`); licences in `LICENSES/` |
+| `scripts/deps/`              | The helper's FFmpeg, static LGPL with our patches (`ffmpeg-*.patch` Linux, `ffmpeg-windows-*.patch` Windows): `ffmpeg.sh` (Linux), `ffmpeg-windows.sh` (Windows, MSVC from MSYS2's bash); Linux also `mesa.sh` (RADV/ANV with H.264 encode, the helper's fallback), `ubuntu-packages.sh` (their build dependencies, CI), `container.sh` (the same in Ubuntu 22.04 via podman) |
 | `.github/workflows/build.yml` | CI: builds on Linux + Windows runners for PRs into `dev`/`main` and pushes to `dev` (artifacts); run manually on `main` with a version bump to release |
 | `upstream/`                  | Gitignored local clones for reference only (`sharkord-src`, `Sunshine`, ...) — never edit or import |
 
@@ -41,8 +41,8 @@ belongs to rather than adding files.
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `startMinimized` (a login launch stays in the
   tray), `nativeShare` (default
-  off; usable only when the helper's `--check` probe at startup encodes with a codec -- AMF on
-  Windows, Vulkan video or VA-API on Linux Wayland -- and a share goes native only with a codec it found; where it
+  off; usable only when the helper's `--check` probe at startup encodes with a codec -- AMF, NVENC
+  or Quick Sync on Windows, Vulkan video or VA-API on Linux Wayland -- and a share goes native only with a codec it found; where it
   can't run, its switch is greyed out and `nativeShareNote` says why, and `nativeShareCodecs` lists
   what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross),
   `chromiumHwEncode` (hardware encoding for shares on Chromium's own path, i.e. the Chromium flags
@@ -108,9 +108,9 @@ else (connection, packetization, bandwidth estimate). **Chromium's own share is 
 helper is opt-in per share, so nothing it can't handle ever reaches it.
 
 **Which path a share takes.** At startup `probeNativeShare` runs the helper's `--check` once: it
-opens each codec's encoder (AMF on Windows; on Linux it encodes a frame with Vulkan video, else
-VA-API, on the system's drivers or the bundled ones, reported as `api`/`driver`) and reports
-`h264`/`av1`. No codec →
+encodes a frame with each codec (Windows: AMF, else NVENC, else Quick Sync, on the first adapter
+that encodes; Linux: Vulkan video, else VA-API, on the system's drivers or the bundled ones,
+reported as `driver`), reports the `api` and `device`, and `h264`/`av1`. No codec →
 the switch is greyed out, with the reason under it. When a share starts, the page reads
 `screenCodec` and `simulcastEnabled` from Sharkord's Devices settings (`sharkord-devices-settings`
 in its localStorage), and whether the server allows simulcast: `webRtcSimulcastEnabled`, one of
@@ -130,13 +130,13 @@ Sharkord's state; a renamed key or field only turns the helper off:
 
 **How a helper share runs.**
 
-| | Windows (AMD, whole screens) | Linux (Wayland; AMD, Intel) |
+| | Windows (whole screens; AMD, NVIDIA, Intel) | Linux (Wayland; AMD, Intel) |
 |---|---|---|
 | The rule is applied | after the pick (`native-share-target`, with the codec) | before the pick (`native-share-pick`, with the codec) |
 | Pickers | our source grid, then the audio step | the helper's portal dialog (once), then the audio step |
 | Capture | helper **and** Chromium's own, still running | helper only |
 | Local preview | Chromium's capture | the helper's frames, decoded in the page |
-| Graph | `d3d11screencapturesrc` → `d3d11convert` → AMF | PipeWire (DMA-BUF) → `scale_vulkan` → `h264_vulkan` / `av1_vulkan` (below) |
+| Graph | `ddagrab` (D3D11) → `scale_d3d11` → `h264_amf` / `av1_amf` (NVENC, QSV; below) | PipeWire (DMA-BUF) → `scale_vulkan` → `h264_vulkan` / `av1_vulkan` (below) |
 | Windows (app windows) | Chromium's share | helper (the portal offers them) |
 
 **When it fails anyway** (the `s.fallback` cases; a share is never left on the black placeholder):
@@ -150,6 +150,47 @@ Sharkord's state; a renamed key or field only turns the helper off:
 A share ends through `ended` on Sharkord's track, sent again every second until Sharkord stops it
 (at the very start Sharkord isn't listening yet).
 
+**Windows details.** The helper (`native/src/windows.rs`) links a static FFmpeg of our own
+(`scripts/deps/ffmpeg-windows.sh`: MSVC, the static C runtime, AMF and NVENC headers, libvpl for
+Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18 MiB):
+- **Monitor**: DXGI's adapters and outputs, matched to the pick by Windows' friendly name (what
+  Electron's `Display.label` is, from `DisplayConfigGetDeviceInfo`) and primary. Capture, conversion
+  and encoder share one D3D11 device on the adapter driving that monitor (duplication only works
+  there; a hybrid laptop's cross-adapter case is ROADMAP #11).
+- **Capture**: `ddagrab`, a picture every tick (its repeats are skipped). It polls DXGI at each tick
+  (our `ddagrab-poll` patch): `AcquireNextFrame` holds the device's unfair lock while it waits
+  (Sunshine found the same), which starved the converter and AMF -- the encode loop ran at 39-53 fps,
+  now 60. A lost capture (UAC prompt, mode change, fullscreen game) is rebuilt, retried for 5 s
+  while the encoder repeats the last picture. Always 8-bit BGRA (DXGI converts an HDR desktop).
+- **Conversion**: `scale_d3d11` to NV12 at the fitted size, BT.709 limited range (our patch: it set
+  no colour space, and wrote every frame into the same texture), turned upright for a rotated
+  monitor in the same pass (our patch's `rotate`: DXGI hands a portrait 1080x1920 over as
+  1920x1080, `ddagrab` only turns the cursor). A texture per frame: AMD refuses
+  NV12 render target arrays; a fixed pool only for Quick Sync, which maps it (`hwmap`).
+- **Encoders**, one tried after the other on that adapter: `h264_amf`/`av1_amf` (Sunshine's options:
+  ultra-low-latency, `vbr_latency`, one frame in flight, forced IDRs, no frame delay with FFmpeg 9's
+  `AV_CODEC_FLAG_LOW_DELAY`), `h264_nvenc`/`av1_nvenc`, `h264_qsv`/`av1_qsv` (NVENC and QSV built
+  in, untested: ROADMAP #7, #8). AMF's rate control ignores the VBV, HRD and `max_au_size` on an RX
+  9060 XT: after a mostly still screen a scroll came out as a 1.2 MB frame, larger than an IDR of
+  the same picture. A floor under the quantizer caps it, following the rate (our AMF patch changes
+  it in place): QP 18 at 0.05 bits per pixel (25 Mbps at 4K60; scroll bursts 297 KB), 6 more per
+  halving of the rate (AV1: q-index 60, 24 more) -- a fixed 18 made 600 KB keyframes at the ~6 Mbps
+  a share starts with (8 keyframe requests in 15 s). It also makes a lower rate take hold at once:
+  without it AMF took over 2 s to follow a cut. FFmpeg's default `qmax` (31) is lifted to the
+  codec's maximum: it reached AMF as its maximum QP, and 4K motion then couldn't get under 16-20
+  Mbps. H.264 is **High profile with CABAC** (`640433`), sent under Sharkord's Baseline label
+  (`42e01f`): decoders go by the stream's SPS, as they already did for its level (5.1, not 3.1);
+  the laptop decodes it on its GPU at 60 fps. Measured with VMAF on a 4K desktop (`h264_amf`, the
+  helper's settings): the same quality as Constrained Baseline at 34% fewer bits on scrolling text,
+  and better quality at 39% fewer on video; at 3 Mbps text's 1% low went 63 -> 85. AMF's `quality`
+  preset and pre-analysis made it worse or slower (57-67 fps). `SHARKORD_H264_PROFILE=baseline`
+  goes back to Constrained Baseline (`424033`, the constraint flag set: #86). NVENC and Quick
+  Sync stay Constrained Baseline until tested.
+- **Pacing and bitrate** as on Linux (`src/ffmpeg.rs`): our patches change AMF's, NVENC's and Quick
+  Sync's rate in place, without a keyframe. `cargo test -- --ignored` encodes this desktop
+  (scrolled every other frame): keyframes on request only, ≤ 600 KB, a bitrate change without one.
+  `SHARKORD_ENCODE_API=amf|nvenc|qsv` forces an API.
+
 **Linux details.** The page's `getDisplayMedia` hook calls `native-share-pick` instead of
 Chromium's; main spawns the helper, which opens its own ScreenCast portal session at once
 (`native/src/portal.rs`, `ashpd`; monitors and windows, nothing persisted) and answers `selected`
@@ -157,8 +198,9 @@ or `cancelled`, then main shows the picker's audio step. The page builds Sharkor
 a `MediaStreamTrackGenerator` fed with the helper's frames decoded by `VideoDecoder`, and venmic's
 virtual mic (`withShareAudio`).
 
-The helper (`native/src/linux/`) has no GStreamer: `capture.rs` reads the portal's PipeWire stream
-and `encode.rs` converts and encodes with a static FFmpeg of our own (`scripts/deps/ffmpeg.sh`):
+The Linux helper (`native/src/linux/`): `capture.rs` reads the portal's PipeWire stream
+and `encode.rs` converts for the encoder (`src/ffmpeg.rs`), all with a static FFmpeg of our own
+(`scripts/deps/ffmpeg.sh`):
 - **Capture.** DMA-BUF with the modifiers the GPU can import (asked through Vulkan; KWin then picks
   a tiled one), shared memory when the compositor offers nothing else. Only the newest buffer is
   kept, the rest go back at once, and that one as soon as the GPU has read it (`Device::wait` on the
@@ -222,8 +264,8 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
    work: swapping a capture track in restarts the RTP timestamps from its older clock (viewers
    dropped every frame as stale), and the hardware encoder Chromium switches to mid-share at
    <= 1080p stalled.
-   For H.264 the helper pins Constrained Baseline (what Sharkord's `42e01f` promises: in caps on
-   Windows, where AMF takes the profile from downstream; FFmpeg's `profile` on Linux) and reports the first keyframe's SPS as
+   For H.264 the helper pins its profile (FFmpeg's `profile`: High on AMF, Constrained Baseline
+   elsewhere, under Sharkord's `42e01f` either way) and reports the first keyframe's SPS as
    a `stream` event, so the log shows what viewers really get.
 4. Each helper frame gets one placeholder frame (paced: Chromium thins out bursts), and the worker
    swaps its payload into the matching outgoing frame. Chromium derives the RTP timestamp from the
@@ -237,8 +279,19 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
    every few seconds on a clean LAN with mediasoup); on congestion (loss, a growing round trip, or
    packets waiting over 250 ms in the pacer, i.e. the estimate really below what goes out; a
    keyframe's 50-180 ms doesn't count) it drops to 0.85x.
-   AMF restarts with a keyframe on every bitrate change, so there it steps 30% at least 4 s apart;
-   the Linux helper changes it in place, so 10% at least 2 s apart. Capped by Sharkord's bitrate
+   **While the screen is still the helper pads** (`padded` in `src/ffmpeg.rs`): frames are filled
+   up to 90% of the rate with data decoders skip (an H.264 filler NAL unit; for AV1 a private
+   metadata OBU, as Chromium's AV1 packetizer drops padding OBUs), and the page counts it as sent.
+   Without it the encoder sends ~0.1 Mbps, Chromium's estimate falls to 0.85x what was acknowledged
+   (25 -> 5 Mbps), and after motion resumes it only grows ~8%/s: 15-20 s of lower quality, or, sent
+   at the old rate anyway, 1.4 s in the pacer. With it, motion is back at 25 Mbps at once (4K60,
+   H.264 and AV1). The cost: a still screen uses the full rate, for the sender and each viewer.
+   Tried and dropped: screen-content mode (`contentHint 'detail'`: the estimate still fell, and its
+   pacing added 600-860 ms), and a probe by lowering and raising `maxBitrate` (no effect).
+   `SHARKORD_PAD=<0..1>` sets the share (0: off); the page still follows the estimate down when the
+   helper sends under half its rate, padding included.
+   The helper changes it in place, without a keyframe, so it steps 10% at least 2 s apart; keyframe
+   requests go to it at most every 300 ms. Capped by Sharkord's bitrate
    setting and ~25 Mbps at 4K60; the resolution stays what the user picked.
    `getStats` is rewritten so Sharkord's stats show the helper's encoder and size. Main kills the
    helper on every exit path (`stopNativeShare`; the page sends `native-share-stop` for a share
@@ -296,8 +349,11 @@ npm run dist:all
 npm run stage:native    # build + stage native/ only
 ```
 
-The native helper needs Rust (`native/rust-toolchain.toml`) and, on Windows, GStreamer 1.28 MSVC
-with its development files (`/TYPE=devel`), plus `pkg-config`. On Linux it links our own FFmpeg
+The native helper needs Rust (`native/rust-toolchain.toml`), `pkg-config` and libclang (bindgen;
+Windows: `winget install LLVM.LLVM`). On Windows it links our own FFmpeg:
+`scripts/deps/ffmpeg-windows.sh` builds it into `build/deps/` with Visual Studio 2022's C++ tools,
+run from MSYS2's bash (`winget install MSYS2.MSYS2`, then `pacman -S make diffutils git pkgconf`;
+`stage-native.js` runs it when missing). On Linux it links our own FFmpeg
 and ships our own Mesa Vulkan drivers: `scripts/deps/ffmpeg.sh` then `scripts/deps/mesa.sh` build
 them into `build/deps/` (`stage-native.js` runs them when missing), needing cmake, meson >= 1.4,
 ninja, libclang (bindgen), PipeWire's development files, and for Mesa LLVM >= 15 with clang, libclc
@@ -307,8 +363,7 @@ what a desktop has (PipeWire, libva, the Vulkan loader, a GPU that encodes: for 
 bundled drivers cover distros that strip H.264). After rebuilding FFmpeg, `ffmpeg.sh` cleans the
 `ffmpeg-sys-next` crate (Rust bundles the static libraries into it). Without the build tools
 `dist:*` still builds, only without the native share; CI sets `SHARKORD_REQUIRE_NATIVE=1` to fail
-instead. For `npm start` just `cd native && cargo build --release` (Linux: after the deps scripts;
-Windows: with `PKG_CONFIG_PATH` pointing at GStreamer's `lib\pkgconfig`).
+instead. For `npm start` just `cd native && cargo build --release` after the deps scripts.
 
 Versioning is SemVer, independent of Sharkord's server version, and stays `0.x` while Sharkord
 is alpha (minor = features, patch = fixes). Don't bump `version` by hand in feature branches.
@@ -365,7 +420,8 @@ There are no automated tests. After a change, check what it touches:
 - **Unreachable page**: stop the server → Retry and Change server both work.
 - **Log files**: launch from the menu (no terminal): `logs/main.log` in the settings folder has the
   `[flags]`, probe and `[gpu]` lines; a restart moves it to `main.old.log`; a second launch while
-  running leaves both untouched; `GST_DEBUG=9` never leaves more than the two files, each <= 5 MB.
+  running leaves both untouched; a flood of helper output never leaves more than the two files,
+  each <= 5 MB.
 - **Theme**: switch Sharkord to light, restart with the server down — local pages and the
   picker should be light too.
 - **Screen share picker**: on X11 (source grid) and Wayland (portal, then audio step); cancel
@@ -373,9 +429,12 @@ There are no automated tests. After a change, check what it touches:
 - **Share audio (Linux)**: per-app and Entire System; the other side must not hear their own
   voice echoed; audio unlinks when the share stops or the picker is closed.
 - **Share audio (Windows)**: "Stream With Audio" loopback.
-- **Native screen share (Windows, AMD)**: turn it on in Settings → Desktop Client (or the tray). Share a
+- **Native screen share (Windows; AMD, NVIDIA, Intel)**: the probe (`[native-share] probe` in the
+  log) names the `api` and `device`. Turn it on in Settings → Desktop Client (or the tray). Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
-  within a second, and Sharkord's stats show `GPU (Native: AMF, amf…)`. The `[native-share] sent …` lines (DevTools console, and the app's log,
+  within a second, and Sharkord's stats show `GPU (Native: AMF, h264_amf)`. A UAC prompt or a
+  resolution change mid-share: the picture freezes briefly and comes back. Two monitors: each one;
+  a portrait monitor arrives upright (`input` shows `rotate`, `started` the upright size). The `[native-share] sent …` lines (DevTools console, and the app's log,
   `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero
   (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for;
   `native keys [<KB> rate|req|other]`: the helper's keyframes and why), and an `estimate fell` line
@@ -392,7 +451,9 @@ There are no automated tests. After a change, check what it touches:
   out with the reason, and "This GPU can hardware encode" lists H.264 / AV1. Share with H.264:
   **one** portal dialog then the audio step, the local preview moves, a viewer gets 60 fps, stats
   show `GPU (Native: Vulkan (hardware), h264_vulkan)`, and the `sent` lines show `native keys` only
-  on request (`req`) and none after a bitrate change. At 4K a still screen then motion: no storm of
+  on request (`req`) and none after a bitrate change. A still screen shows the helper's `padding`
+  near the rate and the estimate staying up; motion after it is at full rate at once, with the
+  pacer under 250 ms. At 4K a still screen then motion: no storm of
   keyframe requests on the viewer (`watching … pli` near 0). On a clean Fedora install (no RPM
   Fusion drivers) the probe says `"driver":"bundled"` and H.264 still works. Cancelling the portal dialog or the audio step cancels the share
   and the desktop's sharing indicator goes away; stopping the share ends the helper. Suspending

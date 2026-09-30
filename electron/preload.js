@@ -282,16 +282,15 @@ function installNativeShare (workerSource, helperPicks) {
     // the worker learns the negotiated codec
     s.boot = setInterval(() => pushPlaceholder(false, null), 1000 / want.fps)
 
-    // At most one keyframe a second from AMF (Windows): each one resizes the placeholder, which
-    // makes Chromium reconfigure its encoder, and a burst of them turned one dropped frame into a
-    // keyframe storm (4K AV1 on a real server). A request inside the second waits for it instead.
-    // The Linux helper's keyframes are capped (~500 KB at 4K), and waiting is what kept a storm
-    // going there: a viewer's request makes Chromium key the placeholder on its own, the swap loses
-    // sync and sends nothing until a native keyframe lines up (~570 ms at 1 s), and the viewer asks
-    // again. So 300 ms there.
+    // At most one keyframe per 300 ms: each one resizes the placeholder, which makes Chromium
+    // reconfigure its encoder, and a burst of them turned one dropped frame into a keyframe storm
+    // (4K AV1 on a real server, when keyframes weren't capped). Waiting longer kept a storm going
+    // too: a viewer's request makes Chromium key the placeholder on its own, the swap loses sync and
+    // sends nothing until a native keyframe lines up (~570 ms at 1 s), and the viewer asks again.
+    // Until the helper has started, a second.
     const requestKeyframe = () => {
       if (s.keyTimer) return
-      const gap = /^amf/.test(s.encoder?.name ?? '') || !s.encoder ? 1000 : 300
+      const gap = s.encoder ? 300 : 1000
       const wait = Math.max(0, (s.keyAt || 0) + gap - performance.now())
       s.keyTimer = setTimeout(() => { s.keyTimer = null; s.keyAt = performance.now(); s.keyReqs = (s.keyReqs || 0) + 1; s.port?.postMessage({ cmd: 'keyframe' }) }, wait)
     }
@@ -380,7 +379,7 @@ function installNativeShare (workerSource, helperPicks) {
               }
               s.pending.push({ key: msg.key, data: d.byteOffset === 0 && d.byteLength === d.buffer.byteLength ? d.buffer : d.slice().buffer })
               pace()
-            } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps }
+            } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps, padding: msg.padding }
             else if (msg.event === 'error') s.fallback('helper failed: ' + msg.message)
             else if (msg.event === 'suspend') { s.suspended = true; log('system suspending') }
             else if (msg.event === 'started') { s.encoder = { name: msg.encoder, width: msg.size?.[0], height: msg.size?.[1] }; log(msg.event, JSON.stringify(msg)) }
@@ -438,7 +437,7 @@ function installNativeShare (workerSource, helperPicks) {
         if (x.type === 'candidate-pair' && x.nominated && x.availableOutgoingBitrate) bwe = Math.round(x.availableOutgoingBitrate / 1000)
       })
       // Time packets waited in Chromium's pacer since the last tick: grows when the helper sends
-      // faster than the pacing rate (AMF overshooting on motion)
+      // faster than the pacing rate (an encoder overshooting on motion)
       const pacerMs = o && o.packetsSent > (s.lastSent || 0) ? Math.round((o.totalPacketSendDelay - (s.lastDelay || 0)) * 1000 / (o.packetsSent - (s.lastSent || 0))) : 0
       if (o) { s.lastSent = o.packetsSent; s.lastDelay = o.totalPacketSendDelay }
       // The helper follows the transport estimate, not outbound-rtp targetBitrate: Chromium counts
@@ -452,11 +451,10 @@ function installNativeShare (workerSource, helperPicks) {
       // it fell 32 -> 5.6 Mbps and stayed, and holding 25 Mbps through that queued 0.8 s of lag.
       // A keyframe queues 50-180 ms on a clean path (over two ticks on Wi-Fi), so only over 250 ms
       // counts: counted, each keyframe lowered the bitrate, and the change itself restarted the
-      // encoder with a keyframe (AMF still reconfigures on any bitrate change) -- a keyframe every
-      // few seconds. The cap: Sharkord's bitrate setting (x-google-max-bitrate in the answer) and
-      // 0.05 bits per pixel per frame (~25 Mbps at 4K60). So down at once, and up in 30% steps at
-      // least 4 s apart with AMF; the Linux helper's FFmpeg changes the rate in place, so there in
-      // 10% steps 2 s apart.
+      // encoder with a keyframe (GStreamer's AMF did) -- a keyframe every few seconds. The cap:
+      // Sharkord's bitrate setting (x-google-max-bitrate in the answer) and 0.05 bits per pixel per
+      // frame (~25 Mbps at 4K60). So down at once, and up in 10% steps at least 2 s apart: the
+      // helper's FFmpeg changes the rate in place, without a keyframe.
       // A collapse of the estimate (no loss): Chromium's overuse rule sets it to 0.85x what was
       // acknowledged lately, tiny after a still screen; logged with the keyframe before it
       if (bwe && s.lastBwe && bwe < s.lastBwe * 0.6) log(`estimate fell ${s.lastBwe} -> ${bwe} kbps (${s.lastKey ? `${Math.round(performance.now() - s.lastKey.t)} ms after a ${s.lastKey.kb} KB keyframe` : 'no keyframe yet'}, helper sending ${s.helper.kbps ?? '-'} kbps)`)
@@ -472,11 +470,17 @@ function installNativeShare (workerSource, helperPicks) {
         const clean = performance.now() - (s.congestedAt ?? -Infinity) > 10000
         // Clean: the estimate itself, never down. It grows ~8%/s whenever at least 2/3 of it is
         // sent, so running ahead doesn't ramp faster -- straight to the cap queued up to 1.3 s in
-        // Chromium's pacer, 1.5x the estimate still 0.85 s, while it climbed 5 -> 25 Mbps in ~20 s
-        const aim = clean ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * 0.85))
+        // Chromium's pacer, 1.5x the estimate still 0.85 s, while it climbed 5 -> 25 Mbps in ~20 s.
+        // Except after a still screen: the helper sent under half what it was asked (VBR, a few
+        // hundred kbps), Chromium's estimate fell to what was acknowledged (32 -> 5.8 Mbps), and
+        // motion then went out at the old 25 Mbps into it: 1.4 s in the pacer for ~6 s. Then down
+        // to the estimate, and up with it again
+        // (The helper's padding counts: it holds the estimate up while the screen is still)
+        const idle = (s.helper.kbps ?? Infinity) + (s.helper.padding ?? 0) < s.kbps * 0.5 && bwe < s.kbps
+        const aim = clean && !idle ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * (clean ? 1 : 0.85)))
         s.cap = cap
         // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under the step
-        const [step, every] = /^amf/.test(s.encoder.name ?? '') ? [1.3, 4000] : [1.1, 2000]
+        const [step, every] = [1.1, 2000]
         if (aim < s.kbps * 0.9 || ((aim >= s.kbps * step || (aim === cap && aim > s.kbps)) && performance.now() - s.kbpsAt > every)) {
           s.kbps = aim; s.kbpsAt = performance.now(); s.port.postMessage({ cmd: 'bitrate', kbps: aim })
         }
@@ -489,10 +493,11 @@ function installNativeShare (workerSource, helperPicks) {
   // otherwise show Chromium's software encoder at 320x180. Frame rate and bytes stay Chromium's
   // own counts -- they are what really goes out. Until the helper has started, "Native: starting"
   // (not the placeholder's OpenH264); after a fallback, Chromium's own encoder again.
-  // "Native: Vulkan (hardware), h264_vulkan" tells the helper apart from Chromium's encoders, and
-  // carries a word Sharkord's stats match to label it GPU (`hardware|vaapi|amf|nvenc...` in its
+  // "Native: AMF, h264_amf" tells the helper apart from Chromium's encoders, and carries a word
+  // Sharkord's stats match to label it GPU (`hardware|vaapi|amf|nvenc...` in its
   // stats-popover.tsx; h264_vulkan alone shows as Unknown).
-  const nativeLabel = ({ name }) => `Native: ${/_vulkan$/.test(name) ? 'Vulkan (hardware)' : /vaapi/.test(name) ? 'VAAPI' : /^amf/.test(name) ? 'AMF' : 'hardware'}, ${name}`
+  const API_LABELS = { vulkan: 'Vulkan (hardware)', vaapi: 'VAAPI', amf: 'AMF', nvenc: 'NVENC', qsv: 'Quick Sync (hardware)' }
+  const nativeLabel = ({ name }) => `Native: ${API_LABELS[name.split('_')[1]] ?? 'hardware'}, ${name}`
   const rewrite = (report, sender) => {
     // Through the sender its outbound-rtp is known before the first stats tick records its id
     const own = sender && bySender.get(sender)

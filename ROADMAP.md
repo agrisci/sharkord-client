@@ -8,7 +8,46 @@ about never leaving a share broken and being able to debug machines we have neve
 P3 = ideas
 **Status:** ✅ Done · 🚧 In progress · 🧪 Needs testing · 📋 Planned · 💡 Idea · ⛔ Won't do
 **#** is a stable ID for referring to an item in commits and issues, not its rank; new items take
-the next free number (currently 106).
+the next free number (currently 107).
+
+## Open test: Linux after the Windows FFmpeg port (#103)
+
+To do before `windows-ffmpeg` merges; delete this section once it passes. The Linux helper now
+shares its encoder and encode loop with Windows (`native/src/ffmpeg.rs`), and gains padding (#106);
+its capture, converter, drivers and FFmpeg build (`scripts/deps/ffmpeg.sh`) are unchanged, and it
+stays on Constrained Baseline (High profile and the QP floor are AMF only). What changed for it:
+`linux/encode.rs` and `linux/mod.rs` moved onto the shared core; frames are padded to 90% of the
+rate while the screen is still (an H.264 filler NAL unit, an AV1 private metadata OBU); the helper's
+`stats` report `padding` apart and the page counts it as sent; `build.rs` and `.cargo/config.toml`
+cover Windows too; the page asks for keyframes at most every 300 ms; the GPU bench alternates two
+pictures (motion) and checks the bitrate cut relative to the same content.
+
+1. **Build**: `git pull`, then check `build/deps` still has `lib/libavcodec.a` and `mesa/` (the
+   sync exclusion set on Windows can have removed them; else rerun `scripts/deps/ffmpeg.sh` and
+   `mesa.sh`). `cd native && cargo build --release`: no warnings. `cargo test --release`: 3 pass.
+2. **GPU bench**: `cargo test --release -- --ignored --nocapture`, on Vulkan and VA-API: keyframes
+   only at pictures 0 and 120, each under 600 KB, and the second after the cut clearly under the
+   first (the check is relative now).
+3. **Probe**: `target/release/sharkord-share --check` -> `api`, `driver`, `h264`/`av1` as before
+   (`"driver":"system"` on the desktop's stock drivers).
+4. **Live, desktop (RX 9060 XT) -> laptop, H.264 4K60, simulcast off**, `npm start` with
+   `--enable-logging=stderr --v=0`:
+   - one portal dialog, then the audio step; the local preview moves; `started` shows
+     `h264_vulkan`, the `stream` event `42e01f`-compatible Constrained Baseline (`constrained_baseline:
+     true`);
+   - the laptop's `[native-share] watching` lines: 60 fps, no freezes, jitter buffer under ~100 ms;
+   - motion ~30 s, still ~30 s, motion: during the still stretch the `sent` lines show the helper's
+     `padding` near 90% of `asked` and `asked` staying up (not following the estimate down); when
+     motion resumes the helper is at full rate within a tick and the pacer stays under 250 ms;
+     the laptop shows no freeze and no burst of `pli`. `SHARKORD_PAD=0` to compare with no padding
+     (the estimate falls to ~5 Mbps and the rate climbs back over 15-20 s).
+5. **Same with AV1** (the laptop decodes it in software: judge the sender's lines, and that the
+   still stretch shows no decode errors on the laptop; its jitter buffer grows with motion at 4K
+   whatever the sender does, #29).
+6. **VA-API** (`SHARKORD_ENCODE_API=vaapi`): one H.264 share with a still stretch. Its CBR already
+   pads a still screen inside the encoder, so the helper's `padding` stays small there.
+7. **Laptop as sender** (Renoir, bundled RADV, 1080p60), one short share with a still stretch: runs
+   as before, padding shows while still.
 
 ## Bugs
 
@@ -19,12 +58,12 @@ Found while reviewing the code; each is small and should be fixed before new fea
 | 76 | P2 | Frame buffering copies large frames repeatedly | 📋 | `Buffer.concat` on every stdout chunk plus a copy per frame (`spawnHelper` in `main.js`); a 4K keyframe is re-copied many times. Keep a chunk list. |
 | 77 | P2 | `--check` doesn't prove encoding works | ✅ | It now builds each codec's encoder (every per-device factory) and takes it to READY, reported as `h264`/`av1`; the app runs it at startup on both platforms (#9). |
 | 104 | P0 | Linux helper without GStreamer, working on a clean install | 🧪 | PipeWire (DMA-BUF) → `scale_vulkan` → FFmpeg `h264_vulkan`/`av1_vulkan` (VA-API fallback), our own static LGPL FFmpeg with runtime-bitrate and frame-size-cap patches, an 8-frame VBV (VBR on Vulkan: ~130 kbps on a still screen; CBR on VA-API), keyframes only on request, paced by the helper, zero-copy DMA-BUF capture (4K60 at 6-9% CPU); RADV/ANV with H.264 encode ship in the package for distros that strip it, and rank before the system's VA-API (tested on Fedora's stock Mesa, and on a Renoir laptop, VCN2, where they replaced RPM Fusion's VA-API). Live desktop (RX 9060 XT) → laptop (Renoir, Ethernet), 4K60 H.264 25 Mbps, video with scene cuts and still pauses: 60 fps in every window, 0 freezes, 0 drops, 0 keyframe requests. Laptop (Renoir, VCN2) → desktop on the bundled RADV, 1080p60 zero-copy: 60 fps, 0 freezes; but Renoir's encoder keeps VBR at the target on a still screen (~5 Mbps, like `sharkord-native-client` KI-33 under VA-API), a firmware limit. Left: clean-install VMs, Intel, CI. Sunshine's design (`upstream/Sunshine`). |
-| 103 | P1 | Windows helper on FFmpeg | 📋 | `ddagrab` + FFmpeg's `h264_amf`/`av1_amf` (then `h264_nvenc`, `h264_qsv` for #7/#8), the same VBV and runtime-bitrate approach as #104, and no GStreamer in the app at all. |
+| 103 | P1 | Windows helper on FFmpeg | 🧪 | `ddagrab` → `scale_d3d11` → `h264_amf`/`av1_amf` (also `*_nvenc`, `*_qsv`, #7/#8), our static LGPL FFmpeg 9.0 built with MSVC (`scripts/deps/ffmpeg-windows.sh`), one 1.6 MiB exe, no GStreamer. Patches: bitrate changes in place for AMF, NVENC and Quick Sync; `ddagrab` polls DXGI (waiting in `AcquireNextFrame` held the D3D11 lock and starved AMF: 39-53 fps, now 60); `scale_d3d11` BT.709 and a texture per frame. AMF ignores its VBV, HRD and `max_au_size` (RX 9060 XT: a scroll after a still screen came out at 1.2 MB): a floor under the quantizer that follows the rate caps it (QP 18 at 25 Mbps 4K60: 297 KB bursts; keyframes 50-86 KB at 6 Mbps, ~165 KB at 21). Live, 4K60 to the Renoir laptop, H.264 and AV1: 60 fps throughout, 0 loss, 5 -> 25 Mbps in ~30 s; a fixed QP 18 floor made 600 KB keyframes at the start (8 PLIs in 15 s) and a still screen then motion queued 1.4 s in the pacer, both fixed since, to confirm. Left: UAC / mode change mid-share, two monitors, the installed build (#4). |
 | 100 | P1 | 4K shares stutter on Linux (VA rate control) | ✅ | Measured desktop RX 9060 XT → Renoir laptop, 4K60 H.264 at 25 Mbps: `vah264enc` in VBR sent 28-39 Mbps asked for 21 (a lower target or `target-percentage` changes nothing, `cpb-size` is inert), over Chromium's pacer: queue up to 850 ms, viewer freezes ~6 s per 110 s. An interim CBR fix (PR #9) held 20-22 Mbps; the Linux helper now encodes with FFmpeg instead (#104): CBR with an 8-frame VBV, rate on target, VMAF 95.9 on video against 91.8. |
-| 101 | P0 | Keyframe storm from the frame swap | 🧪 | On a clean link (Ethernet, 0 loss) a still 4K screen keyed at 1.1-1.8 MB (`vah264enc`), more than Chromium's hardware decoder path absorbs: the viewer asked for a keyframe 4x/s, the placeholder keyed on each request, the swap lost sync for ~570 ms waiting out the 1 s throttle, and the viewer sat at 0-7 fps. Now keyframes are capped (~370-515 KB at 4K, #104) and the Linux helper is asked within 300 ms. To confirm live: still screen then motion at 4K. |
+| 101 | P0 | Keyframe storm from the frame swap | 🧪 | On a clean link (Ethernet, 0 loss) a still 4K screen keyed at 1.1-1.8 MB (`vah264enc`), more than Chromium's hardware decoder path absorbs: the viewer asked for a keyframe 4x/s, the placeholder keyed on each request, the swap lost sync for ~570 ms waiting out the 1 s throttle, and the viewer sat at 0-7 fps. Now keyframes are capped (Linux ~370-515 KB at 4K, #104; Windows 50-230 KB with AMF's rate-following QP floor, #103) and every helper is asked within 300 ms. Windows, live at 4K: still screen then motion with padding (#106), no storm. To confirm on Linux. |
 | 102 | P2 | A freeze at every scheduled keyframe (Linux) | ✅ | `vah264enc` keyed every 1024 frames (17 s), each 1.1 MB at 4K and followed by a viewer request and a freeze. The Linux helper now keys only on request (#104). |
 | 99 | P1 | HiDPI shares encoded at the logical size (Linux) | ✅ | The portal reports a scaled screen's size in logical pixels (a 4K panel at 160%: 2400x1350) while PipeWire delivers physical frames, so the helper downscaled them and the page capped the bitrate for the smaller size (9.7 instead of ~24.9 Mbps). The output size now comes from the source's first caps, and `started` is sent with the first frame, with the sizes negotiated. |
-| 86 | P3 | Baseline without the constraint flag | 📋 | With the profile pinned, AMF emits profile_idc 66 (Baseline) but not constraint_set1, and level 5.1: `420433` where the SDP says `42e01f`. Decoders accept it (no Baseline-only tools are used); patch the SPS flag byte or leave it. The helper logs it as a `stream` event. |
+| 86 | P3 | Baseline without the constraint flag | 🧪 | GStreamer's AMF emitted `420433` (Baseline without constraint_set1) where the SDP says `42e01f`. FFmpeg's AMF (#103) with `profile=constrained_baseline` sends `424033`: the flag is set. To confirm on a live share (`stream` event). |
 
 ## Upstream (Sharkord, mediasoup)
 
@@ -33,7 +72,7 @@ Things best fixed in Sharkord itself; the client can only work around them.
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 28 | P1 | Upgrade mediasoup to ≥ 3.27 | 💡 | Sharkord pins mediasoup 3.19.19 (`apps/server/package.json`), whose transport-cc feedback carries arrival times in whole milliseconds. That matches the 15-50% estimate dips we measured on a clean LAN. Fixed in [mediasoup 3.27.0](https://github.com/versatica/mediasoup/blob/v3/CHANGELOG.md) (PRs #1914, #1917). Would also let #21 be simplified. |
-| 79 | P1 | H.264 High profile for screen share | 💡 | The server already offers High `640032` next to Constrained Baseline (`apps/server/src/runtimes/voice.ts:63-73`); the share uses the first H.264 entry. High (CABAC, 8x8 transform) gives noticeably better quality per bit. Needs a Sharkord option or picking it in our hook, plus #72 set to `high`. |
+| 79 | P1 | H.264 High profile for screen share | 🧪 | The server offers High `640032` next to Constrained Baseline (`apps/server/src/runtimes/voice.ts:63-73`); Sharkord's client takes the first H.264 entry. The native share doesn't need it: the helper's AMF encodes High (#48) under the Baseline label. Chromium's own path still needs a Sharkord option or picking High in our hook. |
 | 32 | P3 | "Bundled payload type collision" on viewers | 💡 | Logged when Sharkord renegotiates the receive connection, with "Inconsistent congestion control feedback types, ignoring all". May weaken the server-to-viewer rate control; report upstream if confirmed. |
 | 31 | P2 | Stale-stream keyframe requests | 📋 | A viewer requested keyframes 5x/s for a stream that no longer existed, after earlier shares. Find out whether Sharkord or the client keeps the consumer alive. |
 
@@ -80,10 +119,10 @@ shares* on (off by default):
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 2 | P0 | Runtime self-check of the frame swap | 📋 | The swap relies on Chromium behaviour (a size change keys that frame, timestamp smoothing). Watching pairing health lets an Electron update that changes this fall back instead of breaking shares. |
-| 3 | P0 | Clean fallback on capture loss | 🚧 | Helper errors, exits and stalls now fall back (#1, #70, #71); a suspend (Linux, KDE: the portal's stream doesn't come back on resume) ends the share through the watchdog without turning the helper off for the session, and a resolution change with the same aspect ratio keeps the share running (the output size stays). A change of aspect ratio keeps running but stretches (#98). Still to test: secure desktop / UAC, monitor unplugged, driver reset, which end the pipeline (`main.rs` pump) and should arrive as an `error` event. |
+| 3 | P0 | Clean fallback on capture loss | 🚧 | Helper errors, exits and stalls now fall back (#1, #70, #71); a suspend (Linux, KDE: the portal's stream doesn't come back on resume) ends the share through the watchdog without turning the helper off for the session, and a resolution change with the same aspect ratio keeps the share running (the output size stays). A change of aspect ratio keeps running but stretches (#98). Windows (#103) rebuilds a lost desktop duplication, retried for 5 s while the encoder repeats the last picture, then sends `error`: verified live with a UAC prompt (secure desktop: ~1 s of a still picture, no freeze counted) and 4K -> 1440p -> 4K with a fullscreen video (the viewer got each size, 344-579 ms of freezes). Still to test: monitor unplugged, driver reset. |
 | 85 | P2 | Continue a failed share in place | 💡 | Today a mid-share helper failure ends the share (the user shares again, on Chromium's path). Continuing in place failed three ways: swapping the capture track in restarts the RTP timestamps from the capture's older clock (viewers drop every frame as stale; re-stamped frames keep the capture metadata), Chromium's hardware encoder switched in mid-share stalls after a few frames (<= 1080p), and 4K in software runs at 3-11 fps. A way through: stamp the placeholder on the capture's clock from the start, so a later swap stays continuous. #88 removes the 1080p hardware boundary on NVIDIA/Intel that made mid-share encoder switches likely. |
-| 87 | P1 | Test the early fallback (helper never starting, Windows) | 🧪 | VP8/VP9, auto and simulcast no longer reach the helper (#96). Left: a helper that fails before its first frame; the connection gets the capture track swapped in after the placeholder's black frames went out, so the same timestamp jump as #85 could freeze viewers. Test with the setting on and no AMD GPU. |
-| 4 | P1 | Test the installed build | 🧪 | The rate-control work ran on the dev build; run a 4K share on a `dist:win` build (packaged GStreamer subset, clean environment). |
+| 87 | P1 | Test the early fallback (helper never starting, Windows) | 🧪 | VP8/VP9, auto and simulcast no longer reach the helper (#96). Left: a helper that fails before its first frame; the connection gets the capture track swapped in after the placeholder's black frames went out, so the same timestamp jump as #85 could freeze viewers. Test with the setting on and `SHARKORD_ENCODE_API` forcing an API the GPU lacks. |
+| 4 | P1 | Test the installed build | 🧪 | Windows, `dist:win` with the static helper from #103: installed over the previous version, run with GStreamer off the PATH: probe passes, a 4K H.264 share at 15 Mbps to the laptop at 60 fps, padding while still. Left: a machine that never had GStreamer, and Linux packages. |
 | 5 | P1 | Viewer joining mid-share | 🧪 | Time to first frame for a late or reconnecting viewer (keyframe request → native keyframe → aligned Chromium keyframe). |
 | 6 | P2 | Stress the pairing | 💡 | Hours-long shares, sleep/resume, CPU/GPU saturation, many viewers. |
 
@@ -91,15 +130,15 @@ shares* on (off by default):
 
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
-| 7 | P0 | NVIDIA encoder (NVENC) | 📋 | On Windows only AMD AMF is tried (`encoder()` in `native/src/gst.rs`). With #103, FFmpeg's `h264_nvenc` (NVENC `Reconfigure()`, no new keyframe on a bitrate change); on Linux FFmpeg's NVENC or NVIDIA's Vulkan video (#18). |
-| 8 | P0 | Intel encoder (Quick Sync) | 📋 | With #103, FFmpeg's `h264_qsv` / `av1_qsv` (bitrate changes via `Reset` without a new sequence). On Linux Intel already goes through Vulkan video (ANV) or VA-API (#104). |
+| 7 | P0 | NVIDIA encoder (NVENC) | 🧪 | Built into the Windows helper (#103): `h264_nvenc`/`av1_nvenc` with ultra-low latency, no scene-cut keyframes, and our patch for bitrate changes without a keyframe (NVENC `Reconfigure()` without reset). Untested: needs an NVIDIA GPU (drivers 531+). On Linux FFmpeg's NVENC or NVIDIA's Vulkan video (#18). |
+| 8 | P0 | Intel encoder (Quick Sync) | 🧪 | Built into the Windows helper (#103): `h264_qsv`/`av1_qsv` through libvpl, the converted frames mapped into QSV, our patch resetting a rate change without a new sequence, the frame cap as `max_frame_size`. Untested: needs an Intel GPU. On Linux Intel already goes through Vulkan video (ANV) or VA-API (#104). |
 | 9 | P0 | Startup capability probe | 🚧 | `--check` opens each codec's encoder (#77) and the app runs it once at startup on both platforms: the switch is usable only when an encoder opens (otherwise greyed out, with the reason), the tab lists what it found, and a share goes native only with a codec it opened. Left: turn the setting on by default when it passes. |
-| 10 | P1 | Media Foundation fallback | 📋 | `mfh264enc` (shipped in 1.28) as a vendor-neutral H.264 fallback. |
+| 10 | P2 | Media Foundation fallback | 💡 | FFmpeg's `h264_mf` as a vendor-neutral H.264 fallback, for GPUs none of AMF, NVENC and Quick Sync opens on. |
 | 11 | P1 | Hybrid-GPU laptops | 📋 | Capture on the iGPU, encode on the dGPU: choose the adapter per monitor, avoid slow cross-adapter copies. |
-| 12 | P1 | Monitor edge cases | 📋 | HDR (tone-map or refuse), >60 Hz panels, portrait, mixed DPI, hotplug and resize mid-share. Linux sizes the output from the negotiated PipeWire format and re-fits on a change (#98); Windows reads the monitor's size once at start (`source()` in `native/src/gst.rs`). |
+| 12 | P1 | Monitor edge cases | 📋 | HDR (tone-map or refuse), >60 Hz panels, mixed DPI, hotplug and resize mid-share. Portrait: Windows turns a rotated monitor upright in the conversion (`scale_d3d11` patch, #103), verified on a 1080x1920 monitor. Linux sizes the output from the negotiated PipeWire format and re-fits on a change (#98); Windows re-fits when the captured size changes and takes 8-bit BGRA from DXGI on an HDR desktop, both untested live. |
 | 98 | P2 | Aspect ratio change mid-share (Linux) | 🧪 | A change of the source's size mid-share now re-fits the output (`fit`) and restarts the encoder with a keyframe (`native/src/linux/mod.rs`), instead of scaling into the old size (which stretched a 16:9 → 5:4 switch 1.42x). To test live. |
-| 14 | P2 | Honour Sharkord's cursor setting | 📋 | Sharkord offers Always / While moving / Never (`screenCursor`, passed as `getDisplayMedia` `video.cursor`); the helper always draws it (`show-cursor=true` in `source()` on Windows, the portal's embedded cursor in `portal.rs` on Linux). |
-| 13 | P2 | Window capture | 💡 | On Windows only screens go native (`nativeTargetFor` in `main.js`); `d3d11screencapturesrc` can capture a window via `window-handle`. Linux already shares windows through the portal. |
+| 14 | P2 | Honour Sharkord's cursor setting | 📋 | Sharkord offers Always / While moving / Never (`screenCursor`, passed as `getDisplayMedia` `video.cursor`); the helper always draws it (`draw_mouse=1` in `grab()` on Windows, the portal's embedded cursor in `portal.rs` on Linux). |
+| 13 | P2 | Window capture | 💡 | On Windows only screens go native (`nativeTargetFor` in `main.js`): `ddagrab` duplicates monitors. FFmpeg 9's `gfxcapture` (Windows.Graphics.Capture) can capture a window by title, class or exe (add it to `scripts/deps/ffmpeg-windows.sh`). Linux already shares windows through the portal. |
 | 15 | P3 | Share audio in the helper | 💡 | Audio stays on Chromium's loopback; only worth moving if sync or quality issues appear. |
 
 ## Codecs
@@ -107,8 +146,8 @@ shares* on (off by default):
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 47 | ✅ | H.264 and AV1 on the native path | ✅ | AMD AMF; AV1 keyframes forced with a GOP poke. |
-| 48 | P1 | H.264 High profile | 📋 | Client side of #79: pin the profile (#72), then encode High when the server's High entry is negotiated. |
-| 49 | P1 | AV1 on NVIDIA and Intel | 📋 | Follows #7/#8: `nvav1enc` (RTX 40+), `qsvav1enc` (Arc, newer iGPUs); they register only where the GPU supports AV1. |
+| 48 | P1 | H.264 High profile | 🧪 | AMF (#103) encodes High with CABAC under Sharkord's `42e01f`: VMAF on a 4K desktop, same quality at 34% fewer bits (text), better at 39% fewer (video). Live to the Renoir laptop (VA-API): 60 fps, 0 freezes, at 25 and 15 Mbps. Left: NVENC, Quick Sync, Linux (Vulkan/VA-API), other viewers (a Windows viewer, Firefox). |
+| 49 | P1 | AV1 on NVIDIA and Intel | 🧪 | Built in with #7/#8: `av1_nvenc` (RTX 40+), `av1_qsv` (Arc, newer iGPUs); the probe reports AV1 only where one encodes. |
 | 50 | P2 | VP9 on the native path | 💡 | The server offers VP9 profile 0; Intel encodes VP9 (`qsvvp9enc`) on GPUs without AV1. VP8/VP9 fall back to Chromium today. |
 | 52 | P2 | Suggest the codec from the probe | 💡 | Propose the best codec the sender's GPU encodes and viewers can decode, instead of a fixed setting. |
 | 53 | P3 | 10-bit / HDR AV1 | 💡 | With #12; needs HDR-capable viewers. |
@@ -121,14 +160,15 @@ shares* on (off by default):
 |---|-----|------|--------|-------|
 | 23 | P1 | Test on real internet uploads | 🧪 | Only tested on a LAN. Try a slow and a bufferbloated home upload: does the loss / round-trip check back off early enough? |
 | 24 | P1 | Faster start | 📋 | Reaching full rate takes ~30 s from Chromium's ~5 Mbps start. Start from the last good rate per server (still guarded by the congestion check). |
-| 25 | P2 | Fewer keyframes on bitrate changes | 💡 | Linux: done in #104 -- FFmpeg patched to apply a bitrate change on the next frame without an IDR (Vulkan re-issues only its rate control; VA-API re-sends its rate-control parameter), so the page steps 10% every 2 s there. Windows: GStreamer's AMF element still re-initialises the encoder on any property change (a 4K keyframe per step); FFmpeg's AMF encoder with the same patch approach comes with #103. |
+| 106 | P1 | Full quality right after a still screen | 🧪 | The helper pads a still screen to 90% of its rate (H.264 filler NAL, AV1 private metadata OBU), so Chromium's estimate doesn't collapse (25 -> 5 Mbps) and motion is back at 25 Mbps at once instead of ~8%/s over 15-20 s. Measured 4K60 H.264 and AV1 to the Renoir laptop: estimate held, pacer < 15 ms at motion. Cost: full rate while still. Its periodic dips (#28) can still meet motion: once, 0.7 s in the pacer for ~4 s. Screen-content mode and a `maxBitrate` probe didn't help. Could become a setting (bandwidth vs. instant quality). |
+| 25 | P2 | Fewer keyframes on bitrate changes | ✅ | FFmpeg patched to apply a bitrate change on the next frame without an IDR: Vulkan re-issues only its rate control, VA-API re-sends its rate-control parameter (#104), AMF sets its rate properties, NVENC reconfigures without reset, Quick Sync resets without a new sequence (#103). The page steps 10% every 2 s on both platforms. |
 | 26 | P2 | Slider vs resolution cap | 💡 | Decide whether Sharkord's slider alone should limit; today 4K60 stops at ~25 Mbps (0.05 bits per pixel per frame) even with a higher slider. |
 
 ## Viewers
 
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
-| 29 | P1 | Weak decoders | 📋 | Everyone gets the same stream; a Ryzen 4000 iGPU fell behind at 4K60 25 Mbps H.264. Suggest a lower resolution when the slider is high, and document which GPUs decode what (#66). |
+| 29 | P1 | Weak decoders | 📋 | Everyone gets the same stream; a Ryzen 4000 iGPU fell behind at 4K60 25 Mbps H.264 on heavy content, and decodes AV1 in software (dav1d): at 4K 21-27 Mbps it runs 46-52 fps with a 0.8-2.5 s jitter buffer. Suggest a lower resolution when the slider is high, and document which GPUs decode what (#66). |
 | 30 | P2 | Simulcast for native shares | 💡 | The helper encodes two layers (e.g. 4K + 1080p) and mediasoup picks per viewer. Big change; only once people hit #29. |
 
 ## Linux
@@ -156,7 +196,7 @@ shares* on (off by default):
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 37 | ✅ | First green CI run with the helper | ✅ | Both jobs build and stage the helper with `SHARKORD_REQUIRE_NATIVE=1`: Windows with its GStreamer bundle and `--check`, Linux (Ubuntu 22.04) against the system's GStreamer. |
-| 55 | P1 | Cache GStreamer and Cargo | 📋 | Linux: the helper's FFmpeg and Mesa (`build/deps`) are cached by `scripts/deps/**` (#104). Still missing: GStreamer's Windows installer, `~/.cargo` and `native/target`. |
+| 55 | P1 | Cache Cargo | 📋 | The helper's FFmpeg (and Mesa on Linux, `build/deps`) is cached by `scripts/deps/**` on both platforms (#103, #104). Still missing: `~/.cargo` and `native/target`. |
 | 56 | P1 | Lint and format checks | 📋 | ESLint (repo style: no semicolons) for `electron/`, `cargo fmt --check` + `cargo clippy` for `native/`. There are no lint or test scripts today. |
 | 38 | P1 | Tests for the pairing logic | 📋 | The worker's frame pairing is the most fragile code and needs no GPU: feed it synthetic frames (drops, timestamp drift, keyframes, PLIs) in CI. |
 | 58 | P1 | Installer smoke test | 📋 | Install the NSIS build on the runner, launch it, assert a local page loads and the app quits cleanly. |
@@ -164,8 +204,8 @@ shares* on (off by default):
 | 42 | P2 | Auto-update | 💡 | electron-updater with GitHub Releases works for NSIS and AppImage (not Flatpak). |
 | 59 | P2 | Checksums and provenance | 💡 | SHA-256 sums and GitHub artifact attestations with each Release. |
 | 60 | P2 | ARM64 builds | 💡 | electron-builder handles NSIS and AppImage arm64; the native helper would need an ARM encoder. |
-| 41 | P2 | Licence notices | 🚧 | GStreamer licence texts ship per DLL on Windows (`LICENSES` in `scripts/stage-native.js`); Linux ships FFmpeg's LGPL (with source, configure line and patches in `SOURCES.md`), glslang's and Mesa's in `resources/native/LICENSES` (#104). Missing: a top-level third-party notice, an About entry, the VC++ runtime terms. |
-| 40 | P2 | Helper size | 💡 | Windows: check the staged plugin set (`PLUGINS` in `stage-native.js`) per encoder once #7/#8 add plugins (or drop it with #103). Linux: the helper is ~10 MB stripped, the bundled RADV/ANV ~21/26 MB (~4 MB each compressed). |
+| 41 | P2 | Licence notices | 🚧 | The helper ships `LICENSES/` with FFmpeg's LGPL (and `SOURCES.md`: source, configure line and patches) on both platforms, plus glslang's and Mesa's on Linux (#104), libvpl's and the AMF/NVENC headers' on Windows (#103). Missing: a top-level third-party notice and an About entry. |
+| 40 | P2 | Helper size | 💡 | Windows: one static exe, 1.6 MiB (the GStreamer subset it replaced was ~18 MiB, #103). Linux: the helper is ~10 MB stripped, the bundled RADV/ANV ~21/26 MB (~4 MB each compressed). |
 | 61 | P3 | Flatpak / AUR | 💡 | electron-builder's Flatpak target makes single-file bundles only, with no auto-update; Flathub would need its own manifest. |
 | 105 | P2 | Linux builds on Ubuntu 24.04 | 📋 | The Linux job builds on Ubuntu 22.04 on purpose: its glibc (2.35) is the oldest the app then runs on (Ubuntu 22.04+, Debian 12+, Mint 21+). A newer image would drop those. Move to 24.04 (glibc 2.39) when 22.04's standard support ends in April 2027; `scripts/deps` already builds its own SPIRV-Tools, glslang and SPA headers, and Mesa with clang, because 22.04's are too old. |
 | 62 | P3 | Nightly builds from `dev` | 💡 | Artifacts exist per push; a pinned pre-release is easier for testers to find. |

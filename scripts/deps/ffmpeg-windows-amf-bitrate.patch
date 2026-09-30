@@ -1,0 +1,92 @@
+diff --git a/libavcodec/amfenc.c b/libavcodec/amfenc.c
+index 3ffca75..3026889 100644
+--- a/libavcodec/amfenc.c
++++ b/libavcodec/amfenc.c
+@@ -389,6 +389,62 @@ static AMF_RESULT amf_release_attached_frame_ref(AMFEncoderContext *ctx, AMFBuff
+     return res;
+ }
+ 
++/* A bitrate, VBV or minimum QP change after the encoder started: AMF takes these rate control
++ * properties at any time and applies them to the next frame, without a new IDR */
++static void amf_update_rate(AVCodecContext *avctx)
++{
++    AMFEncoderContext *ctx = avctx->priv_data;
++    AMF_RESULT res;
++    int64_t peak = avctx->rc_max_rate ? avctx->rc_max_rate : avctx->bit_rate;
++
++    if (!ctx->rc_bit_rate) {
++        ctx->rc_bit_rate    = avctx->bit_rate;
++        ctx->rc_max_rate    = avctx->rc_max_rate;
++        ctx->rc_buffer_size = avctx->rc_buffer_size;
++        ctx->rc_qmin        = avctx->qmin;
++        return;
++    }
++    if (avctx->bit_rate == ctx->rc_bit_rate && avctx->rc_max_rate == ctx->rc_max_rate &&
++        avctx->rc_buffer_size == ctx->rc_buffer_size && avctx->qmin == ctx->rc_qmin)
++        return;
++
++    switch (avctx->codec->id) {
++    case AV_CODEC_ID_H264:
++        if (avctx->rc_buffer_size)
++            AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_VBV_BUFFER_SIZE, avctx->rc_buffer_size);
++        AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_PEAK_BITRATE, peak);
++        AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_TARGET_BITRATE, avctx->bit_rate);
++        if (avctx->qmin >= 0 && avctx->qmin != ctx->rc_qmin)
++            AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_MIN_QP, FFMIN(avctx->qmin, 51));
++        break;
++    case AV_CODEC_ID_HEVC:
++        if (avctx->rc_buffer_size)
++            AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_HEVC_VBV_BUFFER_SIZE, avctx->rc_buffer_size);
++        AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_HEVC_PEAK_BITRATE, peak);
++        AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_HEVC_TARGET_BITRATE, avctx->bit_rate);
++        break;
++    case AV_CODEC_ID_AV1:
++        if (avctx->rc_buffer_size)
++            AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_AV1_VBV_BUFFER_SIZE, avctx->rc_buffer_size);
++        AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_AV1_PEAK_BITRATE, peak);
++        AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_AV1_TARGET_BITRATE, avctx->bit_rate);
++        if (avctx->qmin >= 0 && avctx->qmin != ctx->rc_qmin) {
++            AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTRA, FFMIN(avctx->qmin, 255));
++            AMF_ASSIGN_PROPERTY_INT64(res, ctx->encoder, AMF_VIDEO_ENCODER_AV1_MIN_Q_INDEX_INTER, FFMIN(avctx->qmin, 255));
++        }
++        break;
++    default:
++        return;
++    }
++    if (res != AMF_OK)
++        av_log(avctx, AV_LOG_WARNING, "bitrate change failed with error %d\n", res);
++    av_log(avctx, AV_LOG_VERBOSE, "bitrate %"PRId64" -> %"PRId64"\n", ctx->rc_bit_rate, avctx->bit_rate);
++    ctx->rc_bit_rate    = avctx->bit_rate;
++    ctx->rc_max_rate    = avctx->rc_max_rate;
++    ctx->rc_buffer_size = avctx->rc_buffer_size;
++    ctx->rc_qmin        = avctx->qmin;
++}
++
+ static int amf_submit_frame(AVCodecContext *avctx, AVFrame    *frame, AMFSurface **surface_resubmit)
+ {
+     AMFEncoderContext      *ctx = avctx->priv_data;
+@@ -526,6 +582,7 @@ static int amf_submit_frame(AVCodecContext *avctx, AVFrame    *frame, AMFSurface
+     default:
+         break;
+     }
++    amf_update_rate(avctx);
+     // submit surface
+     res = ctx->encoder->pVtbl->SubmitInput(ctx->encoder, (AMFData*)surface);
+     if (res == AMF_INPUT_FULL) { // handle full queue
+diff --git a/libavcodec/amfenc.h b/libavcodec/amfenc.h
+index 1571541..2a167f6 100644
+--- a/libavcodec/amfenc.h
++++ b/libavcodec/amfenc.h
+@@ -139,6 +139,12 @@ typedef struct AMFEncoderContext {
+     int                 pa_high_motion_quality_boost_mode;
+     int                 pa_adaptive_mini_gop;
+ 
++    // Rate control the encoder has: changes are applied to the next frame (amf_update_rate)
++    int64_t             rc_bit_rate;
++    int64_t             rc_max_rate;
++    int                 rc_buffer_size;
++    int                 rc_qmin;
++
+ 
+ } AMFEncoderContext;
+ 
