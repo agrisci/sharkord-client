@@ -10,6 +10,45 @@ P3 = ideas
 **#** is a stable ID for referring to an item in commits and issues, not its rank; new items take
 the next free number (currently 107).
 
+## Open test: Linux after the Windows FFmpeg port (#103)
+
+To do before `windows-ffmpeg` merges; delete this section once it passes. The Linux helper now
+shares its encoder and encode loop with Windows (`native/src/ffmpeg.rs`), and gains padding (#106);
+its capture, converter, drivers and FFmpeg build (`scripts/deps/ffmpeg.sh`) are unchanged, and it
+stays on Constrained Baseline (High profile and the QP floor are AMF only). What changed for it:
+`linux/encode.rs` and `linux/mod.rs` moved onto the shared core; frames are padded to 90% of the
+rate while the screen is still (an H.264 filler NAL unit, an AV1 private metadata OBU); the helper's
+`stats` report `padding` apart and the page counts it as sent; `build.rs` and `.cargo/config.toml`
+cover Windows too; the page asks for keyframes at most every 300 ms; the GPU bench alternates two
+pictures (motion) and checks the bitrate cut relative to the same content.
+
+1. **Build**: `git pull`, then check `build/deps` still has `lib/libavcodec.a` and `mesa/` (the
+   sync exclusion set on Windows can have removed them; else rerun `scripts/deps/ffmpeg.sh` and
+   `mesa.sh`). `cd native && cargo build --release`: no warnings. `cargo test --release`: 3 pass.
+2. **GPU bench**: `cargo test --release -- --ignored --nocapture`, on Vulkan and VA-API: keyframes
+   only at pictures 0 and 120, each under 600 KB, and the second after the cut clearly under the
+   first (the check is relative now).
+3. **Probe**: `target/release/sharkord-share --check` -> `api`, `driver`, `h264`/`av1` as before
+   (`"driver":"system"` on the desktop's stock drivers).
+4. **Live, desktop (RX 9060 XT) -> laptop, H.264 4K60, simulcast off**, `npm start` with
+   `--enable-logging=stderr --v=0`:
+   - one portal dialog, then the audio step; the local preview moves; `started` shows
+     `h264_vulkan`, the `stream` event `42e01f`-compatible Constrained Baseline (`constrained_baseline:
+     true`);
+   - the laptop's `[native-share] watching` lines: 60 fps, no freezes, jitter buffer under ~100 ms;
+   - motion ~30 s, still ~30 s, motion: during the still stretch the `sent` lines show the helper's
+     `padding` near 90% of `asked` and `asked` staying up (not following the estimate down); when
+     motion resumes the helper is at full rate within a tick and the pacer stays under 250 ms;
+     the laptop shows no freeze and no burst of `pli`. `SHARKORD_PAD=0` to compare with no padding
+     (the estimate falls to ~5 Mbps and the rate climbs back over 15-20 s).
+5. **Same with AV1** (the laptop decodes it in software: judge the sender's lines, and that the
+   still stretch shows no decode errors on the laptop; its jitter buffer grows with motion at 4K
+   whatever the sender does, #29).
+6. **VA-API** (`SHARKORD_ENCODE_API=vaapi`): one H.264 share with a still stretch. Its CBR already
+   pads a still screen inside the encoder, so the helper's `padding` stays small there.
+7. **Laptop as sender** (Renoir, bundled RADV, 1080p60), one short share with a still stretch: runs
+   as before, padding shows while still.
+
 ## Bugs
 
 Found while reviewing the code; each is small and should be fixed before new features.
@@ -83,7 +122,7 @@ shares* on (off by default):
 | 3 | P0 | Clean fallback on capture loss | 🚧 | Helper errors, exits and stalls now fall back (#1, #70, #71); a suspend (Linux, KDE: the portal's stream doesn't come back on resume) ends the share through the watchdog without turning the helper off for the session, and a resolution change with the same aspect ratio keeps the share running (the output size stays). A change of aspect ratio keeps running but stretches (#98). Windows (#103) rebuilds a lost desktop duplication, retried for 5 s while the encoder repeats the last picture, then sends `error`: verified live with a UAC prompt (secure desktop: ~1 s of a still picture, no freeze counted) and 4K -> 1440p -> 4K with a fullscreen video (the viewer got each size, 344-579 ms of freezes). Still to test: monitor unplugged, driver reset. |
 | 85 | P2 | Continue a failed share in place | 💡 | Today a mid-share helper failure ends the share (the user shares again, on Chromium's path). Continuing in place failed three ways: swapping the capture track in restarts the RTP timestamps from the capture's older clock (viewers drop every frame as stale; re-stamped frames keep the capture metadata), Chromium's hardware encoder switched in mid-share stalls after a few frames (<= 1080p), and 4K in software runs at 3-11 fps. A way through: stamp the placeholder on the capture's clock from the start, so a later swap stays continuous. #88 removes the 1080p hardware boundary on NVIDIA/Intel that made mid-share encoder switches likely. |
 | 87 | P1 | Test the early fallback (helper never starting, Windows) | 🧪 | VP8/VP9, auto and simulcast no longer reach the helper (#96). Left: a helper that fails before its first frame; the connection gets the capture track swapped in after the placeholder's black frames went out, so the same timestamp jump as #85 could freeze viewers. Test with the setting on and `SHARKORD_ENCODE_API` forcing an API the GPU lacks. |
-| 4 | P1 | Test the installed build | 🧪 | Run a 4K share on a `dist:win` build (the static helper from #103, clean environment). |
+| 4 | P1 | Test the installed build | 🧪 | Windows, `dist:win` with the static helper from #103: installed over the previous version, run with GStreamer off the PATH: probe passes, a 4K H.264 share at 15 Mbps to the laptop at 60 fps, padding while still. Left: a machine that never had GStreamer, and Linux packages. |
 | 5 | P1 | Viewer joining mid-share | 🧪 | Time to first frame for a late or reconnecting viewer (keyframe request → native keyframe → aligned Chromium keyframe). |
 | 6 | P2 | Stress the pairing | 💡 | Hours-long shares, sleep/resume, CPU/GPU saturation, many viewers. |
 
