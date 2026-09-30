@@ -470,8 +470,13 @@ function installNativeShare (workerSource, helperPicks) {
         const clean = performance.now() - (s.congestedAt ?? -Infinity) > 10000
         // Clean: the estimate itself, never down. It grows ~8%/s whenever at least 2/3 of it is
         // sent, so running ahead doesn't ramp faster -- straight to the cap queued up to 1.3 s in
-        // Chromium's pacer, 1.5x the estimate still 0.85 s, while it climbed 5 -> 25 Mbps in ~20 s
-        const aim = clean ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * 0.85))
+        // Chromium's pacer, 1.5x the estimate still 0.85 s, while it climbed 5 -> 25 Mbps in ~20 s.
+        // Except after a still screen: the helper sent under half what it was asked (VBR, a few
+        // hundred kbps), Chromium's estimate fell to what was acknowledged (32 -> 5.8 Mbps), and
+        // motion then went out at the old 25 Mbps into it: 1.4 s in the pacer for ~6 s. Then down
+        // to the estimate, and up with it again
+        const idle = (s.helper.kbps ?? Infinity) < s.kbps * 0.5 && bwe < s.kbps
+        const aim = clean && !idle ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * (clean ? 1 : 0.85)))
         s.cap = cap
         // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under the step
         const [step, every] = [1.1, 2000]

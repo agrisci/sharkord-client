@@ -170,8 +170,11 @@ Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18
   `AV_CODEC_FLAG_LOW_DELAY`), `h264_nvenc`/`av1_nvenc`, `h264_qsv`/`av1_qsv` (NVENC and QSV built
   in, untested: ROADMAP #7, #8). AMF's rate control ignores the VBV, HRD and `max_au_size` on an RX
   9060 XT: after a mostly still screen a scroll came out as a 1.2 MB frame, larger than an IDR of
-  the same picture. A minimum QP of 18 (AV1: q-index 60) caps it (297 KB; AV1 118 KB). H.264 is real
-  Constrained Baseline (`424033`, the constraint flag set: #86). Keyframes: ~90-130 KB at 4K.
+  the same picture. A floor under the quantizer caps it, following the rate (our AMF patch changes
+  it in place): QP 18 at 0.05 bits per pixel (25 Mbps at 4K60; scroll bursts 297 KB), 6 more per
+  halving of the rate (AV1: q-index 60, 24 more) -- a fixed 18 made 600 KB keyframes at the ~6 Mbps
+  a share starts with, and the viewer asked for 8 in 15 s; now 50-86 KB there, ~165 KB at 21 Mbps.
+  H.264 is real Constrained Baseline (`424033`, the constraint flag set: #86).
 - **Pacing and bitrate** as on Linux (`src/ffmpeg.rs`): our patches change AMF's, NVENC's and Quick
   Sync's rate in place, without a keyframe. `cargo test -- --ignored` encodes this desktop
   (scrolled every other frame): keyframes on request only, ≤ 600 KB, a bitrate change without one.
@@ -264,7 +267,9 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
    trip and Chromium's pacer queue stay clean it only steps up with the estimate (which dips 15-50%
    every few seconds on a clean LAN with mediasoup); on congestion (loss, a growing round trip, or
    packets waiting over 250 ms in the pacer, i.e. the estimate really below what goes out; a
-   keyframe's 50-180 ms doesn't count) it drops to 0.85x.
+   keyframe's 50-180 ms doesn't count) it drops to 0.85x. After a still screen it follows the
+   estimate down too: the helper then sends a fraction of its rate, Chromium's estimate falls to
+   what is acknowledged, and motion at the old rate queued 1.4 s in the pacer (Windows, AV1 at 4K).
    The helper changes it in place, without a keyframe, so it steps 10% at least 2 s apart; keyframe
    requests go to it at most every 300 ms. Capped by Sharkord's bitrate
    setting and ~25 Mbps at 4K60; the resolution stays what the user picked.

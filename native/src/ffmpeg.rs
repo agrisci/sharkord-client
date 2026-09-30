@@ -127,6 +127,8 @@ pub struct Encoder {
     pkt: *mut ff::AVPacket,
     pub name: String,
     api: Api,
+    codec: Codec,
+    size: (u32, u32),
     fps: u32,
 }
 
@@ -141,7 +143,7 @@ impl Encoder {
                 bail!("{name} is not in this FFmpeg");
             }
             let ctx = ff::avcodec_alloc_context3(codec);
-            let me = Encoder { ctx, pkt: ff::av_packet_alloc(), name: name.clone(), api, fps: s.fps };
+            let me = Encoder { ctx, pkt: ff::av_packet_alloc(), name: name.clone(), api, codec: s.codec, size: s.size, fps: s.fps };
             let fc = (*frames).data as *mut ff::AVHWFramesContext;
             (*ctx).width = s.size.0 as c_int;
             (*ctx).height = s.size.1 as c_int;
@@ -190,14 +192,9 @@ impl Encoder {
                     }
                 }
                 // AMF (as Sunshine sets it up): latency-constrained VBR, real-time mode, one frame in
-                // flight, an IDR (with SPS/PPS or the sequence header) for every forced keyframe.
-                // Its rate control ignores the VBV, HRD and `max_au_size` on an RX 9060 XT: a mostly
-                // still screen banks the budget, and then a scroll comes out as a 1.2 MB frame (more
-                // than an IDR of the same picture). A floor under the quantizer is what caps it:
-                // QP 18 (AV1: q-index 60), near-lossless for screen content, held a 4K desktop's
-                // scroll bursts to 297 KB (AV1: 118 KB)
+                // flight, an IDR (with SPS/PPS or the sequence header) for every forced keyframe,
+                // and a floor under the quantizer that follows the rate (`set_rate`)
                 Api::Amf => {
-                    (*ctx).qmin = if h264 { 18 } else { 60 };
                     opt("usage", "ultralowlatency");
                     opt("rc", "vbr_latency");
                     opt("filler_data", "0");
@@ -261,7 +258,13 @@ impl Encoder {
     }
 
     /// The target `kbps` (the peak; VBR's average a little under it), with 8 frames of it as the
-    /// VBV (see the module comment).
+    /// VBV (see the module comment). AMF also gets a floor under its quantizer: its rate control
+    /// ignores the VBV, HRD and `max_au_size` on an RX 9060 XT, so a mostly still screen banks the
+    /// budget and a scroll then came out as a 1.2 MB frame (more than an IDR of the same picture).
+    /// QP 18 at 0.05 bits per pixel (25 Mbps at 4K60) held a 4K desktop's scroll bursts to 297 KB,
+    /// but at the ~6 Mbps a share starts with it made 600 KB keyframes, and the viewer asked for
+    /// keyframes 8 times in 15 s. So 6 more per halving of the rate (half the bits per QP step of 6);
+    /// AV1's q-index 60 at 0.05 bpp (118 KB bursts), 24 more per halving.
     pub fn set_rate(&self, kbps: u32) {
         let bps = i64::from(kbps.max(100)) * 1000;
         let vbv = bps * 8 / i64::from(self.fps.max(1));
@@ -271,6 +274,14 @@ impl Encoder {
             (*self.ctx).bit_rate = if self.api == Api::Vaapi { bps } else { bps * 94 / 100 };
             (*self.ctx).rc_max_rate = bps;
             (*self.ctx).rc_buffer_size = vbv as c_int;
+            if self.api == Api::Amf {
+                let bpp = bps as f64 / (f64::from(self.size.0 * self.size.1) * f64::from(self.fps.max(1)));
+                let halvings = (0.05 / bpp).log2().max(0.0);
+                (*self.ctx).qmin = match self.codec {
+                    Codec::H264 => (18.0 + 6.0 * halvings).round().min(36.0) as c_int,
+                    Codec::Av1 => (60.0 + 24.0 * halvings).round().min(140.0) as c_int,
+                };
+            }
             if self.api == Api::Qsv {
                 // Quick Sync's frame cap, in bytes: the VBV (read on every frame)
                 let cap = cstr(&(vbv / 8).to_string());
