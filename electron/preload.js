@@ -16,8 +16,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   nativeShareStart:  opts => ipcRenderer.send('native-share-start', opts),
   nativeSharePick:   codec => ipcRenderer.invoke('native-share-pick', codec),
   nativeShareStop:   () => ipcRenderer.send('native-share-stop'),
-  // The rate a share held on this server and network (logged and kept for #24)
-  nativeShareRateHeld: kbps => ipcRenderer.send('native-share-rate-held', kbps),
 })
 
 // The helper's frame port can't cross contextBridge; the page world takes it from a
@@ -298,14 +296,6 @@ function installNativeShare (workerSource, helperPicks) {
     }
     const closeHelper = () => {
       clearInterval(s.boot)
-      // What this share held (main logs and keeps it): its clean peak (>= 10 s at a rate with no
-      // congestion), or if it ended congested, what it was down to then (a slower link lowers it)
-      if (!s.reported && s.portAt && performance.now() - s.portAt > 15000) {
-        s.reported = true
-        const congested = performance.now() - (s.congestedAt ?? -Infinity) < 10000
-        const held = congested ? Math.min(s.held || s.kbps, s.kbps) : s.held
-        if (held) api.nativeShareRateHeld?.(held)
-      }
       portWaiters.delete(s.id)
       if (!s.port) api.nativeShareStop()   // Linux: the helper from the pick is waiting for start
       try { s.port?.postMessage({ cmd: 'stop' }); s.port?.close() } catch {}
@@ -488,7 +478,6 @@ function installNativeShare (workerSource, helperPicks) {
         const idle = (s.helper.kbps ?? Infinity) + (s.helper.padding ?? 0) < s.kbps * 0.5 && bwe < s.kbps
         const aim = clean && !idle ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * (clean ? 1 : 0.85)))
         s.cap = cap
-        if (clean && performance.now() - s.kbpsAt > 10000) s.held = Math.max(s.held || 0, s.kbps)
         // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under the step
         const [step, every] = [1.1, 2000]
         if (aim < s.kbps * 0.9 || ((aim >= s.kbps * step || (aim === cap && aim > s.kbps)) && performance.now() - s.kbpsAt > every)) {

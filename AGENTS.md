@@ -46,8 +46,6 @@ belongs to rather than adding files.
   or Quick Sync on Windows, Vulkan video or VA-API on Linux Wayland -- and a share goes native only with a codec it found; where it
   can't run, its switch is greyed out and `nativeShareNote` says why, and `nativeShareCodecs` lists
   what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross),
-  `nativeShareRates` (the rate each native share held cleanly, by server and network -- the
-  router's MAC, else the subnets; the last 16, logged as `rate held`; kept for a faster start, #24),
   `chromiumHwEncode` (hardware encoding for shares on Chromium's own path, i.e. the Chromium flags
   below; default on on Windows, off on Linux; read once at launch, `SHARKORD_CHROMIUM_DEFAULTS=1`
   forces it off). *Open at login* is not
@@ -451,7 +449,7 @@ There are no automated tests. After a change, check what it touches:
   log) names the `api` and `device`. With AMF it is on by default (no `nativeShare` in
   `settings.json`), NVENC and Quick Sync need it turned on in Settings → Desktop Client (or the
   tray); turning it off sticks. `SHARKORD_TEST_FAIL=300`: the share ends within ~2 s, the viewer
-  isn't left black, the next share is Chromium's. A share over 15 s logs `rate held`. Share a
+  isn't left black, the next share is Chromium's. Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `GPU (Native: AMF, h264_amf)`. A UAC prompt or a
   resolution change mid-share: the picture freezes briefly and comes back. Two monitors: each one;

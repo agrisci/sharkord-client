@@ -5,7 +5,7 @@ const {
   app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, net, shell, desktopCapturer, session,
   screen, MessageChannelMain, dialog, powerMonitor,
 } = require('electron')
-const { spawn, execFile, execFileSync } = require('child_process')
+const { spawn, execFileSync } = require('child_process')
 const path = require('path')
 const fs   = require('fs')
 const os   = require('os')
@@ -488,44 +488,6 @@ ipcMain.on('native-share-start', (e, opts) => {
 // Page → a share ended before native-share-start (Linux: the helper from the pick still holds
 // the portal session, and the desktop's "sharing" indicator)
 ipcMain.on('native-share-stop', e => { if (e.sender === win?.webContents) stopNativeShare() })
-
-// The rate a native share held cleanly, per server and network: logged and kept for a faster start
-// (ROADMAP #24; x-google-start-bitrate didn't move Chromium's estimate once the call's transport
-// runs). Per network, as the same server may be reached over a fast upload one day and a slow one
-// the next. The network is the router's MAC (the default gateway's, from the routing and ARP
-// tables, no admin rights needed: 192.168.1.0/24 alone is half the world's home networks), else
-// the local subnets.
-const run = (cmd, args) => new Promise((resolve, reject) =>
-  execFile(cmd, args, { windowsHide: true, timeout: 2000 }, (err, out) => err ? reject(err) : resolve(out)))
-async function networkKey () {
-  try {
-    let gw, mac
-    if (process.platform === 'win32') {
-      const sys = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32')
-      gw = (await run(path.join(sys, 'route.exe'), ['print', '-4', '0.0.0.0'])).match(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)/m)?.[1]
-      mac = gw && (await run(path.join(sys, 'arp.exe'), ['-a', gw])).split('\n').find(l => l.trim().startsWith(gw + ' '))?.trim().split(/\s+/)[1]
-    } else {
-      const hex = fs.readFileSync('/proc/net/route', 'utf8').split('\n').map(l => l.split('\t')).find(f => f[1] === '00000000')?.[2]
-      gw = hex && hex.match(/../g).reverse().map(h => parseInt(h, 16)).join('.')
-      mac = gw && fs.readFileSync('/proc/net/arp', 'utf8').split('\n').find(l => l.startsWith(gw + ' '))?.trim().split(/\s+/)[3]
-    }
-    if (mac && /^[0-9a-f]{2}([:-][0-9a-f]{2}){5}$/i.test(mac) && !/^(00[:-]){5}00$/.test(mac)) return 'router ' + mac.toLowerCase().replace(/-/g, ':')
-  } catch {}
-  const nets = Object.values(os.networkInterfaces()).flat()
-    .filter(n => n && n.family === 'IPv4' && !n.internal && !n.address.startsWith('169.254.'))
-    .map(n => n.address.split('.').map((o, i) => o & (n.netmask.split('.')[i] | 0)).join('.') + '/' + n.cidr?.split('/')[1])
-  return [...new Set(nets)].sort().join(',')
-}
-const rateKey = async () => savedServerUrl() + ' ' + await networkKey()
-ipcMain.on('native-share-rate-held', async (e, kbps) => {
-  if (e.sender !== win?.webContents || !(kbps >= 100)) return
-  const key = await rateKey()
-  const rates = { ...loadUserSettings().nativeShareRates, [key]: Math.round(kbps) }
-  // A handful of servers and networks at most: the oldest entries go first
-  const kept = Object.fromEntries(Object.entries(rates).slice(-16))
-  saveUserSettings({ ...loadUserSettings(), nativeShareRates: kept })
-  log('[native-share] rate held', Math.round(kbps), 'kbps on', key.replace(/^\S+ /, ''))
-})
 // A suspend loses the capture (the portal's PipeWire stream doesn't come back on resume): the
 // page still ends the share, but doesn't count it as the helper failing
 function watchSuspend () {
