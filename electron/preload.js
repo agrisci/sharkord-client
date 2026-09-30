@@ -16,8 +16,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   nativeShareStart:  opts => ipcRenderer.send('native-share-start', opts),
   nativeSharePick:   codec => ipcRenderer.invoke('native-share-pick', codec),
   nativeShareStop:   () => ipcRenderer.send('native-share-stop'),
-  // The rate a share held on this server and network (a hint for the next one to probe for)
-  nativeShareRate:     () => ipcRenderer.invoke('native-share-rate'),
+  // The rate a share held on this server and network (logged and kept for #24)
   nativeShareRateHeld: kbps => ipcRenderer.send('native-share-rate-held', kbps),
 })
 
@@ -257,9 +256,6 @@ function installNativeShare (workerSource, helperPicks) {
     const worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })))
     const s = { id: nextId++, owned, want, gen, worker, port: null, sender: null, stopped: false, fell: false, anchored: false, tag: 0, stats: {}, helper: {}, keys: [], size: 0, kbps: 2000, kbpsAt: 0, pending: [], lastPush: 0, pacer: null }
     shares.set(video, s)
-    // The rate a share held on this server and network before: Chromium is asked to probe for it
-    // at the start (setRemoteDescription, below)
-    api.nativeShareRate?.().then(k => { if (k) { s.hint = k; log('start hint', k, 'kbps (held before on this server and network)') } }).catch(() => {})
 
     const pushPlaceholder = (key, data) => {
       if (s.stopped || s.fell) return
@@ -302,7 +298,7 @@ function installNativeShare (workerSource, helperPicks) {
     }
     const closeHelper = () => {
       clearInterval(s.boot)
-      // What this share held, for the next one's start: its clean peak (>= 10 s at a rate with no
+      // What this share held (main logs and keeps it): its clean peak (>= 10 s at a rate with no
       // congestion), or if it ended congested, what it was down to then (a slower link lowers it)
       if (!s.reported && s.portAt && performance.now() - s.portAt > 15000) {
         s.reported = true
@@ -560,24 +556,7 @@ function installNativeShare (workerSource, helperPicks) {
   // capturing (the mic in a voice channel counts); otherwise it says so. Every 10 s, what the
   // viewer really got since the last line: stutter shows as freezes and jitter buffer delay.
   const pcs = new Set(), decoders = new WeakMap(), received = new WeakMap(), setRemote = PC.setRemoteDescription
-  PC.setRemoteDescription = function (desc, ...rest) {
-    pcs.add(this)
-    // A native share's start bitrate (x-google-start-bitrate, Sharkord's 2000): what a share held on
-    // this server and network before. Chromium's first probes aim at it and measure the path, so a
-    // slower link today keeps the estimate where the link is. In every answer while the share
-    // lives: a renegotiation setting it back would reset the estimate
-    if (desc?.type === 'answer' && desc.sdp) {
-      let sdp = desc.sdp
-      for (const t of this.getTransceivers()) {
-        const s = bySender.get(t.sender)
-        if (!s?.hint || s.fell || s.stopped || t.mid == null) continue
-        sdp = sdp.split(/(?=^m=)/m).map(m => m.includes('a=mid:' + t.mid + '\r')
-          ? m.replace(/x-google-start-bitrate=\d+/g, 'x-google-start-bitrate=' + s.hint) : m).join('')
-      }
-      if (sdp !== desc.sdp) desc = { type: desc.type, sdp }
-    }
-    return setRemote.call(this, desc, ...rest)
-  }
+  PC.setRemoteDescription = function (...args) { pcs.add(this); return setRemote.apply(this, args) }
   let tick = 0
   setInterval(async () => {
     tick++

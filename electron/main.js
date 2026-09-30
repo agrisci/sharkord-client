@@ -301,7 +301,7 @@ async function handleDisplayMediaRequest (_req, callback) {
 //   the preload swaps its frames into Sharkord's own share.
 //   Frames go straight to the page over a MessagePort; the page sends keyframe
 //   and bitrate requests back the same way. The `nativeShare` setting turns it
-//   on (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
+//   on, by default where the encoder is tested (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
 //   Linux: the helper owns the pick. The page asks for it (native-share-pick)
 //   instead of calling Chromium's getDisplayMedia, so the portal asks once: the
 //   helper shows it, then the picker's audio step, and the page builds the
@@ -489,12 +489,12 @@ ipcMain.on('native-share-start', (e, opts) => {
 // the portal session, and the desktop's "sharing" indicator)
 ipcMain.on('native-share-stop', e => { if (e.sender === win?.webContents) stopNativeShare() })
 
-// The rate a native share held cleanly, per server and network, as a starting point the next one
-// asks Chromium to probe for (x-google-start-bitrate, preload.js): never sent blindly, as the same
-// server may be reached over a fast upload one day and a slow one the next. The network is the
-// router's MAC (the default gateway's, from the routing and ARP tables, no admin rights needed:
-// 192.168.1.0/24 alone is half the world's home networks), else the local subnets. A wrong match
-// costs nothing but a probe that fails.
+// The rate a native share held cleanly, per server and network: logged and kept for a faster start
+// (ROADMAP #24; x-google-start-bitrate didn't move Chromium's estimate once the call's transport
+// runs). Per network, as the same server may be reached over a fast upload one day and a slow one
+// the next. The network is the router's MAC (the default gateway's, from the routing and ARP
+// tables, no admin rights needed: 192.168.1.0/24 alone is half the world's home networks), else
+// the local subnets.
 const run = (cmd, args) => new Promise((resolve, reject) =>
   execFile(cmd, args, { windowsHide: true, timeout: 2000 }, (err, out) => err ? reject(err) : resolve(out)))
 async function networkKey () {
@@ -517,8 +517,6 @@ async function networkKey () {
   return [...new Set(nets)].sort().join(',')
 }
 const rateKey = async () => savedServerUrl() + ' ' + await networkKey()
-ipcMain.handle('native-share-rate', async e =>
-  e.sender === win?.webContents ? loadUserSettings().nativeShareRates?.[await rateKey()] ?? null : null)
 ipcMain.on('native-share-rate-held', async (e, kbps) => {
   if (e.sender !== win?.webContents || !(kbps >= 100)) return
   const key = await rateKey()

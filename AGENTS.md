@@ -40,11 +40,14 @@ belongs to rather than adding files.
   `serverUrl` (saved without a trailing slash — use `savedServerUrl()`), `theme`
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `startMinimized` (a login launch stays in the
-  tray), `nativeShare` (default
-  off; usable only when the helper's `--check` probe at startup encodes with a codec -- AMF, NVENC
+  tray), `nativeShare` (unset: on where the probe's encoder has been tested -- AMF, Vulkan video,
+  VA-API -- off with NVENC and Quick Sync until they are (`nativeShareTested`); a choice saved in
+  Settings or the tray wins either way; usable only when the helper's `--check` probe at startup encodes with a codec -- AMF, NVENC
   or Quick Sync on Windows, Vulkan video or VA-API on Linux Wayland -- and a share goes native only with a codec it found; where it
   can't run, its switch is greyed out and `nativeShareNote` says why, and `nativeShareCodecs` lists
   what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross),
+  `nativeShareRates` (the rate each native share held cleanly, by server and network -- the
+  router's MAC, else the subnets; the last 16, logged as `rate held`; kept for a faster start, #24),
   `chromiumHwEncode` (hardware encoding for shares on Chromium's own path, i.e. the Chromium flags
   below; default on on Windows, off on Linux; read once at launch, `SHARKORD_CHROMIUM_DEFAULTS=1`
   forces it off). *Open at login* is not
@@ -100,12 +103,13 @@ replaces steps 1-3 with the helper's portal pick and the picker's audio step).
    virtual mic from `enumerateDevices`, and calls `virtmic-stop` when the share ends. Sharkord
    ends shares with `track.stop()`, which fires no `ended` event, so both are hooked.
 
-### Native screen share (Windows, Linux Wayland; experimental)
+### Native screen share (Windows, Linux Wayland)
 
-With the `nativeShare` setting on (or `SHARKORD_NATIVE_SHARE=1`), some shares are captured and
-encoded outside Chromium by the helper in `native/`, while Sharkord and Chromium keep everything
-else (connection, packetization, bandwidth estimate). **Chromium's own share is the default**; the
-helper is opt-in per share, so nothing it can't handle ever reaches it.
+With the `nativeShare` setting on (by default where the encoder is tested, see *Settings*; or
+`SHARKORD_NATIVE_SHARE=1`), some shares are captured and encoded outside Chromium by the helper in
+`native/`, while Sharkord and Chromium keep everything else (connection, packetization, bandwidth
+estimate). **Chromium's own share takes every share the helper isn't sure of**: the helper is
+chosen per share, so nothing it can't handle ever reaches it.
 
 **Which path a share takes.** At startup `probeNativeShare` runs the helper's `--check` once: it
 encodes a frame with each codec (Windows: AMF, else NVENC, else Quick Sync, on the first adapter
@@ -143,7 +147,7 @@ Sharkord's state; a renamed key or field only turns the helper off:
 
 | Failure | Windows | Linux |
 |---|---|---|
-| Before the first native frame (the encoder won't start despite the probe, a codec other than the settings said) | the connection gets Chromium's capture; the share goes on | the share **ends** (nothing to fall back to); later shares that session are Chromium's |
+| Before the first native frame (the encoder won't start despite the probe, a codec other than the settings said) | before the placeholder reached a connection, the share goes on with Chromium's capture; after it, the share **ends** as mid-share (swapping the capture in then left viewers black, #87) | the share **ends** (nothing to fall back to); later shares that session are Chromium's |
 | Mid-share (helper error or exit, watchdog: no frame for 10 s / none swapped for 6 s) | the share ends; later shares that session are Chromium's (logged at each share), unless the system was suspended during it (`powerMonitor`, sent as a `suspend` event on the share's port) | same |
 | A picker or the audio step cancelled | no share | no share; the helper is stopped |
 
@@ -198,7 +202,9 @@ Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18
 - **Pacing and bitrate** as on Linux (`src/ffmpeg.rs`): our patches change AMF's, NVENC's and Quick
   Sync's rate in place, without a keyframe. `cargo test -- --ignored` encodes this desktop
   (scrolled every other frame): keyframes on request only, ≤ 600 KB, a bitrate change without one.
-  `SHARKORD_ENCODE_API=amf|nvenc|qsv` forces an API.
+  `SHARKORD_ENCODE_API=amf|nvenc|qsv` forces an API. `SHARKORD_TEST_FAIL=start` makes the helper
+  fail its share at once, `=<ms>` send an `error` that long after starting (both platforms), to
+  test the fallback.
 
 **Linux details.** The page's `getDisplayMedia` hook calls `native-share-pick` instead of
 Chromium's; main spawns the helper, which opens its own ScreenCast portal session at once
@@ -442,7 +448,10 @@ There are no automated tests. After a change, check what it touches:
   voice echoed; audio unlinks when the share stops or the picker is closed.
 - **Share audio (Windows)**: "Stream With Audio" loopback.
 - **Native screen share (Windows; AMD, NVIDIA, Intel)**: the probe (`[native-share] probe` in the
-  log) names the `api` and `device`. Turn it on in Settings → Desktop Client (or the tray). Share a
+  log) names the `api` and `device`. With AMF it is on by default (no `nativeShare` in
+  `settings.json`), NVENC and Quick Sync need it turned on in Settings → Desktop Client (or the
+  tray); turning it off sticks. `SHARKORD_TEST_FAIL=300`: the share ends within ~2 s, the viewer
+  isn't left black, the next share is Chromium's. A share over 15 s logs `rate held`. Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `GPU (Native: AMF, h264_amf)`. A UAC prompt or a
   resolution change mid-share: the picture freezes briefly and comes back. Two monitors: each one;
