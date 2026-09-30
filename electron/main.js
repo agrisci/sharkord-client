@@ -39,7 +39,7 @@ function openLog (primary) {
   pending.forEach(writeLog)
   log('[log]', logFile)
 }
-// A child's stderr into the log, a line at a time (the helper's GStreamer and driver messages)
+// A child's stderr into the log, a line at a time (the helper's, its libraries' and drivers' messages)
 function logLines (stream, tag) {
   let rest = ''
   stream.setEncoding('utf8')
@@ -281,9 +281,9 @@ async function handleDisplayMediaRequest (_req, callback) {
 }
 
 // ── Native screen share (Windows; Linux on Wayland; experimental) ─────────
-//   A helper (native/, Rust + GStreamer) captures the picked monitor (Windows) or
-//   portal pick (Linux: a screen or a window) and encodes
-//   it with the GPU; the preload swaps its frames into Sharkord's own share.
+//   A helper (native/, Rust: GStreamer on Windows, PipeWire + FFmpeg on Linux) captures the
+//   picked monitor (Windows) or portal pick (Linux: a screen or a window) and encodes it with
+//   the GPU; the preload swaps its frames into Sharkord's own share.
 //   Frames go straight to the page over a MessagePort; the page sends keyframe
 //   and bitrate requests back the same way. The `nativeShare` setting turns it
 //   on (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
@@ -299,8 +299,9 @@ const nativeShareExe = () => ['win32', 'linux'].includes(process.platform) && [
   path.join(process.resourcesPath || '', 'native', 'bin', EXE_NAME),   // installed (scripts/stage-native.js)
   path.join(__dirname, '..', 'native', 'target', 'release', EXE_NAME),
 ].find(p => fs.existsSync(p))
-// Only where the startup probe opened an encoder (an AMD GPU on Windows; on Linux a VA-API one,
-// which Fedora's own Mesa lacks for H.264), and on Linux only on Wayland (X11 stays Chromium's)
+// Only where the startup probe encoded a frame (an AMD GPU on Windows; on Linux one with Vulkan
+// video or VA-API encoding -- for AMD and Intel the helper brings Mesa drivers of its own where the
+// system's lack H.264), and on Linux only on Wayland (X11 stays Chromium's)
 const canEncode = codec => !_nativeProbe?.missing?.length && !!_nativeProbe?.[codec]
 const nativeShareSupported = () => !!nativeShareExe() &&
   (process.platform !== 'linux' || isWayland) && (canEncode('h264') || canEncode('av1'))
@@ -320,21 +321,19 @@ function nativeShareNote () {
   if (linux && !isWayland) return 'Needs a Wayland session; on X11 shares use the browser\'s capture.'
   if (!p) return null
   if (p.error) return linux
-    ? 'The helper could not run: GStreamer 1.22+ (gstreamer1, gstreamer1-plugins-base) is needed.'
+    ? 'The helper could not run: it needs PipeWire and VA-API\'s libraries (libpipewire, libva), which desktops normally have.'
     : 'The helper could not run; reinstalling Sharkord should fix it.'
-  if (p.missing?.includes('pipewiresrc')) return 'GStreamer\'s PipeWire plugin is missing: install pipewire-gstreamer (Fedora) or gstreamer1.0-pipewire (Debian/Ubuntu).'
-  if (p.missing?.length && linux) return 'No VA-API GPU found, or GStreamer\'s va plugin is missing: gstreamer1-plugins-bad-free (Fedora) or gstreamer1.0-plugins-bad (Debian/Ubuntu).'
+  if (p.missing?.length && linux) return 'No GPU here encodes video (Vulkan video or VA-API). NVIDIA GPUs need NVIDIA\'s own driver, not nouveau.'
   if (p.missing?.length) return 'The helper is incomplete; reinstalling Sharkord should fix it.'
-  const freeworld = linux ? ' On Fedora with an AMD GPU, H.264 needs mesa-va-drivers-freeworld from RPM Fusion.' : ''
-  if (!p.h264 && !p.av1) return linux ? freeworld.trim() || null : 'Only AMD GPUs are supported.'
-  if (!p.h264) return freeworld.trim() || null
+  if (!p.h264 && !p.av1) return linux ? null : 'Only AMD GPUs are supported.'
+  if (!p.h264) return 'This GPU\'s driver can\'t encode H.264 here: H.264 shares use the browser\'s capture; AV1 shares go native.'
   return null
 }
 const nativeShareOn = () => nativeShareSupported() &&
   (process.env.SHARKORD_NATIVE_SHARE === '1' || !!loadUserSettings().nativeShare)
 
 // Windows: its own GStreamer only -- no GST_* from an installed GStreamer, and a registry of its
-// own. Linux uses the system's GStreamer, environment included.
+// own. Linux: the environment as it is (the helper switches to its bundled drivers itself).
 function helperEnv () {
   if (process.platform !== 'win32') return process.env
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GST(REAMER)?_/i.test(k)))

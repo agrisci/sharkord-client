@@ -282,12 +282,17 @@ function installNativeShare (workerSource, helperPicks) {
     // the worker learns the negotiated codec
     s.boot = setInterval(() => pushPlaceholder(false, null), 1000 / want.fps)
 
-    // At most one keyframe a second: each one resizes the placeholder, which makes Chromium
-    // reconfigure its encoder, and a burst of them turned one dropped frame into a keyframe storm
-    // (4K AV1 on a real server). A request inside the second waits for it instead.
+    // At most one keyframe a second from AMF (Windows): each one resizes the placeholder, which
+    // makes Chromium reconfigure its encoder, and a burst of them turned one dropped frame into a
+    // keyframe storm (4K AV1 on a real server). A request inside the second waits for it instead.
+    // The Linux helper's keyframes are capped (~500 KB at 4K), and waiting is what kept a storm
+    // going there: a viewer's request makes Chromium key the placeholder on its own, the swap loses
+    // sync and sends nothing until a native keyframe lines up (~570 ms at 1 s), and the viewer asks
+    // again. So 300 ms there.
     const requestKeyframe = () => {
       if (s.keyTimer) return
-      const wait = Math.max(0, (s.keyAt || 0) + 1000 - performance.now())
+      const gap = /^amf/.test(s.encoder?.name ?? '') || !s.encoder ? 1000 : 300
+      const wait = Math.max(0, (s.keyAt || 0) + gap - performance.now())
       s.keyTimer = setTimeout(() => { s.keyTimer = null; s.keyAt = performance.now(); s.keyReqs = (s.keyReqs || 0) + 1; s.port?.postMessage({ cmd: 'keyframe' }) }, wait)
     }
     const closeHelper = () => {
@@ -446,11 +451,12 @@ function installNativeShare (workerSource, helperPicks) {
       // pacer stays queued when the estimate is really below what goes out: after a quiet stretch
       // it fell 32 -> 5.6 Mbps and stayed, and holding 25 Mbps through that queued 0.8 s of lag.
       // A keyframe queues 50-180 ms on a clean path (over two ticks on Wi-Fi), so only over 250 ms
-      // counts: counted, each keyframe lowered the bitrate, and the change itself restarts the
-      // encoder with a keyframe (vah264enc and AMF reconfigure on any bitrate change) -- a
-      // keyframe every few seconds. The cap: Sharkord's bitrate setting (x-google-max-bitrate in
-      // the answer) and 0.05 bits per pixel per frame (~25 Mbps at 4K60). So down at once, up only
-      // in 30% steps at least 4 s apart.
+      // counts: counted, each keyframe lowered the bitrate, and the change itself restarted the
+      // encoder with a keyframe (AMF still reconfigures on any bitrate change) -- a keyframe every
+      // few seconds. The cap: Sharkord's bitrate setting (x-google-max-bitrate in the answer) and
+      // 0.05 bits per pixel per frame (~25 Mbps at 4K60). So down at once, and up in 30% steps at
+      // least 4 s apart with AMF; the Linux helper's FFmpeg changes the rate in place, so there in
+      // 10% steps 2 s apart.
       // A collapse of the estimate (no loss): Chromium's overuse rule sets it to 0.85x what was
       // acknowledged lately, tiny after a still screen; logged with the keyframe before it
       if (bwe && s.lastBwe && bwe < s.lastBwe * 0.6) log(`estimate fell ${s.lastBwe} -> ${bwe} kbps (${s.lastKey ? `${Math.round(performance.now() - s.lastKey.t)} ms after a ${s.lastKey.kb} KB keyframe` : 'no keyframe yet'}, helper sending ${s.helper.kbps ?? '-'} kbps)`)
@@ -469,8 +475,9 @@ function installNativeShare (workerSource, helperPicks) {
         // Chromium's pacer, 1.5x the estimate still 0.85 s, while it climbed 5 -> 25 Mbps in ~20 s
         const aim = clean ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * 0.85))
         s.cap = cap
-        // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under 1.3x
-        if (aim < s.kbps * 0.9 || ((aim >= s.kbps * 1.3 || (aim === cap && aim > s.kbps)) && performance.now() - s.kbpsAt > 4000)) {
+        // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under the step
+        const [step, every] = /^amf/.test(s.encoder.name ?? '') ? [1.3, 4000] : [1.1, 2000]
+        if (aim < s.kbps * 0.9 || ((aim >= s.kbps * step || (aim === cap && aim > s.kbps)) && performance.now() - s.kbpsAt > every)) {
           s.kbps = aim; s.kbpsAt = performance.now(); s.port.postMessage({ cmd: 'bitrate', kbps: aim })
         }
       }
@@ -482,9 +489,10 @@ function installNativeShare (workerSource, helperPicks) {
   // otherwise show Chromium's software encoder at 320x180. Frame rate and bytes stay Chromium's
   // own counts -- they are what really goes out. Until the helper has started, "Native: starting"
   // (not the placeholder's OpenH264); after a fallback, Chromium's own encoder again.
-  // "Native: VAAPI, vah264enc" tells the helper apart from Chromium's encoders, and the API name is
-  // one Sharkord's stats match to label it GPU (vah264enc alone shows as Unknown).
-  const nativeLabel = ({ name }) => `Native: ${/^va/.test(name) ? 'VAAPI' : /^amf/.test(name) ? 'AMF' : 'hardware'}, ${name}`
+  // "Native: Vulkan (hardware), h264_vulkan" tells the helper apart from Chromium's encoders, and
+  // carries a word Sharkord's stats match to label it GPU (`hardware|vaapi|amf|nvenc...` in its
+  // stats-popover.tsx; h264_vulkan alone shows as Unknown).
+  const nativeLabel = ({ name }) => `Native: ${/_vulkan$/.test(name) ? 'Vulkan (hardware)' : /vaapi/.test(name) ? 'VAAPI' : /^amf/.test(name) ? 'AMF' : 'hardware'}, ${name}`
   const rewrite = (report, sender) => {
     // Through the sender its outbound-rtp is known before the first stats tick records its id
     const own = sender && bySender.get(sender)
@@ -676,7 +684,7 @@ const DESKTOP_OPTIONS = [
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
   { key: 'nativeShare',    label: 'Native screen share (experimental)',
     description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
-      (process.platform === 'linux' ? 'AMD and Intel GPUs (VA-API), Wayland.' : 'AMD GPUs, whole screens.') + ' Takes effect on the next share.' },
+      (process.platform === 'linux' ? 'AMD and Intel GPUs (Vulkan video or VA-API), Wayland.' : 'AMD GPUs, whole screens.') + ' Takes effect on the next share.' },
   { key: 'chromiumHwEncode', label: 'Hardware encoding for other shares',
     description: 'Lets the browser encode shares that don\'t use the native share on the GPU. Turn it off if those shares look corrupted or never load for viewers. ' +
       (process.platform === 'linux' ? 'Off by default: some drivers encode incorrectly. ' : '') + 'Takes effect after restarting Sharkord.' },

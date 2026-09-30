@@ -1,0 +1,124 @@
+diff --git a/libavcodec/vulkan_encode.c b/libavcodec/vulkan_encode.c
+index 39c4330..7dbb196 100644
+--- a/libavcodec/vulkan_encode.c
++++ b/libavcodec/vulkan_encode.c
+@@ -166,8 +166,9 @@ static int vulkan_encode_issue(AVCodecContext *avctx,
+         .sType = VK_STRUCTURE_TYPE_VIDEO_END_CODING_INFO_KHR,
+     };
+ 
+-    VkVideoEncodeRateControlLayerInfoKHR rc_layer;
+-    VkVideoEncodeRateControlInfoKHR rc_info;
++    VkVideoEncodeRateControlLayerInfoKHR rc_layer, rc_layer_prev;
++    VkVideoEncodeRateControlInfoKHR rc_info, rc_info_prev;
++    int rc_change;
+     VkVideoEncodeQualityLevelInfoKHR q_info;
+     VkVideoCodingControlInfoKHR encode_ctrl;
+ 
+@@ -193,6 +194,18 @@ static int vulkan_encode_issue(AVCodecContext *avctx,
+     if (err < 0)
+         return err;
+ 
++    /* A bitrate change after the session started: begin with the state the session has, then
++     * send the new one alone (no reset, so no IDR) */
++    rc_change = ctx->session_reset &&
++                (avctx->bit_rate != ctx->rc_bit_rate || avctx->rc_max_rate != ctx->rc_max_rate);
++    if (rc_change) {
++        rc_layer_prev = rc_layer;
++        rc_layer_prev.averageBitrate = ctx->rc_bit_rate;
++        rc_layer_prev.maxBitrate = ctx->rc_max_rate ? ctx->rc_max_rate : ctx->rc_bit_rate;
++        rc_info_prev = rc_info;
++        rc_info_prev.pLayers = &rc_layer_prev;
++    }
++
+     q_info = (VkVideoEncodeQualityLevelInfoKHR) {
+         .sType = VK_STRUCTURE_TYPE_VIDEO_ENCODE_QUALITY_LEVEL_INFO_KHR,
+         .pNext = &rc_info,
+@@ -275,7 +288,7 @@ static int vulkan_encode_issue(AVCodecContext *avctx,
+ 
+     encode_start = (VkVideoBeginCodingInfoKHR) {
+         .sType = VK_STRUCTURE_TYPE_VIDEO_BEGIN_CODING_INFO_KHR,
+-        .pNext = !base_pic->force_idr ? &rc_info : NULL,
++        .pNext = !base_pic->force_idr ? (rc_change ? &rc_info_prev : &rc_info) : NULL,
+         .videoSession = ctx->common.session,
+         .videoSessionParameters = ctx->session_params,
+         .referenceSlotCount = encode_info.referenceSlotCount + 1,
+@@ -419,7 +432,16 @@ static int vulkan_encode_issue(AVCodecContext *avctx,
+     if (!ctx->session_reset) {
+         vk->CmdControlVideoCodingKHR(cmd_buf, &encode_ctrl);
+         ctx->session_reset++;
++    } else if (rc_change) {
++        VkVideoCodingControlInfoKHR rc_ctrl = {
++            .sType = VK_STRUCTURE_TYPE_VIDEO_CODING_CONTROL_INFO_KHR,
++            .pNext = &rc_info,
++            .flags = VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR,
++        };
++        vk->CmdControlVideoCodingKHR(cmd_buf, &rc_ctrl);
+     }
++    ctx->rc_bit_rate = avctx->bit_rate;
++    ctx->rc_max_rate = avctx->rc_max_rate;
+ 
+     /* Encode */
+     vk->CmdBeginQuery(cmd_buf, ctx->enc_pool.query_pool, exec->query_idx + 0, 0);
+diff --git a/libavcodec/vulkan_encode.h b/libavcodec/vulkan_encode.h
+index cf5f255..0617cb5 100644
+--- a/libavcodec/vulkan_encode.h
++++ b/libavcodec/vulkan_encode.h
+@@ -174,6 +174,8 @@ typedef struct FFVulkanEncodeContext {
+ 
+     int explicit_qp;
+     int session_reset;
++    /* The bitrates the session's rate control was last given: a change is sent without a reset */
++    int64_t rc_bit_rate, rc_max_rate;
+ 
+     /* Session parameters object, initialized by each codec independently
+      * and set here. */
+diff --git a/libavcodec/vulkan_encode_av1.c b/libavcodec/vulkan_encode_av1.c
+index d98b3a5..0a4f380 100644
+--- a/libavcodec/vulkan_encode_av1.c
++++ b/libavcodec/vulkan_encode_av1.c
+@@ -134,7 +134,7 @@ static int init_pic_rc(AVCodecContext *avctx, FFHWBaseEncodePicture *pic,
+     rc_info->pNext = &ap->vkrc_info;
+ 
+     if (rc_info->rateControlMode > VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR) {
+-        rc_info->virtualBufferSizeInMs = (enc->hrd_buffer_size * 1000LL) / avctx->bit_rate;
++        rc_info->virtualBufferSizeInMs = ((avctx->rc_buffer_size ? avctx->rc_buffer_size : enc->hrd_buffer_size) * 1000LL) / avctx->bit_rate;
+         rc_info->initialVirtualBufferSizeInMs = (enc->initial_buffer_fullness * 1000LL) / avctx->bit_rate;
+ 
+         ap->vkrc_layer_info = (VkVideoEncodeAV1RateControlLayerInfoKHR) {
+@@ -150,7 +150,10 @@ static int init_pic_rc(AVCodecContext *avctx, FFHWBaseEncodePicture *pic,
+             .maxQIndex.predictiveQIndex = avctx->qmax > 0 ? avctx->qmax : 0,
+             .maxQIndex.bipredictiveQIndex = avctx->qmax > 0 ? avctx->qmax : 0,
+ 
+-            .useMaxFrameSize = 0,
++            /* A cap on any frame: the VBV, so a scene cut can't burst past it */
++            .useMaxFrameSize = avctx->rc_buffer_size > 0,
++            .maxFrameSize = { .intraFrameSize = avctx->rc_buffer_size / 8, .predictiveFrameSize = avctx->rc_buffer_size / 8,
++                              .bipredictiveFrameSize = avctx->rc_buffer_size / 8 },
+         };
+         rc_layer->pNext = &ap->vkrc_layer_info;
+         ap->vkrc_info.temporalLayerCount = 1;
+diff --git a/libavcodec/vulkan_encode_h264.c b/libavcodec/vulkan_encode_h264.c
+index 33a9b0a..4686ed4 100644
+--- a/libavcodec/vulkan_encode_h264.c
++++ b/libavcodec/vulkan_encode_h264.c
+@@ -134,7 +134,7 @@ static int init_pic_rc(AVCodecContext *avctx, FFHWBaseEncodePicture *pic,
+     rc_info->pNext = &hp->vkrc_info;
+ 
+     if (rc_info->rateControlMode > VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR) {
+-        rc_info->virtualBufferSizeInMs = (enc->unit_opts.hrd_buffer_size * 1000LL) / avctx->bit_rate;
++        rc_info->virtualBufferSizeInMs = ((avctx->rc_buffer_size ? avctx->rc_buffer_size : enc->unit_opts.hrd_buffer_size) * 1000LL) / avctx->bit_rate;
+         rc_info->initialVirtualBufferSizeInMs = (enc->unit_opts.initial_buffer_fullness * 1000LL) / avctx->bit_rate;
+ 
+         hp->vkrc_layer_info = (VkVideoEncodeH264RateControlLayerInfoKHR) {
+@@ -150,7 +150,10 @@ static int init_pic_rc(AVCodecContext *avctx, FFHWBaseEncodePicture *pic,
+             .maxQp.qpP = avctx->qmax > 0 ? avctx->qmax : 0,
+             .maxQp.qpB = avctx->qmax > 0 ? avctx->qmax : 0,
+ 
+-            .useMaxFrameSize = 0,
++            /* A cap on any frame: the VBV, so a scene cut can't burst past it */
++            .useMaxFrameSize = avctx->rc_buffer_size > 0,
++            .maxFrameSize = { .frameISize = avctx->rc_buffer_size / 8, .framePSize = avctx->rc_buffer_size / 8,
++                              .frameBSize = avctx->rc_buffer_size / 8 },
+         };
+         rc_layer->pNext = &hp->vkrc_layer_info;
+         hp->vkrc_info.temporalLayerCount = 1;
