@@ -309,9 +309,15 @@ impl Convert {
             Ok(out)
         }
     }
+}
 
-    /// The pool the converted frames come from: the encoder allocates from its description.
-    #[cfg(test)]
+impl Drop for Convert {
+    fn drop(&mut self) {
+        unsafe { ff::avfilter_graph_free(&mut self.graph) }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
