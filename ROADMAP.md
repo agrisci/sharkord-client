@@ -48,6 +48,12 @@ pictures (motion) and checks the bitrate cut relative to the same content.
    pads a still screen inside the encoder, so the helper's `padding` stays small there.
 7. **Laptop as sender** (Renoir, bundled RADV, 1080p60), one short share with a still stretch: runs
    as before, padding shows while still.
+8. **Slow upload** (#23; since then padding is budgeted, never over 90% of the rate with the video,
+   and a frame dropper skips ticks once the helper is 250 ms of the rate over): cap the desktop's
+   upload to 3 Mbps (`sudo tc qdisc add dev <nic> root tbf rate 3mbit burst 32kbit latency 400ms`,
+   `sudo tc qdisc del dev <nic> root` to lift it), 4K60 H.264 with a video playing, mid-share and
+   from the start: the laptop around 50-60 fps with short freezes only, the pacer mostly under
+   250 ms, the helper's `held` above 0; lifted, full rate within ~40 s.
 
 ## Bugs
 
