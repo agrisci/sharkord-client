@@ -8,7 +8,7 @@ about never leaving a share broken and being able to debug machines we have neve
 P3 = ideas
 **Status:** ✅ Done · 🚧 In progress · 🧪 Needs testing · 📋 Planned · 💡 Idea · ⛔ Won't do
 **#** is a stable ID for referring to an item in commits and issues, not its rank; new items take
-the next free number (currently 100).
+the next free number (currently 103).
 
 ## Bugs
 
@@ -18,6 +18,9 @@ Found while reviewing the code; each is small and should be fixed before new fea
 |---|-----|------|--------|-------|
 | 76 | P2 | Frame buffering copies large frames repeatedly | 📋 | `Buffer.concat` on every stdout chunk plus a copy per frame (`spawnHelper` in `main.js`); a 4K keyframe is re-copied many times. Keep a chunk list. |
 | 77 | P2 | `--check` doesn't prove encoding works | ✅ | It now builds each codec's encoder (every per-device factory) and takes it to READY, reported as `h264`/`av1`; the app runs it at startup on both platforms (#9). |
+| 100 | P1 | 4K shares stutter on Linux (VA rate control) | ✅ | Measured desktop RX 9060 XT → Renoir laptop, 4K60 H.264 at 25 Mbps: `vah264enc` in VBR sent 28-39 Mbps asked for 21 (a lower target or `target-percentage` changes nothing, `cpb-size` is inert), over Chromium's pacer (~1.1x an estimate capped by Sharkord's bitrate setting): queue up to 850 ms, viewer freezes ~6 s per 110 s, and the 250 ms congestion rule then lowered the rate, restarting the encoder with a keyframe every ~10 s. CBR at 85% of the target: 20-22 Mbps steady, queue under 150 ms, freezes ~2.5 s per 150 s, 60 fps. Cost: a still screen is padded up to the target (upload and every viewer's download). Findings from `sharkord-native-client` (KI-44, BUG-33) agree. |
+| 101 | P0 | Keyframe storm from the frame swap | 📋 | On a clean link (Ethernet, 0 loss) a still screen on VBR then a 1.1-1.3 MB keyframe started a storm: the viewer asked for a keyframe every second for a minute at 1-2 fps, while the worker's `resync` climbed ~35/s. Not seen with CBR yet. Likely Chromium keying the placeholder on its own for the requests (`ckNoNk`) while the native keyframe is still on its way, so pairing never settles. See #2. |
+| 102 | P2 | A freeze at every scheduled keyframe (Linux) | 📋 | VA caps the keyframe interval at 1024 frames (17 s at 60 fps, not the minute asked for); each 1.1 MB 4K keyframe is followed by a viewer keyframe request and a 0.4-0.8 s freeze. Find why the request follows (pairing, #101), or schedule fewer. |
 | 99 | P1 | HiDPI shares encoded at the logical size (Linux) | ✅ | The portal reports a scaled screen's size in logical pixels (a 4K panel at 160%: 2400x1350) while PipeWire delivers physical frames, so the helper downscaled them and the page capped the bitrate for the smaller size (9.7 instead of ~24.9 Mbps). The output size now comes from the source's first caps, and `started` is sent with the first frame, with the sizes negotiated. |
 | 86 | P3 | Baseline without the constraint flag | 📋 | With the profile pinned, AMF emits profile_idc 66 (Baseline) but not constraint_set1, and level 5.1: `420433` where the SDP says `42e01f`. Decoders accept it (no Baseline-only tools are used); patch the SPS flag byte or leave it. The helper logs it as a `stream` event. |
 

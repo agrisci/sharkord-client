@@ -249,7 +249,7 @@ function installNativeShare (workerSource, helperPicks) {
       return blanks.get(k)
     }
     const worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })))
-    const s = { id: nextId++, owned, want, gen, worker, port: null, sender: null, stopped: false, fell: false, anchored: false, tag: 0, stats: {}, helper: {}, size: 0, kbps: 2000, kbpsAt: 0, pending: [], lastPush: 0, pacer: null }
+    const s = { id: nextId++, owned, want, gen, worker, port: null, sender: null, stopped: false, fell: false, anchored: false, tag: 0, stats: {}, helper: {}, keys: [], size: 0, kbps: 2000, kbpsAt: 0, pending: [], lastPush: 0, pacer: null }
     shares.set(video, s)
 
     const pushPlaceholder = (key, data) => {
@@ -362,6 +362,13 @@ function installNativeShare (workerSource, helperPicks) {
               s.lastFrameAt = performance.now()
               preview(codec, msg)   // before its buffer moves to the worker
               const d = msg.data
+              // Native keyframes and why they came (a bitrate change restarts the encoder with
+              // one, a request asks for one): at 4K each is a burst the bandwidth estimate feels
+              if (msg.key) {
+                const t = performance.now(), kb = Math.round(d.byteLength / 1024)
+                s.keys.push(`${kb} KB ${t - s.kbpsAt < 1500 ? 'rate' : t - (s.keyAt ?? -Infinity) < 1500 ? 'req' : 'other'}`)
+                s.lastKey = { t, kb }
+              }
               s.pending.push({ key: msg.key, data: d.byteOffset === 0 && d.byteLength === d.buffer.byteLength ? d.buffer : d.slice().buffer })
               pace()
             } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps }
@@ -440,6 +447,10 @@ function installNativeShare (workerSource, helperPicks) {
       // keyframe every few seconds. The cap: Sharkord's bitrate setting (x-google-max-bitrate in
       // the answer) and 0.05 bits per pixel per frame (~25 Mbps at 4K60). So down at once, up only
       // in 30% steps at least 4 s apart.
+      // A collapse of the estimate (no loss): Chromium's overuse rule sets it to 0.85x what was
+      // acknowledged lately, tiny after a still screen; logged with the keyframe before it
+      if (bwe && s.lastBwe && bwe < s.lastBwe * 0.6) log(`estimate fell ${s.lastBwe} -> ${bwe} kbps (${s.lastKey ? `${Math.round(performance.now() - s.lastKey.t)} ms after a ${s.lastKey.kb} KB keyframe` : 'no keyframe yet'}, helper sending ${s.helper.kbps ?? '-'} kbps)`)
+      if (bwe) s.lastBwe = bwe
       const rtt = r?.roundTripTime
       if (rtt != null) s.minRtt = Math.min(s.minRtt ?? rtt, rtt)
       if ((r?.fractionLost ?? 0) > 0.02 || (rtt != null && rtt > s.minRtt + 0.02) || pacerMs > 250) s.congestedAt = performance.now()
@@ -459,7 +470,8 @@ function installNativeShare (workerSource, helperPicks) {
           s.kbps = aim; s.kbpsAt = performance.now(); s.port.postMessage({ cmd: 'bitrate', kbps: aim })
         }
       }
-      if (o) log(`sent ${o.framesPerSecond ?? 0} fps, estimate ${bwe} kbps, target ${Math.round((o.targetBitrate || 0) / 1000)} kbps, asked ${s.kbps} kbps (cap ${s.cap}), pacer ${pacerMs} ms, rtt ${Math.round((r?.roundTripTime ?? 0) * 1000)} ms, jitter ${Math.round((r?.jitter ?? 0) * 1000)} ms, lost ${r?.packetsLost ?? 0} (${Math.round((r?.fractionLost ?? 0) * 1000) / 10}%), nack ${o?.nackCount ?? 0}, retx ${o?.retransmittedPacketsSent ?? 0}, pli ${o.pliCount ?? 0}, fir ${o.firCount ?? 0}, keys ${o.keyFramesEncoded ?? 0}, keyreq ${s.keyReqs || 0}, helper ${JSON.stringify(s.helper)}, worker ${JSON.stringify(s.stats)}`)
+      if (o) log(`sent ${o.framesPerSecond ?? 0} fps, estimate ${bwe} kbps, target ${Math.round((o.targetBitrate || 0) / 1000)} kbps, asked ${s.kbps} kbps (cap ${s.cap}), pacer ${pacerMs} ms, rtt ${Math.round((r?.roundTripTime ?? 0) * 1000)} ms, jitter ${Math.round((r?.jitter ?? 0) * 1000)} ms, lost ${r?.packetsLost ?? 0} (${Math.round((r?.fractionLost ?? 0) * 1000) / 10}%), nack ${o?.nackCount ?? 0}, retx ${o?.retransmittedPacketsSent ?? 0}, pli ${o.pliCount ?? 0}, fir ${o.firCount ?? 0}, keys ${o.keyFramesEncoded ?? 0}, keyreq ${s.keyReqs || 0}, native keys [${s.keys.join(', ')}], helper ${JSON.stringify(s.helper)}, worker ${JSON.stringify(s.stats)}`)
+      s.keys = []
     }, 2000)
   }
   // Stats describe the helper's encode, not the placeholder's: Sharkord's stats panel would
@@ -514,10 +526,13 @@ function installNativeShare (workerSource, helperPicks) {
 
   // Watching: which decoder each incoming video uses (GPU or CPU), logged when it first plays
   // and when the codec or decoder changes. Chromium names the decoder only while the page is
-  // capturing (the mic in a voice channel counts); otherwise it says so.
-  const pcs = new Set(), decoders = new WeakMap(), setRemote = PC.setRemoteDescription
+  // capturing (the mic in a voice channel counts); otherwise it says so. Every 10 s, what the
+  // viewer really got since the last line: stutter shows as freezes and jitter buffer delay.
+  const pcs = new Set(), decoders = new WeakMap(), received = new WeakMap(), setRemote = PC.setRemoteDescription
   PC.setRemoteDescription = function (...args) { pcs.add(this); return setRemote.apply(this, args) }
+  let tick = 0
   setInterval(async () => {
+    tick++
     for (const pc of pcs) {
       if (pc.connectionState === 'closed') { pcs.delete(pc); continue }
       for (const r of pc.getReceivers()) {
@@ -526,6 +541,11 @@ function installNativeShare (workerSource, helperPicks) {
         try { (await r.getStats()).forEach(x => { if (x.type === 'inbound-rtp') i = x; if (x.type === 'codec') codecs.set(x.id, x.mimeType) }) } catch { continue }
         if (!i?.framesDecoded) continue
         const codec = (codecs.get(i.codecId) || '?').replace('video/', ''), key = codec + '|' + i.decoderImplementation
+        if (tick % 2 === 0) {
+          const p = received.get(r), d = n => (i[n] ?? 0) - (p?.[n] ?? 0), secs = (i.timestamp - (p?.timestamp ?? i.timestamp)) / 1000
+          if (p && secs > 0) log(`watching ${codec} ${i.frameWidth}x${i.frameHeight}: ${Math.round(d('framesDecoded') / secs)} fps, dropped ${d('framesDropped')}, freezes ${d('freezeCount')} (${Math.round(d('totalFreezesDuration') * 1000)} ms), jitter buffer ${Math.round(d('jitterBufferDelay') * 1000 / Math.max(1, d('jitterBufferEmittedCount')))} ms, keys ${d('keyFramesDecoded')}, pli ${d('pliCount')}, lost ${d('packetsLost')}, nack ${d('nackCount')}, ${Math.round(d('bytesReceived') * 8 / 1000 / secs)} kbps`)
+          received.set(r, i)
+        }
         if (decoders.get(r) === key) continue
         decoders.set(r, key)
         const where = i.powerEfficientDecoder === true ? 'GPU' : i.powerEfficientDecoder === false ? 'CPU' : 'unknown'

@@ -153,8 +153,9 @@ or `cancelled`, then main shows the picker's audio step. The page builds Sharkor
 a `MediaStreamTrackGenerator` fed with the helper's frames decoded by `VideoDecoder`, and venmic's
 virtual mic (`withShareAudio`). The graph: `pipewiresrc` (no clock, buffers re-stamped on arrival,
 `keepalive-time` at the frame period) → `vapostproc` copy into VA memory at once (the compositor
-lends only a few buffers) → the same videorate/queue → `vapostproc` → `vah264enc`/`vaav1enc` (VBR
-at 100% of the target: CBR pads a still screen; AV1 without reordering). Measured on KWin (Renoir
+lends only a few buffers) → the same videorate/queue → `vapostproc` → `vah264enc`/`vaav1enc` (CBR
+at 85% of the target: VBR overshot it by 30-80% at 4K and queued up to 850 ms in Chromium's pacer;
+CBR pads a still screen, which also keeps the estimate up; AV1 without reordering). Measured on KWin (Renoir
 and RX 9060 XT): a Renoir iGPU went from ~41 to 60 fps. Tried and dropped: reading Chromium's own
 PipeWire stream (one portal pick too) -- Chromium fixes a tiled DMA-BUF modifier VA can't import,
 and the GL read-back pinned a CPU core.
@@ -329,10 +330,13 @@ There are no automated tests. After a change, check what it touches:
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `GPU (Native: AMF, amf…)`. The `[native-share] sent …` lines (DevTools console, and the app's log,
   `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero
-  (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for).
+  (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for;
+  `native keys [<KB> rate|req|other]`: the helper's keyframes and why), and an `estimate fell` line
+  marks a collapse of Chromium's estimate with the keyframe before it.
   While watching, `[native-share] incoming <codec> <size>: decoder …, GPU|CPU` names the decoder of
   each incoming video (once, and again if it changes); Chromium only names it while the page
-  captures (the mic in a voice channel). A window share, VP8, or
+  captures (the mic in a voice channel). Every 10 s `[native-share] watching …` gives what the viewer
+  got: fps, dropped, freezes, jitter buffer, keys, pli, lost, nack, kbps. A window share, VP8, or
   the setting off must behave exactly as before.
 - **Native screen share (Linux Wayland, VA-API)**: the switch is usable only when the startup
   probe passes (`[native-share] probe` in the log); otherwise it's greyed out with the reason, and

@@ -179,6 +179,15 @@ fn fit(source: (u32, u32), max: (u32, u32)) -> (u32, u32) {
 /// Writes an integer property whichever integer type the element declares it with
 /// (AMF's `gop-size` is signed on H.264 and unsigned on AV1), clamped to its range (VA's
 /// `key-int-max` stops at 1024). Skips a missing or read-only property rather than panicking.
+/// The target bitrate: AMF's peak follows it (`max-bitrate`); VA (CBR, no such property) is
+/// set a little under it, so its overshoot still fits Chromium's pacer
+fn set_rate(encoder: &gst::Element, kbps: u32) -> Result<()> {
+    let kbps = kbps.max(100);
+    let _ = set_int(encoder, "max-bitrate", kbps);
+    let va = encoder.factory().is_some_and(|f| f.name().starts_with("va"));
+    set_int(encoder, "bitrate", if va { kbps * 85 / 100 } else { kbps })
+}
+
 fn set_int(element: &gst::Element, name: &str, value: u32) -> Result<()> {
     let pspec = element.find_property(name).ok_or_else(|| anyhow!("{name}: no such property"))?;
     if !pspec.flags().contains(gst::glib::ParamFlags::WRITABLE) {
@@ -398,18 +407,17 @@ fn build(start: &Start, out: &Out, capture: Capture) -> Result<Share> {
     let encoder = encoder(start.codec)?;
     let encoder_name = encoder.factory().map(|f| f.name().to_string()).unwrap_or_default();
     let amf = encoder_name.starts_with("amf");
-    set_int(&encoder, "bitrate", start.kbps)?;
     // AMF: latency-constrained VBR capped at the target, its real-time mode, measured with the
     // smallest keyframes (248 KB against 408 KB by default at 1080p) and a gentle first frame.
-    // VA: VBR peaking at the target; its default CBR pads a still screen with filler up to the
-    // target (27 Mbps measured for a static desktop)
+    // VA: CBR at 85% of the target (`set_rate`). Its VBR ignored the target at 4K: asked for
+    // 21 Mbps it sent 28-39 Mbps of video, over what Chromium's pacer sends (~1.1x an estimate
+    // capped by Sharkord's bitrate setting), and the queue reached 850 ms and froze viewers.
+    // CBR's peaks stay near the target, and on a still screen it pads with filler up to it,
+    // which also keeps Chromium's estimate from collapsing when motion starts again
     if encoder.find_property("rate-control").is_some() {
-        encoder.set_property_from_str("rate-control", if amf { "lcvbr" } else { "vbr" });
+        encoder.set_property_from_str("rate-control", if amf { "lcvbr" } else { "cbr" });
     }
-    if !amf {
-        let _ = set_int(&encoder, "target-percentage", 100);
-    }
-    let _ = set_int(&encoder, "max-bitrate", start.kbps);
+    set_rate(&encoder, start.kbps)?;
     let gop = if amf { "gop-size" } else { "key-int-max" };
     if let Err(e) = set_int(&encoder, gop, key_interval) {
         event(out, json!({ "type": "warning", "message": format!("keyframe interval not set: {e}") }));
@@ -514,8 +522,7 @@ impl Share {
     }
 
     fn bitrate(&self, kbps: u32) -> Result<()> {
-        let _ = set_int(&self.encoder, "max-bitrate", kbps.max(100));
-        set_int(&self.encoder, "bitrate", kbps.max(100))
+        set_rate(&self.encoder, kbps)
     }
 }
 
