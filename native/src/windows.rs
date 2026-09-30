@@ -42,6 +42,9 @@ struct Monitor {
     output: u32,
     label: String,
     primary: bool,
+    /// Quarter turns clockwise that make the duplicated desktop upright: DXGI hands a rotated
+    /// monitor over in its panel's orientation (a portrait 1080x1920 as 1920x1080)
+    rotate: u32,
 }
 
 fn wide(s: &[u16]) -> String {
@@ -88,6 +91,7 @@ fn friendly_names() -> Vec<(String, String)> {
 
 /// Every monitor on the desktop, by adapter.
 fn monitors() -> Result<Vec<Monitor>> {
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270};
     use windows::Win32::Graphics::Dxgi::*;
     let names = friendly_names();
     let mut found = Vec::new();
@@ -110,6 +114,12 @@ fn monitors() -> Result<Vec<Monitor>> {
                         label: names.iter().find(|(g, _)| *g == gdi).map_or(gdi.clone(), |(_, n)| n.clone()),
                         // The primary monitor is the one at the desktop's origin
                         primary: r.left == 0 && r.top == 0,
+                        rotate: match desc.Rotation {
+                            DXGI_MODE_ROTATION_ROTATE90 => 1,
+                            DXGI_MODE_ROTATION_ROTATE180 => 2,
+                            DXGI_MODE_ROTATION_ROTATE270 => 3,
+                            _ => 0,
+                        },
                     });
                 }
                 o += 1;
@@ -258,10 +268,10 @@ fn source(graph: *mut ff::AVFilterGraph, frames: Option<*mut ff::AVBufferRef>, s
     }
 }
 
-/// The conversion to the encoder's input: NV12 at `out`, BT.709 (our `scale_d3d11` patch), mapped
-/// into Quick Sync's frames for QSV.
-fn to_encoder(api: Api, out: (u32, u32)) -> Vec<(&'static str, String)> {
-    let mut chain = vec![("scale_d3d11", format!("width={}:height={}:format=nv12", out.0, out.1))];
+/// The conversion to the encoder's input: NV12 at `out`, BT.709 and turned `rotate` quarter turns
+/// (our `scale_d3d11` patch), mapped into Quick Sync's frames for QSV.
+fn to_encoder(api: Api, out: (u32, u32), rotate: u32) -> Vec<(&'static str, String)> {
+    let mut chain = vec![("scale_d3d11", format!("width={}:height={}:format=nv12:rotate={rotate}", out.0, out.1))];
     if api == Api::Qsv {
         chain.push(("hwmap", "derive_device=qsv".to_owned()));
     }
@@ -271,7 +281,7 @@ fn to_encoder(api: Api, out: (u32, u32)) -> Vec<(&'static str, String)> {
 /// A converter from BGRA pictures in memory: the probe's and the tests' input.
 fn memory_converter(dev: &Device, size: (u32, u32)) -> Result<Graph> {
     let mut chain = vec![("hwupload", String::new())];
-    chain.extend(to_encoder(dev.api, size));
+    chain.extend(to_encoder(dev.api, size, 0));
     Graph::new(dev, |g| source(g, None, ff::AVPixelFormat::AV_PIX_FMT_BGRA, size), &chain)
 }
 
@@ -385,19 +395,21 @@ fn capture(dev: &Device, m: &Monitor, fps: u32, max: (u32, u32), shared: &Shared
             continue;
         }
         let size = frame.size();
+        // The desktop as it is seen: a portrait monitor's picture turned upright
+        let upright = if m.rotate % 2 == 1 { (size.1, size.0) } else { size };
         let converted = (|| -> Result<Frame> {
             if conv.as_ref().is_none_or(|c| c.1 != size) {
                 conv = None;
                 let frames = unsafe { (*frame.0).hw_frames_ctx };
-                let chain = to_encoder(dev.api, fit(size, max));
+                let chain = to_encoder(dev.api, fit(upright, max), m.rotate);
                 conv = Some((Graph::new(dev, |g| source(g, Some(frames), ff::AVPixelFormat::AV_PIX_FMT_BGRA, size), &chain)?, size));
             }
             conv.as_mut().expect("converter").0.convert(&frame)
         })()?;
         prev = Some(frame);
-        shared.put(converted, size, Some(json!({
+        shared.put(converted, upright, Some(json!({
             "type": "input", "format": "BGRA", "size": [size.0, size.1], "memory": "d3d11",
-            "adapter": m.adapter, "output": m.output,
+            "adapter": m.adapter, "output": m.output, "rotate": m.rotate * 90,
         })));
     }
     Ok(())

@@ -163,7 +163,9 @@ Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18
   now 60. A lost capture (UAC prompt, mode change, fullscreen game) is rebuilt, retried for 5 s
   while the encoder repeats the last picture. Always 8-bit BGRA (DXGI converts an HDR desktop).
 - **Conversion**: `scale_d3d11` to NV12 at the fitted size, BT.709 limited range (our patch: it set
-  no colour space, and wrote every frame into the same texture). A texture per frame: AMD refuses
+  no colour space, and wrote every frame into the same texture), turned upright for a rotated
+  monitor in the same pass (our patch's `rotate`: DXGI hands a portrait 1080x1920 over as
+  1920x1080, `ddagrab` only turns the cursor). A texture per frame: AMD refuses
   NV12 render target arrays; a fixed pool only for Quick Sync, which maps it (`hwmap`).
 - **Encoders**, one tried after the other on that adapter: `h264_amf`/`av1_amf` (Sunshine's options:
   ultra-low-latency, `vbr_latency`, one frame in flight, forced IDRs, no frame delay with FFmpeg 9's
@@ -430,7 +432,8 @@ There are no automated tests. After a change, check what it touches:
   log) names the `api` and `device`. Turn it on in Settings → Desktop Client (or the tray). Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `GPU (Native: AMF, h264_amf)`. A UAC prompt or a
-  resolution change mid-share: the picture freezes briefly and comes back. Two monitors: each one. The `[native-share] sent …` lines (DevTools console, and the app's log,
+  resolution change mid-share: the picture freezes briefly and comes back. Two monitors: each one;
+  a portrait monitor arrives upright (`input` shows `rotate`, `started` the upright size). The `[native-share] sent …` lines (DevTools console, and the app's log,
   `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero
   (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for;
   `native keys [<KB> rate|req|other]`: the helper's keyframes and why), and an `estimate fell` line

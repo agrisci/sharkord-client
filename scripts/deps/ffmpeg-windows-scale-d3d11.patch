@@ -1,8 +1,16 @@
 diff --git a/libavfilter/vf_scale_d3d11.c b/libavfilter/vf_scale_d3d11.c
-index 1203111..7f29549 100644
+index 1203111..6a2cd5b 100644
 --- a/libavfilter/vf_scale_d3d11.c
 +++ b/libavfilter/vf_scale_d3d11.c
-@@ -238,9 +238,11 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
+@@ -57,6 +57,7 @@ typedef struct ScaleD3D11Context {
+     int inputWidth, inputHeight;
+     DXGI_FORMAT input_format;
+     DXGI_FORMAT output_format;
++    int rotate;                     ///< quarter turns clockwise (0-3)
+ } ScaleD3D11Context;
+ 
+ static av_cold int scale_d3d11_init(AVFilterContext *ctx) {
+@@ -238,9 +239,11 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
  
      ///< Create output view for current texture
      ID3D11Texture2D *output_texture = (ID3D11Texture2D *)out->data[0];
@@ -16,10 +24,15 @@ index 1203111..7f29549 100644
      };
  
      hr = s->videoDevice->lpVtbl->CreateVideoProcessorOutputView(
-@@ -266,6 +268,15 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
+@@ -266,6 +269,20 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
          goto fail;
      }
  
++    ///< The picture turned in the same pass (the output size is the caller's, already turned)
++    if (s->rotate)
++        videoContext->lpVtbl->VideoProcessorSetStreamRotation(videoContext, s->processor, 0, TRUE,
++                                                              (D3D11_VIDEO_PROCESSOR_ROTATION)s->rotate);
++
 +    ///< RGB input is the desktop's full range sRGB; YUV output is BT.709, limited range
 +    if (s->output_format == DXGI_FORMAT_NV12 || s->output_format == DXGI_FORMAT_P010) {
 +        D3D11_VIDEO_PROCESSOR_COLOR_SPACE in_cs  = { .RGB_Range = 0, .YCbCr_Matrix = 1 };
@@ -32,7 +45,7 @@ index 1203111..7f29549 100644
      ///< Process the frame
      hr = videoContext->lpVtbl->VideoProcessorBlt(videoContext, s->processor, s->outputView, 0, 1, &stream);
      if (FAILED(hr)) {
-@@ -282,10 +293,14 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
+@@ -282,10 +299,14 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
      }
  
      out->data[0] = (uint8_t *)output_texture;
@@ -48,7 +61,7 @@ index 1203111..7f29549 100644
  
      ///< Clean up resources
      inputView->lpVtbl->Release(inputView);
-@@ -373,14 +388,14 @@ static int scale_d3d11_config_props(AVFilterLink *outlink)
+@@ -373,14 +394,14 @@ static int scale_d3d11_config_props(AVFilterLink *outlink)
      frames_ctx->sw_format = s->format;
      frames_ctx->width = s->width;
      frames_ctx->height = s->height;
@@ -68,3 +81,11 @@ index 1203111..7f29549 100644
  
      ret = av_hwframe_ctx_init(s->hw_frames_ctx_out);
      if (ret < 0) {
+@@ -436,6 +457,7 @@ static const AVOption scale_d3d11_options[] = {
+     { "width",  "Output video width",  OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, .flags = FLAGS },
+     { "height", "Output video height", OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, .flags = FLAGS },
+     { "format", "Output video pixel format", OFFSET(format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, INT_MIN, INT_MAX, .flags=FLAGS },
++    { "rotate", "Quarter turns clockwise (a rotated monitor's desktop duplication)", OFFSET(rotate), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 3, .flags=FLAGS },
+     { NULL }
+ };
+ 
