@@ -96,7 +96,8 @@ if (process.platform === 'linux') {
     }
   }
   const cargo = spawnSync('cargo', ['build', '--release'], {
-    cwd: path.join(ROOT, 'native'), stdio: 'inherit', env: { ...process.env, FFMPEG_DIR: DEPS },
+    cwd: path.join(ROOT, 'native'), stdio: 'inherit',
+    env: { ...process.env, FFMPEG_DIR: DEPS, PKG_CONFIG_PATH: path.join(DEPS, 'lib', 'pkgconfig') },
   })
   if (cargo.error || cargo.status !== 0) skip('cargo build failed')
   fs.rmSync(OUT, { recursive: true, force: true })

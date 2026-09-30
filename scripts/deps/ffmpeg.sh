@@ -14,8 +14,10 @@ set -euo pipefail
 FFMPEG=n8.1.3
 VULKAN_HEADERS=v1.4.364     # >= 1.4.317 for av1_vulkan
 GLSLANG=16.6.0              # scale_vulkan: its shaders compiled at build time (glslang) and run time (libglslang)
-LIBVA=2.24.1                # headers for the VA-API 1.15+ AV1 encode structs
+LIBVA=2.14.0                # the oldest supported (Ubuntu 22.04): newer headers make FFmpeg call
+                            # functions older libva lacks (vaMapBuffer2, 2.21); 2.14 has AV1 encode
 LIBDRM=libdrm-2.4.134
+PIPEWIRE=1.6.9              # its SPA headers only (see below)
 SPIRV_HEADERS=vulkan-sdk-1.4.321.0
 SPIRV_TOOLS=v2025.3
 
@@ -67,8 +69,25 @@ ninja -C "$SRC/libdrm/build" install >/dev/null
 
 fetch libva https://github.com/intel/libva.git $LIBVA
 meson setup --reconfigure "$SRC/libva/build" "$SRC/libva" --prefix="$PREFIX" --libdir=lib \
-  --buildtype=release -Dwith_x11=no -Dwith_glx=no -Dwith_wayland=no -Dwith_win32=no >/dev/null
+  --buildtype=release -Dwith_x11=no -Dwith_glx=no -Dwith_wayland=no >/dev/null
 ninja -C "$SRC/libva/build" install >/dev/null
+
+# PipeWire's SPA headers for the helper's `pipewire` crate, which needs newer ones than Ubuntu
+# 22.04's (0.3.48). SPA is header-only and what it describes crosses the process boundary in a
+# stable format, so the helper still runs with any installed PipeWire (libpipewire stays the
+# system's). `native/.cargo/config.toml` points pkg-config here.
+fetch pipewire https://gitlab.freedesktop.org/pipewire/pipewire.git $PIPEWIRE
+rm -rf "$PREFIX/include/spa-0.2" && mkdir -p "$PREFIX/include/spa-0.2" "$PREFIX/lib/pkgconfig"
+cp -r "$SRC/pipewire/spa/include/spa" "$PREFIX/include/spa-0.2/"
+cat >"$PREFIX/lib/pkgconfig/libspa-0.2.pc" <<PC
+prefix=$PREFIX
+includedir=\${prefix}/include/spa-0.2
+
+Name: libspa
+Description: Simple Plugin API (headers of PipeWire $PIPEWIRE)
+Version: $PIPEWIRE
+Cflags: -I\${includedir} -D_REENTRANT
+PC
 
 # Our patches on a clean tree: runtime bitrate changes without an IDR (Vulkan, VA-API)
 fetch ffmpeg https://git.ffmpeg.org/ffmpeg.git $FFMPEG
