@@ -1,73 +1,15 @@
-//! FFmpeg: the GPU device, the conversion of captured frames into the encoder's NV12 at the
-//! share's size, and the hardware encoder (Vulkan video, or VA-API).
-//!
-//! The settings come from an offline bench (4K60 at 21 Mbps: a still desktop, scrolling text and
-//! Big Buck Bunny, on an RX 9060 XT): an 8-frame VBV (CBR in the bench; Vulkan now runs VBR under
-//! it, see `Encoder::open`). A one-frame buffer made 60-96 KB
-//! keyframes that stayed blurry for ~0.9 s (1% low VMAF 25-29); FFmpeg's default ~1 s buffer let a
-//! still 4K screen key at 1.2 MB, which Chromium's hardware decoder path couldn't absorb (the viewer
-//! asked for a keyframe 4x/s, each one as large). 8 frames: keyframes ~370-515 KB, VMAF 95.9 on
-//! video (GStreamer's `vah264enc` CBR: 91.8), the rate on target. Vulkan and VA-API encode
-//! identically on the same GPU; Vulkan comes first because its driver is the one this app can
-//! bundle.
+//! FFmpeg on Linux: the GPU device, and the conversion of captured frames into the encoder's NV12
+//! at the share's size (the encoder is `crate::ffmpeg`'s). Vulkan and VA-API encode identically on
+//! the same GPU; Vulkan comes first because its driver is the one this app can bundle.
 
-use std::ffi::{CStr, CString, c_int};
+use std::ffi::c_int;
 use std::ptr;
 
 use anyhow::{Result, anyhow, bail};
 use ffmpeg_sys_next as ff;
 
-use crate::Codec;
-
-/// An FFmpeg error code as a message.
-fn averr(code: c_int) -> String {
-    let mut buf = [0 as std::ffi::c_char; 128];
-    unsafe { ff::av_strerror(code, buf.as_mut_ptr(), buf.len()) };
-    unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
-}
-
-fn check(code: c_int, what: &str) -> Result<c_int> {
-    if code < 0 { Err(anyhow!("{what}: {}", averr(code))) } else { Ok(code) }
-}
-
-fn cstr(s: &str) -> CString {
-    CString::new(s).expect("no NUL in FFmpeg strings")
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Api {
-    Vulkan,
-    Vaapi,
-}
-
-impl Api {
-    pub fn name(self) -> &'static str {
-        match self {
-            Api::Vulkan => "vulkan",
-            Api::Vaapi => "vaapi",
-        }
-    }
-}
-
-/// An owned `AVBufferRef` (devices and frame pools).
-pub struct BufRef(*mut ff::AVBufferRef);
-
-unsafe impl Send for BufRef {}
-
-impl BufRef {
-    pub fn as_ptr(&self) -> *mut ff::AVBufferRef {
-        self.0
-    }
-    fn new_ref(&self) -> *mut ff::AVBufferRef {
-        unsafe { ff::av_buffer_ref(self.0) }
-    }
-}
-
-impl Drop for BufRef {
-    fn drop(&mut self) {
-        unsafe { ff::av_buffer_unref(&mut self.0) }
-    }
-}
+pub use crate::ffmpeg::{Api, BufRef, Frame};
+use crate::ffmpeg::{check, cstr};
 
 /// The GPU: a DRM device on a render node (what captured DMA-BUFs belong to), and the encode API
 /// derived from it, so both are the same GPU.
@@ -90,6 +32,8 @@ impl Device {
         let kind = match api {
             Api::Vulkan => ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN,
             Api::Vaapi => ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            // The shared `Api` also lists Windows' encoders
+            _ => bail!("{} is not a Linux encode API", api.name()),
         };
         let mut hw = ptr::null_mut();
         check(unsafe { ff::av_hwdevice_ctx_create_derived(&mut hw, kind, drm.as_ptr(), 0) }, &format!("{} device", api.name()))?;
@@ -171,12 +115,16 @@ impl Device {
                         .map_err(|e| anyhow!("waiting for the conversion: {e}"))?;
                 }
                 Api::Vaapi => {
-                    let va = (*ctx).hwctx as *mut ff::AVVAAPIDeviceContext;
+                    // The frame's own display: a DMA-BUF's `hwmap=derive_device=vaapi` opens another
+                    // one than ours, and a surface synced on the wrong display is invalid (VA error 6)
+                    let fc = (*(*frame.0).hw_frames_ctx).data as *mut ff::AVHWFramesContext;
+                    let va = (*(*fc).device_ctx).hwctx as *mut ff::AVVAAPIDeviceContext;
                     let r = vaSyncSurface((*va).display as *mut _, (*frame.0).data[3] as usize as u32);
                     if r != 0 {
                         bail!("waiting for the conversion: VA error {r}");
                     }
                 }
+                _ => unreachable!("a Linux device is Vulkan or VA-API"),
             }
         }
         Ok(())
@@ -189,27 +137,6 @@ impl Device {
             .unwrap_or_default();
         nodes.sort();
         nodes.into_iter().map(|n| format!("/dev/dri/{n}")).collect()
-    }
-}
-
-/// An owned `AVFrame`.
-pub struct Frame(pub *mut ff::AVFrame);
-
-unsafe impl Send for Frame {}
-
-impl Frame {
-    pub fn alloc() -> Frame {
-        Frame(unsafe { ff::av_frame_alloc() })
-    }
-    /// A new reference to the same picture (no copy).
-    pub fn share(&self) -> Frame {
-        Frame(unsafe { ff::av_frame_clone(self.0) })
-    }
-}
-
-impl Drop for Frame {
-    fn drop(&mut self) {
-        unsafe { ff::av_frame_free(&mut self.0) }
     }
 }
 
@@ -351,6 +278,7 @@ impl Convert {
                 (Api::Vulkan, Input::Memory) => format!("scale_vulkan=w={w}:h={h}:format=nv12"),
                 (Api::Vaapi, Input::Drm) => format!("hwmap=derive_device=vaapi,scale_vaapi=w={w}:h={h}:format=nv12"),
                 (Api::Vaapi, Input::Memory) => format!("scale_vaapi=w={w}:h={h}:format=nv12"),
+                _ => unreachable!("a Linux device is Vulkan or VA-API"),
             };
             // Memory input: upload first. hwupload needs its device when it is created, which a
             // parsed graph can't give it, so it is made here and the rest is parsed after it
@@ -388,12 +316,6 @@ impl Convert {
             Ok(out)
         }
     }
-
-    /// The pool the converted frames come from: the encoder allocates from its description.
-    #[cfg(test)]
-    pub fn frames(&self) -> *mut ff::AVBufferRef {
-        unsafe { ff::av_buffersink_get_hw_frames_ctx(self.sink) }
-    }
 }
 
 impl Drop for Convert {
@@ -402,144 +324,12 @@ impl Drop for Convert {
     }
 }
 
-pub struct Settings {
-    pub codec: Codec,
-    pub size: (u32, u32),
-    pub fps: u32,
-    pub kbps: u32,
-}
-
-pub struct Encoder {
-    ctx: *mut ff::AVCodecContext,
-    pkt: *mut ff::AVPacket,
-    pub name: String,
-    fps: u32,
-    vbr: bool,
-}
-
-unsafe impl Send for Encoder {}
-
-impl Encoder {
-    pub fn open(dev: &Device, frames: *mut ff::AVBufferRef, s: &Settings) -> Result<Encoder> {
-        let name = match (dev.api, s.codec) {
-            (Api::Vulkan, Codec::H264) => "h264_vulkan",
-            (Api::Vulkan, Codec::Av1) => "av1_vulkan",
-            (Api::Vaapi, Codec::H264) => "h264_vaapi",
-            (Api::Vaapi, Codec::Av1) => "av1_vaapi",
-        };
-        unsafe {
-            let codec = ff::avcodec_find_encoder_by_name(cstr(name).as_ptr());
-            if codec.is_null() {
-                bail!("{name} is not in this FFmpeg");
-            }
-            let ctx = ff::avcodec_alloc_context3(codec);
-            let me = Encoder { ctx, pkt: ff::av_packet_alloc(), name: name.to_owned(), fps: s.fps, vbr: dev.api == Api::Vulkan };
-            (*ctx).width = s.size.0 as c_int;
-            (*ctx).height = s.size.1 as c_int;
-            (*ctx).time_base = ff::AVRational { num: 1, den: s.fps as c_int };
-            (*ctx).framerate = ff::AVRational { num: s.fps as c_int, den: 1 };
-            (*ctx).pix_fmt = (*((*frames).data as *mut ff::AVHWFramesContext)).format;
-            (*ctx).sw_pix_fmt = ff::AVPixelFormat::AV_PIX_FMT_NV12;
-            // BT.709, limited range: what the scaler converts to and what the stream says
-            (*ctx).colorspace = ff::AVColorSpace::AVCOL_SPC_BT709;
-            (*ctx).color_range = ff::AVColorRange::AVCOL_RANGE_MPEG;
-            (*ctx).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT709;
-            (*ctx).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
-            (*ctx).hw_frames_ctx = ff::av_buffer_ref(frames);
-            // Keyframes only on request (a viewer joining or losing packets asks with a PLI): a
-            // scheduled one is a burst for nothing
-            (*ctx).gop_size = i16::MAX as c_int;
-            (*ctx).max_b_frames = 0;
-            me.set_rate(s.kbps);
-            let opt = |k: &str, v: &str| ff::av_opt_set((*ctx).priv_data, cstr(k).as_ptr(), cstr(v).as_ptr(), 0);
-            // Vulkan: VBR, which a still screen leaves at ~130 kbps; our FFmpeg caps its frames at the
-            // VBV (scene cuts stayed under 170 KB at 4K, the rate within 6% of the target). VA-API has
-            // no such cap and its VBR ignored the VBV (1.2 MB frames in the bench): CBR, which pads a
-            // still screen up to the target
-            opt("rc_mode", if dev.api == Api::Vaapi { "CBR" } else { "vbr" });
-            opt("idr_interval", &i32::MAX.to_string());
-            opt("async_depth", "1");
-            if s.codec == Codec::H264 {
-                // The profile Sharkord negotiates (42e01f): Constrained Baseline, CAVLC
-                opt("profile", "constrained_baseline");
-                opt("coder", if dev.api == Api::Vaapi { "cavlc" } else { "vlc" });
-            }
-            if dev.api == Api::Vulkan {
-                opt("tune", "ull");
-                opt("usage", "stream");
-                opt("content", "desktop");
-            } else if s.codec == Codec::H264 {
-                opt("sei", "0");
-            }
-            check(ff::avcodec_open2(ctx, codec, ptr::null_mut()), &format!("open {name}"))?;
-            Ok(me)
-        }
-    }
-
-    /// The target `kbps` (the peak; VBR's average a little under it), with 8 frames of it as the VBV
-    /// (see the module comment).
-    pub fn set_rate(&self, kbps: u32) {
-        let bps = i64::from(kbps.max(100)) * 1000;
-        unsafe {
-            // Vulkan's VBR ran ~6% over its average: aimed at 94%, it lands on the target (sending
-            // over Chromium's estimate queued 200-500 ms when motion resumed)
-            (*self.ctx).bit_rate = if self.vbr { bps * 94 / 100 } else { bps };
-            (*self.ctx).rc_max_rate = bps;
-            (*self.ctx).rc_buffer_size = (bps * 8 / i64::from(self.fps.max(1))) as c_int;
-        }
-    }
-
-    /// Encodes `frame` as picture number `index`; `key` forces an IDR.
-    pub fn send(&mut self, frame: &Frame, index: i64, key: bool) -> Result<()> {
-        unsafe {
-            (*frame.0).pts = index;
-            (*frame.0).pict_type = if key { ff::AVPictureType::AV_PICTURE_TYPE_I } else { ff::AVPictureType::AV_PICTURE_TYPE_NONE };
-            if key {
-                (*frame.0).flags |= ff::AV_FRAME_FLAG_KEY as c_int;
-            } else {
-                (*frame.0).flags &= !(ff::AV_FRAME_FLAG_KEY as c_int);
-            }
-            check(ff::avcodec_send_frame(self.ctx, frame.0), "encode")?;
-        }
-        Ok(())
-    }
-
-    /// The encoded access units ready so far: (data, keyframe, picture number).
-    pub fn receive(&mut self, mut each: impl FnMut(&[u8], bool, i64) -> Result<()>) -> Result<()> {
-        loop {
-            let ret = unsafe { ff::avcodec_receive_packet(self.ctx, self.pkt) };
-            if ret == ff::AVERROR(ff::EAGAIN) || ret == ff::AVERROR_EOF {
-                return Ok(());
-            }
-            check(ret, "encoded frame")?;
-            let (data, key, pts) = unsafe {
-                let p = &*self.pkt;
-                (std::slice::from_raw_parts(p.data, p.size as usize), p.flags & ff::AV_PKT_FLAG_KEY as c_int != 0, p.pts)
-            };
-            let r = each(data, key, pts);
-            unsafe { ff::av_packet_unref(self.pkt) };
-            r?;
-        }
-    }
-}
-
-impl Drop for Encoder {
-    fn drop(&mut self) {
-        unsafe {
-            ff::av_packet_free(&mut self.pkt);
-            ff::avcodec_free_context(&mut self.ctx);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Needs a GPU that encodes H.264: `cargo test -- --ignored` (SHARKORD_TEST_FRAME: a real
-    /// desktop). Encodes 3 s of a still 4K picture through the memory path on Vulkan and VA-API and
-    /// checks what the bench measured: one IDR at the start, one more only when asked, keyframes
-    /// capped by the 8-frame VBV, and a bitrate change applied without a keyframe.
+    /// Needs a GPU that encodes H.264: `cargo test -- --ignored`. The bench of `crate::ffmpeg`
+    /// through the memory path, on Vulkan and VA-API.
     #[test]
     #[ignore]
     fn encodes_4k_with_keyframes_only_on_request() {
@@ -547,48 +337,8 @@ mod tests {
             let dev = Device::render_nodes().iter().find_map(|n| Device::open(n, api).ok()).expect("a GPU");
             let (w, h) = (3840u32, 2160u32);
             let mut conv = Convert::new(&dev, Input::Memory, ff::AVPixelFormat::AV_PIX_FMT_BGR0, (w, h), (w, h)).unwrap();
-            let src = Frame::alloc();
-            unsafe {
-                (*src.0).format = ff::AVPixelFormat::AV_PIX_FMT_BGR0 as c_int;
-                (*src.0).width = w as c_int;
-                (*src.0).height = h as c_int;
-                assert!(ff::av_frame_get_buffer(src.0, 0) >= 0);
-                // A real desktop (SHARKORD_TEST_FRAME: raw 3840x2160 BGRx, e.g. a screenshot through
-                // `ffmpeg -i shot.png -pix_fmt bgr0 -f rawvideo`), else flat grey with sparse text-like dots
-                let stride = (*src.0).linesize[0] as usize;
-                let data = std::slice::from_raw_parts_mut((*src.0).data[0], stride * h as usize);
-                if let Ok(raw) = std::env::var("SHARKORD_TEST_FRAME").map(|p| std::fs::read(p).expect("test frame")) {
-                    for y in 0..h as usize {
-                        data[y * stride..y * stride + w as usize * 4].copy_from_slice(&raw[y * w as usize * 4..(y + 1) * w as usize * 4]);
-                    }
-                } else {
-                    let mut x: u32 = 1;
-                    for (i, b) in data.iter_mut().enumerate() {
-                        x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-                        *b = if (i / stride) % 24 < 12 && x & 31 == 0 { 230 } else { 40 };
-                    }
-                }
-            }
-            let first = conv.convert(&src).unwrap();
-            let mut enc = Encoder::open(&dev, conv.frames(), &Settings { codec: Codec::H264, size: (w, h), fps: 60, kbps: 21250 }).unwrap();
-            let mut keys = Vec::new();
-            let mut bytes = [0usize; 3];
-            for i in 0..180 {
-                let f = if i == 0 { first.share() } else { conv.convert(&src).unwrap() };
-                enc.send(&f, i, i == 0 || i == 120).unwrap();
-                if i == 60 {
-                    enc.set_rate(12000);   // must not key
-                }
-                enc.receive(|data, key, pts| {
-                    if key { keys.push((pts, data.len())); } else { bytes[(pts / 60) as usize] += data.len(); }
-                    Ok(())
-                }).unwrap();
-            }
-            eprintln!("{} keyframes (picture, bytes): {keys:?}; kbps per second (P frames): {:?}", enc.name, bytes.map(|b| b * 8 / 1000));
-            assert_eq!(keys.iter().map(|k| k.0).collect::<Vec<_>>(), vec![0, 120], "{}", enc.name);
-            assert!(keys.iter().all(|k| k.1 < 600 * 1024), "{}: keyframe over 600 KB", enc.name);
-            // 21.25 -> 12 Mbps at picture 60 (our FFmpeg patches): the next second follows it
-            assert!(bytes[1] * 8 / 1000 < 14000, "{}: bitrate change not applied", enc.name);
+            let pictures = crate::ffmpeg::bench::pictures(w, h);
+            crate::ffmpeg::bench::keyframes_on_request(api, |i| conv.convert(&pictures[i % 2]).unwrap());
         }
     }
 }

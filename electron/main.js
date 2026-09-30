@@ -5,7 +5,7 @@ const {
   app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, net, shell, desktopCapturer, session,
   screen, MessageChannelMain, dialog, powerMonitor,
 } = require('electron')
-const { spawn } = require('child_process')
+const { spawn, execFileSync } = require('child_process')
 const path = require('path')
 const fs   = require('fs')
 const os   = require('os')
@@ -72,27 +72,42 @@ const chromiumHwEncodeSetting = () => loadUserSettings().chromiumHwEncode ?? pro
 const chromiumHwEncodeSource  = () => process.env.SHARKORD_CHROMIUM_DEFAULTS === '1' ? 'env'
   : typeof loadUserSettings().chromiumHwEncode === 'boolean' ? 'setting' : 'default'
 const chromiumHwEncode        = () => chromiumHwEncodeSource() !== 'env' && chromiumHwEncodeSetting()
+
+// Windows: the display adapters' PCI vendors, before `ready` (Electron has no GPU info yet): one
+// registry query, ~30 ms (wmic is gone on 24H2, PowerShell's CIM takes ~1.3 s). Virtual adapters
+// (Root\..., e.g. Parsec's) don't count. null when it can't be read: then every rule stays as before
+function gpuVendors () {
+  try {
+    const out = execFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe'),
+      ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}', '/s', '/v', 'MatchingDeviceId'],
+      { encoding: 'utf8', windowsHide: true, timeout: 2000 })
+    const names = { '1002': 'amd', '10de': 'nvidia', '8086': 'intel' }
+    return [...out.matchAll(/PCI\\VEN_([0-9A-F]{4})/gi)].map(m => names[m[1].toLowerCase()] || m[1].toLowerCase())
+  } catch (e) { log('[flags] GPU vendors unknown:', e.message); return null }
+}
 {
   const enable = [], disable = []
   if (chromiumHwEncode() && process.platform === 'linux') {
     enable.push('AcceleratedVideoEncoder')   // VA-API encode (was VaapiVideoEncoder before Chromium 131)
   } else if (chromiumHwEncode() && process.platform === 'win32') {
+    const gpus = gpuVendors()
+    log('[flags] GPUs:', gpus ? gpus.join(', ') || 'none' : 'unknown')
     enable.push(
       // Media Foundation encodes Baseline H.264 in hardware, but WebRTC's usual
       // Constrained Baseline (42e01f, what Sharkord negotiates) falls back to
       // OpenH264 unless this is on (off by default in Chromium, pending rollout)
       'PlatformH264CbpEncoding',
-      // Screen capture (WGC on Win11 24H2+) copies every frame to CPU memory and
-      // is throttled to half the CPU time; at 4K that caps it near 36 fps. GPU
-      // textures keep it at 60.
-      'WebRtcAllowWgcUsingTexture',
       // AV1 hardware encoding for WebRTC (libaom otherwise)
       'WebRtcAV1HWEncode',
     )
-    // Chromium asks each encoder for its max resolutions and drops the ones that
-    // don't answer, like AMD's AV1 encoder. Without the query every hardware
-    // encoder is limited to 1080p (above that WebRTC falls back to software).
-    disable.push('ExpandMediaFoundationEncodingResolutions')
+    // Screen capture (WGC on Win11 24H2+) copies every frame to CPU memory and is throttled to
+    // half the CPU time; at 4K that caps it near 36 fps. GPU textures keep it at 60, but only with
+    // one GPU: on hybrid and multi-GPU machines an adapter change breaks capture for good
+    if (!gpus || gpus.length === 1) enable.push('WebRtcAllowWgcUsingTexture')
+    // Chromium asks each encoder for its max resolutions and drops the ones that don't answer,
+    // like AMD's AV1 encoder. Without the query every hardware encoder is limited to 1080p (above
+    // that WebRTC falls back to software), so only where an AMD GPU is
+    if (!gpus || gpus.includes('amd')) disable.push('ExpandMediaFoundationEncodingResolutions')
   }
   // Merged with the command line's, which a second appendSwitch would override; a feature
   // disabled there wins, so --disable-features=... always works for support
@@ -281,12 +296,12 @@ async function handleDisplayMediaRequest (_req, callback) {
 }
 
 // ── Native screen share (Windows; Linux on Wayland; experimental) ─────────
-//   A helper (native/, Rust: GStreamer on Windows, PipeWire + FFmpeg on Linux) captures the
-//   picked monitor (Windows) or portal pick (Linux: a screen or a window) and encodes it with
-//   the GPU; the preload swaps its frames into Sharkord's own share.
+//   A helper (native/, Rust + FFmpeg: DXGI on Windows, PipeWire on Linux) captures the picked
+//   monitor (Windows) or portal pick (Linux: a screen or a window) and encodes it with the GPU;
+//   the preload swaps its frames into Sharkord's own share.
 //   Frames go straight to the page over a MessagePort; the page sends keyframe
 //   and bitrate requests back the same way. The `nativeShare` setting turns it
-//   on (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
+//   on, by default where the encoder is tested (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
 //   Linux: the helper owns the pick. The page asks for it (native-share-pick)
 //   instead of calling Chromium's getDisplayMedia, so the portal asks once: the
 //   helper shows it, then the picker's audio step, and the page builds the
@@ -299,9 +314,10 @@ const nativeShareExe = () => ['win32', 'linux'].includes(process.platform) && [
   path.join(process.resourcesPath || '', 'native', 'bin', EXE_NAME),   // installed (scripts/stage-native.js)
   path.join(__dirname, '..', 'native', 'target', 'release', EXE_NAME),
 ].find(p => fs.existsSync(p))
-// Only where the startup probe encoded a frame (an AMD GPU on Windows; on Linux one with Vulkan
-// video or VA-API encoding -- for AMD and Intel the helper brings Mesa drivers of its own where the
-// system's lack H.264), and on Linux only on Wayland (X11 stays Chromium's)
+// Only where the startup probe encoded a frame (on Windows with AMD AMF, NVIDIA NVENC or Intel
+// Quick Sync; on Linux with Vulkan video or VA-API -- for AMD and Intel the helper brings Mesa
+// drivers of its own where the system's lack H.264), and on Linux only on Wayland (X11 stays
+// Chromium's)
 const canEncode = codec => !_nativeProbe?.missing?.length && !!_nativeProbe?.[codec]
 const nativeShareSupported = () => !!nativeShareExe() &&
   (process.platform !== 'linux' || isWayland) && (canEncode('h264') || canEncode('av1'))
@@ -324,32 +340,27 @@ function nativeShareNote () {
     ? 'The helper could not run: it needs PipeWire and VA-API\'s libraries (libpipewire, libva), which desktops normally have.'
     : 'The helper could not run; reinstalling Sharkord should fix it.'
   if (p.missing?.length && linux) return 'No GPU here encodes video (Vulkan video or VA-API). NVIDIA GPUs need NVIDIA\'s own driver, not nouveau.'
-  if (p.missing?.length) return 'The helper is incomplete; reinstalling Sharkord should fix it.'
-  if (!p.h264 && !p.av1) return linux ? null : 'Only AMD GPUs are supported.'
+  if (p.missing?.includes('encoder')) return 'No GPU here encodes H.264 or AV1 (AMD AMF, NVIDIA NVENC or Intel Quick Sync).'
+  if (p.missing?.length) return 'The helper could not run; reinstalling Sharkord should fix it.'
+  if (!p.h264 && !p.av1) return null
   if (!p.h264) return 'This GPU\'s driver can\'t encode H.264 here: H.264 shares use the browser\'s capture; AV1 shares go native.'
   return null
 }
+// On by default where the probe found an encoder tested live (AMD's AMF on Windows, Vulkan video or
+// VA-API on Linux); NVIDIA's NVENC and Intel's Quick Sync work but are off until tested (ROADMAP
+// #7, #8). A choice in Settings wins either way, and is only saved when made
+const nativeShareTested = () => ['amf', 'vulkan', 'vaapi'].includes(_nativeProbe?.api)
 const nativeShareOn = () => nativeShareSupported() &&
-  (process.env.SHARKORD_NATIVE_SHARE === '1' || !!loadUserSettings().nativeShare)
-
-// Windows: its own GStreamer only -- no GST_* from an installed GStreamer, and a registry of its
-// own. Linux: the environment as it is (the helper switches to its bundled drivers itself).
-function helperEnv () {
-  if (process.platform !== 'win32') return process.env
-  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GST(REAMER)?_/i.test(k)))
-  env.GST_REGISTRY_1_0 = path.join(app.getPath('userData'), 'gstreamer-registry.bin')
-  return env
-}
+  (process.env.SHARKORD_NATIVE_SHARE === '1' || (loadUserSettings().nativeShare ?? nativeShareTested()))
 
 // Which codecs this machine really encodes: the helper opens each encoder (`--check`). Once per
 // run; a share only goes native with a codec it found (native-share-pick / native-share-target).
-// The first run on Windows also builds the helper's plugin registry, hence the long timeout.
 function probeNativeShare () {
   const exe = nativeShareExe()
   if (!exe || (process.platform === 'linux' && !isWayland)) return
   // spawn, not execFile: its stderr goes to the log as it comes (execFile buffers it and kills
-  // the helper past 1 MB, which a chatty driver or GST_DEBUG reaches)
-  const proc = spawn(exe, ['--check'], { windowsHide: true, env: helperEnv() })
+  // the helper past 1 MB, which a chatty driver or FFmpeg's verbose logging reaches)
+  const proc = spawn(exe, ['--check'], { windowsHide: true })
   let stdout = '', finished = false
   proc.stdout.on('data', d => { stdout += d })
   logLines(proc.stderr, '[helper]')
@@ -365,10 +376,14 @@ function probeNativeShare () {
   proc.on('error', err => done(err.message))
 }
 
-// Windows: only whole screens, the helper captures monitors. Linux goes native through
-// native-share-pick instead, never through Chromium's pick.
+// Windows: a whole screen (the helper duplicates its monitor) or an app window (Electron's
+// `window:<HWND>:0`; the helper captures it with Windows.Graphics.Capture). Linux goes native
+// through native-share-pick instead, never through Chromium's pick.
 function nativeTargetFor (src) {
-  if (process.platform !== 'win32' || !src.id.startsWith('screen:') || !nativeShareOn()) return null
+  if (process.platform !== 'win32' || !nativeShareOn()) return null
+  const hwnd = /^window:(\d+):/.exec(src.id)?.[1]
+  if (hwnd) return { window: hwnd }
+  if (!src.id.startsWith('screen:')) return null
   const display = screen.getAllDisplays().find(d => String(d.id) === src.display_id)
   return display ? { label: display.label, primary: display.id === screen.getPrimaryDisplay().id } : { primary: true }
 }
@@ -387,7 +402,7 @@ function stopNativeShare () {
 // 'cancelled', or 'error' (also when it exits or is stopped first).
 function spawnHelper () {
   stopNativeShare()
-  const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: helperEnv() })
+  const proc = spawn(nativeShareExe(), [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
   logLines(proc.stderr, '[helper]')
   const { port1: port, port2 } = new MessageChannelMain()
   let settle

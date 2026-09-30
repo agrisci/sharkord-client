@@ -5,164 +5,79 @@ loads the real Sharkord web app, unchanged, and adds what a browser can't do.
 
 ## Why use it
 
-- **Hardware-encoded screen sharing up to 4K at 60 fps**, in H.264 and AV1 — smooth, sharp and
-  light on your CPU. 120 fps and more GPUs are next on the [roadmap](ROADMAP.md).
-- **Screen share with sound** — pick single apps or the whole system on Linux (your own voice is
+- **Hardware-encoded screen sharing up to 4K at 60 fps**, in H.264 and AV1: smooth, sharp and
+  light on your CPU.
+- **Screen share with sound**: pick single apps or the whole system on Linux (your own voice is
   never sent back), system audio on Windows.
 - **Switch servers on the fly**, without reinstalling or editing files.
 - **System notifications** for messages and DMs; click one to jump straight to that channel or DM.
-- **Start at login** — Sharkord opens with your computer, straight into the tray if you like.
-- **Minimize to tray** — closing the window keeps you connected; the tray icon brings it back.
-- **Nothing to break** — everything works exactly as in the browser, because it *is* Sharkord's
-  own web app.
+- **Start at login**: Sharkord opens with your computer, straight into the tray if you like.
+- **Minimize to tray**: closing the window keeps you connected; the tray icon brings it back.
+- **Nothing to break**: everything works exactly as in the browser, because it *is* Sharkord's own
+  web app.
 
-**Where this has been tested:** screen sharing at 4K 60 fps (H.264 and AV1) from Windows 11 with an
-AMD RX 9060 XT, using the native screen share, watched on a Fedora Linux laptop (AMD Ryzen 4000
-graphics); and the native screen share from that laptop (Fedora 44 KDE Plasma, Wayland) at 1080p
-60 fps in H.264. Other GPUs and setups should work but haven't been verified yet — reports welcome.
+## Download and install
 
----
+Get the latest version from the [Releases](https://github.com/agrisci/sharkord-client/releases)
+page.
 
-## How to build
+| System | Download | Install |
+|---|---|---|
+| **Windows 10 / 11** | `Sharkord-<version>-x64.exe` | Run it. The installer isn't code-signed yet, so Windows SmartScreen may warn the first time: **More info → Run anyway** |
+| **Fedora, openSUSE** | `Sharkord-<version>-x86_64.rpm` | Open it with your software center, or `sudo dnf install ./Sharkord-<version>-x86_64.rpm` |
+| **Ubuntu 22.04+, Debian 12+, Linux Mint** | `Sharkord-<version>-amd64.deb` | Open it with your software center, or `sudo apt install ./Sharkord-<version>-amd64.deb` |
+| **Any other Linux** | `Sharkord-<version>-x86_64.AppImage` | Make it executable and run it |
 
-### Prerequisites
-
-- **Node.js 22.12+** — https://nodejs.org (the current LTS; Electron 44 needs at least 22.12)
-- **For the native screen share (Windows, optional):** Rust (the version pinned in
-  `native/rust-toolchain.toml`, installed automatically by `rustup`), the
-  [GStreamer 1.28 MSVC](https://gstreamer.freedesktop.org/download/) runtime **and** development
-  files, and `pkg-config` (e.g. `choco install pkgconfiglite`). Without them the Windows installer
-  still builds, just without the native share.
-- **For the native screen share (Linux, optional):** the same Rust, plus what the helper's own
-  FFmpeg and Mesa drivers are built with (`scripts/deps/`): cmake, meson 1.4+, ninja, clang,
-  PipeWire's development files, and LLVM 15+ with libclc and the SPIR-V translator. On Ubuntu
-  22.04 `scripts/deps/ubuntu-packages.sh` installs them; anywhere with podman,
-  `scripts/deps/container.sh ffmpeg mesa` builds in an Ubuntu 22.04 container. Without them the
-  packages still build, just without the helper.
-
-### 1 — Install dependencies
-
-```sh
-npm install
-```
-
-### 2 — Build
-
-**Windows installer:**
-```sh
-npm run dist:win
-```
-
-This builds and stages the native share helper first (`npm run stage:native`, see
-`scripts/stage-native.js`). CI sets `SHARKORD_REQUIRE_NATIVE=1` so a missing helper fails the
-build instead of being skipped.
-
-**Linux packages (AppImage + deb + rpm):**
-```sh
-npm run dist:linux
-```
-
-Output goes to `release/`. Building deb/rpm on Fedora needs `libxcrypt-compat` (for
-electron-builder's bundled fpm) and `rpm-build`. This also builds the native share helper; on
-Linux it ships with its own FFmpeg (linked in) and Mesa Vulkan drivers (used where the system's
-can't encode H.264), so nothing needs installing.
-
-The build isn't tied to a server: on first launch the app asks for your server URL and
-saves it in the user's `settings.json` (in Electron's userData folder).
-
-To switch servers later, open Sharkord's **☰** menu (next to the server name) and
-choose **Change server**, or use the **Change server** button on the login screen.
-Shortcuts: `Ctrl+Shift+O`, or the tray icon → **Change Server…**. If the server
-can't be reached, the error page has **Retry** and **Change server** buttons.
-
-### Branches and releases
-
-Work happens on feature branches that are merged into `dev` through pull requests. GitHub
-Actions (`.github/workflows/build.yml`) builds the Windows installer and the Linux packages on
-native runners for every PR into `dev` or `main` and every push to `dev`, and uploads them as
-workflow artifacts; a newer push to the same PR or to `dev` cancels the run still going for the
-older commit (release runs are never cancelled). Both jobs build the native helper: Windows against GStreamer, Linux (on Ubuntu 22.04, so it runs
-on older glibc too) with its own FFmpeg and Mesa drivers, cached between runs.
-
-**Versioning:** [SemVer](https://semver.org), independent of the Sharkord server's version (the
-client loads whatever web app the server serves). While Sharkord is in alpha the client stays
-at `0.x`: **minor** for new features, **patch** for fixes.
-
-**Releasing:**
-
-1. Merge `dev` into `main` (a PR from `dev`, or `git switch main && git merge --ff-only dev && git push`).
-2. Actions → **Build** → **Run workflow** on `main`, and pick the bump: `patch`, `minor`,
-   `major`, or `none` to release the current `package.json` version.
-
-The run builds everything with the new version and, only if every build passes, commits
-`Release vX.Y.Z` to `main`, tags it, publishes the GitHub Release (downloads table + the commit
-list since the previous tag) and merges the release commit back into `dev`. For a pre-release,
-set a version like `0.2.0-beta.1` in `package.json` and release it with `none`; versions with a
-`-` are marked as pre-releases.
-
-Windows builds aren't code-signed, so SmartScreen may warn on first run (**More info → Run anyway**).
-
----
+On first launch Sharkord asks for your server's address (e.g. `https://sharkord.example.com`).
 
 ## How to use it
 
 | Feature | How |
-|---------|-----|
-| **Hardware screen sharing** | In Sharkord's Devices settings pick **H264** or **AV1** and turn **Simulcast off** (with simulcast on, and allowed by the server, Sharkord shares VP8, which most GPUs can't encode). Linux uses VA-API, Windows Media Foundation. Shares that don't use the native share are encoded on the GPU only with **Settings → Desktop Client → Hardware encoding for other shares** on (after a restart): on by default on Windows, off on Linux, where some drivers produce streams viewers can't play |
-| **Native screen share (Windows AMD, Linux Wayland; experimental)** | Turn it on in **Settings → Desktop Client → Native screen share (experimental)** or the tray. A small helper (`native/`, Rust) captures the screen and encodes it on the GPU (AMF on Windows; on Linux Vulkan video or VA-API through a bundled FFmpeg, keyframes only on request and capped in size); its frames go through Sharkord's own connection, so Sharkord itself is unchanged. The bitrate follows the network, capped by Sharkord's bitrate slider. It's used only when **H264** or **AV1** is picked in Sharkord's Devices settings without simulcast (**Simulcast off**, or disabled by the server), **and** the GPU can encode it (checked at startup; the tab lists what it found, and the switch is greyed out when it can encode neither). Every other share (VP8, VP9, auto, simulcast, a codec the GPU lacks) is the normal Chromium share. On Windows it takes whole screens (window shares stay normal) and a helper failure before the first frame falls back to the normal share; on Linux the helper shows the only portal dialog (screens or windows) and Sharkord's preview shows its frames. A helper failure mid-share ends the share on both, and later shares that session are normal ones (a suspend also ends the share, but the next one can go native again). Where it can't be used (or only for one codec) Settings says why under its switch. **Linux needs** a Wayland session and an AMD or Intel GPU that encodes video; nothing to install. Where the distro's Mesa has H.264 encoding removed (Fedora, openSUSE), the helper uses Mesa Vulkan drivers shipped with the app. NVIDIA GPUs need NVIDIA's own driver (nouveau can't encode) |
-| **Screen share picker** | Choose a screen or window, then the audio. On Wayland the system portal picks the source and the picker opens on the audio step |
-| **Share audio** | Linux: per-app or entire-system audio through PipeWire ([venmic](https://github.com/Vencord/venmic)). Windows: system loopback ("Stream With Audio") |
-| **Notifications** | Turn them on in Sharkord's **Settings → Notifications**. The taskbar flashes until you come back, and a click also brings the window back from the tray |
-| **Change server** | Sharkord's **☰** menu → **Change server**, the button on the login screen, `Ctrl+Shift+O`, or the tray menu |
-| **Tray and startup** | In the **Desktop Client** tab of Sharkord's user settings (saved with **Save Changes**, like Sharkord's own tabs), or in the tray menu: **Open at login**, **Start minimized** (a login launch starts in the tray; only with Open at login) and **Minimize to tray** (X keeps Sharkord running; quit from the tray, even during a call). Launching Sharkord again brings the running window to the front |
-| **DevTools** | `Ctrl+Shift+I` |
-| **Logs (for bug reports)** | `logs/main.log` in the settings folder (`~/.config/sharkord`, `%APPDATA%\sharkord`), and the previous run in `main.old.log`; at most 5 MB each. Written on every launch, from the menu or at login too |
+|---|---|
+| **Change server** | Sharkord's **☰** menu (next to the server name) → **Change server**, the button on the login screen, `Ctrl+Shift+O`, or the tray menu. If the server can't be reached, the error page has **Retry** and **Change server** buttons |
+| **Hardware screen sharing** | In Sharkord's **Devices** settings pick **H264** or **AV1** and turn **Simulcast off** (with simulcast on, Sharkord shares VP8, which most graphics cards can't encode) |
+| **Native screen share** | On by default with AMD graphics on Windows and with AMD and Intel on Linux (Wayland); with NVIDIA and Intel on Windows (not tested yet) turn it on in **Settings → Desktop Client → Native screen share**, or from the tray. The app then captures and encodes the screen on the graphics card itself, for a steadier frame rate and less load than the browser's share. It's used for H.264 and AV1 shares with simulcast off; any other share works as before. Under the switch, Settings shows which codecs your graphics card can encode, or why the option isn't available |
+| **Hardware encoding for other shares** | **Settings → Desktop Client**: shares that don't use the native share are encoded on the graphics card too (after a restart). On by default on Windows, off on Linux, where some drivers produce streams viewers can't play |
+| **Screen share picker** | Choose a screen or window, then the audio. On Linux the system's own screen-sharing dialog picks the source first |
+| **Share audio** | Linux: single apps or the entire system. Windows: "Stream With Audio" shares the system's sound |
+| **Notifications** | Turn them on in Sharkord's **Settings → Notifications**. The taskbar flashes until you come back, and clicking a notification opens that channel or DM, even from the tray |
+| **Tray and startup** | **Settings → Desktop Client** (confirm with **Save Changes**), or the tray menu: **Open at login**, **Start minimized** (starts in the tray at login) and **Minimize to tray** (the X keeps Sharkord running; quit from the tray). Opening Sharkord again brings the running window to the front |
 
----
+### Native screen share: what's supported
 
-## Where it's going
+| | Windows | Linux |
+|---|---|---|
+| **Graphics cards** | AMD; NVIDIA and Intel built in but not tested yet | AMD and Intel; NVIDIA with NVIDIA's own driver |
+| **Session** | any | Wayland (on X11 the normal share is used) |
+| **What you can share** | screens and windows | screens and windows |
+| **Anything to install** | no | no: the app brings what it needs, even where the distribution leaves H.264 out (Fedora, openSUSE) |
 
-[ROADMAP.md](ROADMAP.md) lists every planned improvement with a priority and status. The top of
-the list:
+While the screen is still, the native share keeps sending at close to its full bitrate, so the
+picture is sharp the moment something moves again. A still screen therefore uses as much upload
+(and download for each viewer) as a moving one.
 
-- **Never break a share, on any hardware:** a clean fallback for every capture failure, and
-  a "Copy diagnostics" button for bug reports (the log files are already written).
-- **More GPUs for the native share:** NVIDIA (NVENC) and Intel (Quick Sync) on Windows, where
-  only AMD is supported today.
-- **4K at 120 fps:** lift the remaining frame-rate limits (WebRTC's default 60 fps cap per
-  sender, capture on high-refresh screens) and test on a 120 Hz display.
-- **A safer normal path on Windows:** hardware encoding up to 4K on NVIDIA and Intel, the
-  experimental Chromium flags only where they help, and a switch to turn them off.
-- **Better quality per bit:** H.264 High profile (the server already offers it), and a faster
-  bitrate ramp at the start of a share.
-- **Linux:** the native share on NVIDIA (NVENC) and X11, which use the normal path today.
+### Tested setups
 
----
+- 4K at 60 fps (H.264 and AV1) from Windows 11 and from Fedora 44 KDE with an AMD Radeon RX 9060 XT,
+  watched on a Fedora laptop with AMD Ryzen 4000 graphics: smooth, no freezes.
+- 1080p at 60 fps from that laptop (Fedora 44 KDE, Wayland).
+- Clean Fedora 44 installs (KDE and GNOME): the app installs and runs with nothing else added.
 
-## Project structure
+Other graphics cards and setups should work but haven't been verified yet. Reports are welcome:
+please open an issue.
 
-```
-sharkord-client/
-├── package.json
-├── AGENTS.md              ← how the code is organized (for contributors and AI agents)
-├── ROADMAP.md             ← planned improvements, prioritised
-├── .github/workflows/
-│   └── build.yml          ← CI: build installers; manual run on main publishes a release
-├── electron/
-│   ├── main.js            ← window, tray, GPU flags, screen-share picker, venmic audio, native share helper
-│   ├── preload.js         ← bridge, getDisplayMedia hooks (share audio, native share), Desktop Client settings tab
-│   ├── first-launch.html  ← server URL prompt (first run / Change Server)
-│   ├── unreachable.html   ← shown when the server can't be reached
-│   ├── theme.css          ← Sharkord's design tokens for the two pages above
-│   ├── picker.html        ← screen share picker (Sharkord look)
-│   └── picker-preload.js  ← bridge for the picker window
-├── native/                ← native screen share helper (Rust; Windows: GStreamer, Linux Wayland: PipeWire + FFmpeg)
-├── scripts/
-│   ├── stage-native.js    ← builds the helper and stages it (Windows: its GStreamer subset; Linux: Mesa drivers)
-│   └── deps/              ← Linux: builds the helper's FFmpeg and Mesa drivers
-└── build/
-    ├── icon.png           ← Sharkord logo (window icon)
-    ├── icon.ico           ← Windows installer/exe icon
-    └── icons/             ← Linux icon sizes for packaging
-```
+## Reporting a problem
 
+Please attach the log files: `logs/main.log` (and `main.old.log`, the previous run) in the
+settings folder, `~/.config/sharkord` on Linux or `%APPDATA%\sharkord` on Windows. `Ctrl+Shift+I`
+opens the developer tools, if you're asked for the console.
+
+## What's next
+
+[ROADMAP.md](ROADMAP.md) lists every planned improvement. At the top: the native screen share on
+NVIDIA and Intel for Windows, 4K at 120 fps, and a "Copy diagnostics" button for bug reports.
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers building the app and releasing it;
+[AGENTS.md](AGENTS.md) explains how the code is organized.

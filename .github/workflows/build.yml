@@ -66,25 +66,22 @@ jobs:
           sudo apt-get install -y rpm
           bash scripts/deps/ubuntu-packages.sh
           echo "SHARKORD_REQUIRE_NATIVE=1" >> "$GITHUB_ENV"
-      - name: Cache the native helper's FFmpeg and Mesa
-        if: matrix.dist == 'linux'
+      # The helper's own FFmpeg (and on Linux the Mesa drivers), cached by the scripts that build them
+      - name: Cache the native helper's dependencies
         uses: actions/cache@v4
         with:
           path: build/deps
           key: native-deps-${{ runner.os }}-${{ hashFiles('scripts/deps/**') }}
 
-      # The native screen share helper (native/) builds against GStreamer MSVC and ships a subset
-      # of its runtime (scripts/stage-native.js). Rust comes from native/rust-toolchain.toml.
-      - name: Install GStreamer and pkg-config
+      # The native screen share helper (native/) links our own FFmpeg, built with MSVC from the
+      # image's MSYS2 shell (scripts/deps/ffmpeg-windows.sh, run by stage-native.js on a cache
+      # miss); bindgen uses the image's LLVM. Rust comes from native/rust-toolchain.toml.
+      - name: Install the native helper's build tools
         if: matrix.dist == 'win'
         shell: pwsh
         run: |
-          $v = '1.28.7'
-          $exe = "$env:RUNNER_TEMP\gstreamer.exe"
-          Invoke-WebRequest "https://gstreamer.freedesktop.org/data/pkg/windows/$v/msvc/gstreamer-1.0-msvc-x86_64-$v.exe" -OutFile $exe
-          Start-Process $exe -ArgumentList '/TYPE=devel', '/VERYSILENT', '/NORESTART', '/ALLUSERS' -Wait
+          C:\msys64\usr\bin\bash.exe -lc 'pacman -S --noconfirm --needed make diffutils git pkgconf'
           choco install pkgconfiglite -y --no-progress
-          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$env:ProgramFiles\gstreamer\1.0\msvc_x86_64" >> $env:GITHUB_ENV
           "SHARKORD_REQUIRE_NATIVE=1" >> $env:GITHUB_ENV
 
       - run: npm ci

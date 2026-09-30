@@ -1,0 +1,59 @@
+diff --git a/libavcodec/qsvenc.c b/libavcodec/qsvenc.c
+index c79db08..2848c98 100644
+--- a/libavcodec/qsvenc.c
++++ b/libavcodec/qsvenc.c
+@@ -2582,23 +2582,33 @@ nomem:
+ static int update_parameters(AVCodecContext *avctx, QSVEncContext *q,
+                              const AVFrame *frame)
+ {
+-    int needReset = 0, ret = 0;
++    int needReset = 0, rateOnly, ret = 0;
++    mfxExtEncoderResetOption reset_opt = {
++        .Header.BufferId  = MFX_EXTBUFF_ENCODER_RESET_OPTION,
++        .Header.BufferSz  = sizeof(reset_opt),
++        .StartNewSequence = MFX_CODINGOPTION_OFF,
++    };
++    mfxExtBuffer *ext[FF_ARRAY_ELEMS(q->extparam_internal) + 1];
++    mfxExtBuffer **ext_saved;
+ 
+     if (!frame || avctx->codec_id == AV_CODEC_ID_MJPEG)
+         return 0;
+ 
++    /* A new rate or frame size cap alone goes on in the same sequence (no IDR) */
++    rateOnly = update_max_frame_size(avctx, q);
++    rateOnly |= update_bitrate(avctx, q);
+     needReset = update_qp(avctx, q);
+-    needReset |= update_max_frame_size(avctx, q);
+     needReset |= update_gop_size(avctx, q);
+     needReset |= update_rir(avctx, q);
+     needReset |= update_low_delay_brc(avctx, q);
+     needReset |= update_frame_rate(avctx, q);
+-    needReset |= update_bitrate(avctx, q);
+     needReset |= update_pic_timing_sei(avctx, q);
+     ret = update_min_max_qp(avctx, q);
+     if (ret < 0)
+         return ret;
+     needReset |= ret;
++    rateOnly = rateOnly && !needReset;
++    needReset |= rateOnly;
+     if (!needReset)
+         return 0;
+ 
+@@ -2632,7 +2642,17 @@ static int update_parameters(AVCodecContext *avctx, QSVEncContext *q,
+     }
+ 
+     av_log(avctx, AV_LOG_DEBUG, "Parameter change, call msdk reset.\n");
++    ext_saved = q->param.ExtParam;
++    if (rateOnly && q->param.NumExtParam < FF_ARRAY_ELEMS(ext)) {
++        memcpy(ext, q->param.ExtParam, q->param.NumExtParam * sizeof(*ext));
++        ext[q->param.NumExtParam++] = (mfxExtBuffer *)&reset_opt;
++        q->param.ExtParam = ext;
++    }
+     ret = MFXVideoENCODE_Reset(q->session, &q->param);
++    if (q->param.ExtParam == ext) {
++        q->param.ExtParam = ext_saved;
++        q->param.NumExtParam--;
++    }
+     if (ret < 0)
+         return ff_qsv_print_error(avctx, ret, "Error during resetting");
+ 
