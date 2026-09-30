@@ -8,8 +8,10 @@ code is organized, its rules, and the manual test checklist; [ROADMAP.md](ROADMA
 - **Node.js 22.12+** (the current LTS; Electron 44 needs at least 22.12).
 - **For the native screen share (optional):** Rust, the version pinned in
   `native/rust-toolchain.toml` (installed automatically by `rustup`).
-  - **Windows:** the [GStreamer 1.28 MSVC](https://gstreamer.freedesktop.org/download/) runtime
-    **and** development files, and `pkg-config` (e.g. `choco install pkgconfiglite`).
+  - **Windows:** what the helper's own FFmpeg is built with (`scripts/deps/ffmpeg-windows.sh`):
+    Visual Studio 2022 (or its Build Tools) with the C++ workload, [MSYS2](https://www.msys2.org/)
+    (`winget install MSYS2.MSYS2`, then in its shell `pacman -S make diffutils git pkgconf`), LLVM
+    for bindgen (`winget install LLVM.LLVM`), and `pkg-config` (e.g. `choco install pkgconfiglite`).
   - **Linux:** what the helper's own FFmpeg and Mesa drivers are built with (`scripts/deps/`):
     cmake, meson 1.4+, ninja, clang, PipeWire's development files, and LLVM 15+ with libclc and the
     SPIR-V translator. On Ubuntu 22.04 `scripts/deps/ubuntu-packages.sh` installs them; anywhere
@@ -27,12 +29,12 @@ npm run dist:linux     # AppImage + deb + rpm               → release/
 npm run stage:native   # build and stage the native helper only (dist:* does this first)
 ```
 
-- `dist:*` builds and stages the native share helper first (`scripts/stage-native.js`); on Linux
-  that also builds its FFmpeg and Mesa drivers into `build/deps/` the first time. CI sets
+- `dist:*` builds and stages the native share helper first (`scripts/stage-native.js`); that also
+  builds its FFmpeg (and on Linux the Mesa drivers) into `build/deps/` the first time. CI sets
   `SHARKORD_REQUIRE_NATIVE=1` so a missing helper fails the build instead of being skipped.
-- For `npm start` alone, build the helper with `cd native && cargo build --release` (Linux: after
-  `scripts/deps/ffmpeg.sh` and `mesa.sh`; Windows: with `PKG_CONFIG_PATH` pointing at GStreamer's
-  `lib\pkgconfig`).
+- For `npm start` alone, build the helper with `cd native && cargo build --release`, after
+  `scripts/deps/ffmpeg.sh` and `mesa.sh` (Linux) or `C:\msys64\usr\bin\bash.exe
+  scripts/deps/ffmpeg-windows.sh` (Windows).
 - Building deb/rpm on Fedora needs `libxcrypt-compat` (for electron-builder's bundled fpm) and
   `rpm-build`.
 - The build isn't tied to a server: the server's address is asked on first launch and saved in
@@ -84,10 +86,10 @@ sharkord-client/
 │   ├── theme.css          ← Sharkord's design tokens for the two pages above
 │   ├── picker.html        ← screen share picker (Sharkord look)
 │   └── picker-preload.js  ← bridge for the picker window
-├── native/                ← native screen share helper (Rust; Windows: GStreamer, Linux Wayland: PipeWire + FFmpeg)
+├── native/                ← native screen share helper (Rust + FFmpeg; Windows: DXGI, Linux Wayland: PipeWire)
 ├── scripts/
-│   ├── stage-native.js    ← builds the helper and stages it (Windows: its GStreamer subset; Linux: Mesa drivers)
-│   └── deps/              ← Linux: builds the helper's FFmpeg and Mesa drivers
+│   ├── stage-native.js    ← builds the helper and stages it (Linux: with Mesa drivers)
+│   └── deps/              ← builds the helper's FFmpeg (and on Linux Mesa drivers)
 └── build/
     ├── icon.png           ← Sharkord logo (window icon)
     ├── icon.ico           ← Windows installer/exe icon
