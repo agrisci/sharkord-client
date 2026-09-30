@@ -12,18 +12,21 @@
 //! - stdout, records: a 16-byte header (u8 kind, u8 flags, u16 reserved, u32 LE length,
 //!   u64 LE pts in microseconds) and the payload. Kind 1 is an encoded frame (flag 1 =
 //!   keyframe), kind 2 a JSON event: on Linux `selected` / `cancelled` for the portal dialog,
-//!   then `started` with the first frame (the sizes captured and encoded; on Linux also `api` and
-//!   `device`), `input` with what reaches the converter (Windows: its caps; Linux: format, size,
+//!   then `started` with the first frame (the sizes captured and encoded, the `api` and `device`,
+//!   on Windows the `monitor`), `input` with what reaches the converter (format, size, and D3D11,
 //!   DMA-BUF or shared memory, modifier), `stream` with the first H.264 keyframe's SPS profile and
 //!   level, `stats` every 2 s (with the totals of pictures captured, encoded, repeated and
 //!   skipped), `warning`, and `error` before the process gives up -- every failure after `start`
-//!   sends one. `--check` prints `{"missing","h264","av1"}` (Linux: plus `api`, `device`, `driver`).
+//!   sends one. `--check` prints `{"missing","h264","av1","api","device"}` (Linux: plus `driver`).
 //!
-//! Windows (`gst`): GStreamer, DXGI capture into AMF (see there).
+//! Both encode with FFmpeg (`ffmpeg`), at the share's rate, keyframes only on request.
+//!
+//! Windows (`windows`): DXGI desktop duplication of the picked monitor, encoded by the GPU's own
+//! encoder (AMD AMF, NVIDIA NVENC, Intel Quick Sync).
 //!
 //! Linux (Wayland, `linux`): a PipeWire stream the helper gets from the portal (`portal`),
-//! converted and encoded on the GPU with FFmpeg (Vulkan video, else VA-API), on bundled Mesa
-//! drivers where the system's can't encode H.264. The helper shows the portal's dialog as soon as
+//! converted and encoded on the GPU (Vulkan video, else VA-API), on bundled Mesa drivers where the
+//! system's can't encode H.264. The helper shows the portal's dialog as soon as
 //! it starts, before `start`, and reports `selected` (with the source's size in logical pixels) or
 //! `cancelled`; Chromium doesn't capture at all, the page builds the share's stream (and its
 //! preview) from these frames.
@@ -36,10 +39,11 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
+mod ffmpeg;
 #[cfg(windows)]
-mod gst;
+mod windows;
 #[cfg(windows)]
-use gst as platform;
+use windows as platform;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]

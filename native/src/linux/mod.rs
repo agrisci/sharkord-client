@@ -3,24 +3,22 @@
 //!
 //! Two threads: the capture thread converts the newest frame the compositor sent into the
 //! encoder's NV12 at the share's size (the compositor's buffer goes back as soon as the GPU has
-//! read it), and the encoder thread encodes at the share's rate, repeating the last picture while
-//! the screen is still (the compositor only sends on damage). This replaces GStreamer's
-//! `videorate` + leaky queue + `keepalive-time`: frames are stamped by the encoder's own tick, so
-//! the compositor's and our clocks never meet, and a busy encoder skips a tick instead of queueing.
+//! read it), and the encoder thread (`ffmpeg::run`) encodes at the share's rate, repeating the last
+//! picture while the screen is still (the compositor only sends on damage).
 
 mod capture;
 mod encode;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
-use crate::{Codec, Out, Start, event, fit, h264_sps, write_record};
-use encode::{Api, Convert, Device, Encoder, Frame, Input, Settings};
+use crate::ffmpeg::{self, Pacing, Shared};
+use crate::{Codec, Out, Start, fit};
+use encode::{Api, Convert, Device, Frame, Input};
 
 /// What to capture: the portal's stream (the session must stay alive as long as the capture), or
 /// for development a PipeWire node of the user's own session (`SHARKORD_TEST_NODE`, no dialog).
@@ -31,28 +29,12 @@ pub struct Capture {
 
 /// Encodes one small frame with `codec`: the probe's proof that the whole path works here.
 fn can_encode(dev: &Device, codec: Codec) -> bool {
-    let attempt = || -> Result<()> {
-        // Not too small: RADV's AV1 encoder rejects 256x144
-        let size = (1280, 720);
-        let mut conv = Convert::new(dev, Input::Memory, ffmpeg_sys_next::AVPixelFormat::AV_PIX_FMT_BGR0, size, size)?;
-        let pixels = vec![64u8; 1280 * 720 * 4];
-        let frame = conv.convert(&encode::memory_frame(size, false, &pixels, 1280 * 4)?)?;
-        let frames = unsafe { (*frame.0).hw_frames_ctx };
-        let mut enc = Encoder::open(dev, frames, &Settings { codec, size, fps: 60, kbps: 2000 })?;
-        let mut got = false;
-        for i in 0..8 {
-            enc.send(&frame.share(), i, i == 0)?;
-            enc.receive(|_, key, _| {
-                got |= key;
-                Ok(())
-            })?;
-            if got {
-                return Ok(());
-            }
-        }
-        bail!("no keyframe")
-    };
-    attempt().is_ok()
+    // Not too small: RADV's AV1 encoder rejects 256x144
+    let size = (1280, 720);
+    let pixels = vec![64u8; 1280 * 720 * 4];
+    let frame = Convert::new(dev, Input::Memory, ffmpeg_sys_next::AVPixelFormat::AV_PIX_FMT_BGR0, size, size)
+        .and_then(|mut conv| conv.convert(&encode::memory_frame(size, false, &pixels, 1280 * 4)?));
+    frame.is_ok_and(|f| ffmpeg::can_encode(dev.api, codec, &f))
 }
 
 /// The first render node and API (Vulkan first; `SHARKORD_ENCODE_API=vaapi|vulkan` forces one)
@@ -134,20 +116,6 @@ pub fn prefer_bundled_driver() {
     eprintln!("bundled Vulkan drivers: {err}");
 }
 
-/// The newest converted picture, from the capture thread to the encoder thread.
-struct Latest {
-    frame: Option<Frame>,
-    fresh: bool,
-    source: (u32, u32),
-    format: Option<capture::Format>,
-}
-
-struct Shared {
-    latest: Mutex<Latest>,
-    failed: Mutex<Option<String>>,
-    captured: AtomicU64,
-}
-
 pub struct Share {
     device: Arc<Device>,
     shared: Arc<Shared>,
@@ -169,11 +137,7 @@ impl Share {
         let (device, ..) = pick().ok_or_else(|| anyhow!("no GPU here encodes H.264 or AV1 (Vulkan video or VA-API)"))?;
         let device = Arc::new(device);
         let modifiers = device.modifiers();
-        let shared = Arc::new(Shared {
-            latest: Mutex::new(Latest { frame: None, fresh: false, source: (0, 0), format: None }),
-            failed: Mutex::new(None),
-            captured: AtomicU64::new(0),
-        });
+        let shared = Arc::new(Shared::new());
         let stop = Arc::new(AtomicBool::new(false));
         let fd = portal.portal.as_ref().map(|p| p.fd.try_clone()).transpose()?;
         let capture = {
@@ -212,19 +176,20 @@ impl Share {
                         }
                     })();
                     match converted {
-                        Ok(frame) => {
-                            let mut latest = shared.latest.lock().expect("latest");
-                            *latest = Latest { frame: Some(frame), fresh: true, source: format.size, format: Some(format) };
-                            shared.captured.fetch_add(1, Ordering::Relaxed);
-                        }
+                        Ok(frame) => shared.put(frame, format.size, Some(json!({
+                            "type": "input", "format": if format.alpha { "BGRA" } else { "BGRx" },
+                            "size": [format.size.0, format.size.1],
+                            "memory": if format.modifier.is_some() { "dmabuf" } else { "shm" },
+                            "modifier": format.modifier.map(|m| format!("{m:#x}")),
+                        }))),
                         Err(e) => {
-                            *shared.failed.lock().expect("failed") = Some(format!("{e:#}"));
+                            shared.fail(&e);
                             stop.store(true, Ordering::Relaxed);
                         }
                     }
                 });
                 if let Err(e) = result {
-                    failed.failed.lock().expect("failed").get_or_insert(format!("{e:#}"));
+                    failed.fail(&e);
                 }
             })?
         };
@@ -244,108 +209,15 @@ impl Share {
 
     /// Encodes at the share's rate until `stop` (or the capture fails).
     pub fn run(&self, out: &Out, stop: &AtomicBool) -> Result<()> {
-        let fps = self.fps.max(1);
-        let period = Duration::from_nanos(1_000_000_000 / u64::from(fps));
-        let mut next = Instant::now();
-        let mut enc: Option<(Encoder, (u32, u32))> = None;
-        let mut last: Option<Frame> = None;
-        let mut kbps = self.kbps.load(Ordering::Relaxed);
-        let (mut tick, mut duplicated, mut dropped, mut sent) = (0i64, 0u64, 0u64, 0u64);
-        let (mut frames, mut keys, mut bytes, mut since) = (0u64, 0u64, 0u64, Instant::now());
-        let mut reported_sps = self.codec != Codec::H264;
-        let mut started = false;
-        while !stop.load(Ordering::Relaxed) && !self.stop.load(Ordering::Relaxed) {
-            if let Some(e) = self.shared.failed.lock().expect("failed").take() {
-                bail!(e);
-            }
-            let now = Instant::now();
-            if next > now {
-                std::thread::sleep(next - now);
-            } else if now - next > period {
-                // The encoder fell behind: skip the ticks instead of catching up in a burst
-                let behind = ((now - next).as_nanos() / period.as_nanos()) as u64;
-                dropped += behind;
-                tick += behind as i64;
-                next = now;
-            }
-            next += period;
-
-            let (frame, source, format) = {
-                let mut latest = self.shared.latest.lock().expect("latest");
-                if latest.fresh {
-                    latest.fresh = false;
-                    last = latest.frame.as_ref().map(Frame::share);
-                } else if last.is_some() {
-                    duplicated += 1;
-                }
-                (last.as_ref().map(Frame::share), latest.source, latest.format)
-            };
-            let Some(frame) = frame else { continue };
-            let size = unsafe { ((*frame.0).width as u32, (*frame.0).height as u32) };
-
-            // A new size (the first frame, or the source changed shape): a new encoder, keyed
-            let mut key = self.keyframe.swap(false, Ordering::Relaxed);
-            if enc.as_ref().is_none_or(|e| e.1 != size) {
-                drop(enc.take());
-                let frames = unsafe { (*frame.0).hw_frames_ctx };
-                let e = Encoder::open(&self.device, frames, &Settings { codec: self.codec, size, fps, kbps })?;
-                enc = Some((e, size));
-                key = true;
-            }
-            let (e, _) = enc.as_mut().expect("encoder");
-            let wanted = self.kbps.load(Ordering::Relaxed);
-            if wanted != kbps {
-                kbps = wanted;
-                e.set_rate(kbps);
-            }
-            let name = e.name.clone();
-            e.send(&frame, tick, key)?;
-            tick += 1;
-            sent += 1;
-            e.receive(|data, key, pts| {
-                if !started {
-                    started = true;
-                    event(out, json!({
-                        "type": "started", "encoder": name, "monitor": null,
-                        "source": [source.0, source.1], "size": [size.0, size.1], "fps": fps,
-                        "api": self.device.api.name(), "device": self.device.render_node,
-                    }));
-                    if let Some(f) = format {
-                        event(out, json!({
-                            "type": "input", "format": if f.alpha { "BGRA" } else { "BGRx" },
-                            "size": [f.size.0, f.size.1],
-                            "memory": if f.modifier.is_some() { "dmabuf" } else { "shm" },
-                            "modifier": f.modifier.map(|m| format!("{m:#x}")),
-                        }));
-                    }
-                }
-                if key && !reported_sps && let Some(sps) = h264_sps(data) {
-                    event(out, sps);
-                    reported_sps = true;
-                }
-                let pts_us = (pts.max(0) as u64) * 1_000_000 / u64::from(fps);
-                write_record(out, 1, u8::from(key), pts_us, data).map_err(|e| anyhow!("stdout closed: {e}"))?;
-                frames += 1;
-                keys += u64::from(key);
-                bytes += data.len() as u64;
-                Ok(())
-            })?;
-            let elapsed = since.elapsed();
-            if elapsed >= Duration::from_secs(2) {
-                let s = elapsed.as_secs_f64();
-                // Totals since the start: pictures captured, encoded, repeated, skipped
-                let rate = [self.shared.captured.load(Ordering::Relaxed), sent, duplicated, dropped];
-                event(out, json!({
-                    "type": "stats",
-                    "fps": (frames as f64 / s * 10.0).round() / 10.0,
-                    "kbps": (bytes as f64 * 8.0 / 1000.0 / s).round(),
-                    "keyframes": keys,
-                    "rate": rate,
-                }));
-                (frames, keys, bytes, since) = (0, 0, 0, Instant::now());
-            }
-        }
-        Ok(())
+        let pacing = Pacing {
+            api: self.device.api,
+            codec: self.codec,
+            fps: self.fps,
+            kbps: &self.kbps,
+            keyframe: &self.keyframe,
+            started: json!({ "monitor": null, "device": self.device.render_node }),
+        };
+        ffmpeg::run(&pacing, &self.shared, out, stop)
     }
 
     pub fn finish(&self) {

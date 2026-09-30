@@ -1,0 +1,18 @@
+diff --git a/libavcodec/nvenc.c b/libavcodec/nvenc.c
+index 9203fb6..d7fc00a 100644
+--- a/libavcodec/nvenc.c
++++ b/libavcodec/nvenc.c
+@@ -2849,9 +2849,11 @@ static void reconfig_encoder(AVCodecContext *avctx, const AVFrame *frame)
+             reconfig_bitrate = 1;
+         }
+ 
++        /* NVENC applies a new rate to the next frame; only a change of other parameters needs a
++         * reset and an IDR */
+         if (reconfig_bitrate) {
+-            params.resetEncoder = 1;
+-            params.forceIDR = 1;
++            params.resetEncoder = reconfig_dar;
++            params.forceIDR = reconfig_dar;
+ 
+             needs_encode_config = 1;
+             needs_reconfig = 1;

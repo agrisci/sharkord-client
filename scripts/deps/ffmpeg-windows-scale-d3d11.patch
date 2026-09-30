@@ -1,0 +1,50 @@
+diff --git a/libavfilter/vf_scale_d3d11.c b/libavfilter/vf_scale_d3d11.c
+index 1203111..e251f8d 100644
+--- a/libavfilter/vf_scale_d3d11.c
++++ b/libavfilter/vf_scale_d3d11.c
+@@ -238,9 +238,11 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
+ 
+     ///< Create output view for current texture
+     ID3D11Texture2D *output_texture = (ID3D11Texture2D *)out->data[0];
++    /* The output pool is one texture array: each frame is a slice of it */
++    int outIdx = (int)(intptr_t)out->data[1];
+     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = {
+-        .ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D,
+-        .Texture2D = { .MipSlice = 0 },
++        .ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2DARRAY,
++        .Texture2DArray = { .MipSlice = 0, .FirstArraySlice = outIdx, .ArraySize = 1 },
+     };
+ 
+     hr = s->videoDevice->lpVtbl->CreateVideoProcessorOutputView(
+@@ -266,6 +268,15 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
+         goto fail;
+     }
+ 
++    ///< RGB input is the desktop's full range sRGB; YUV output is BT.709, limited range
++    if (s->output_format == DXGI_FORMAT_NV12 || s->output_format == DXGI_FORMAT_P010) {
++        D3D11_VIDEO_PROCESSOR_COLOR_SPACE in_cs  = { .RGB_Range = 0, .YCbCr_Matrix = 1 };
++        D3D11_VIDEO_PROCESSOR_COLOR_SPACE out_cs = { .RGB_Range = 0, .YCbCr_Matrix = 1,
++            .Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235 };
++        videoContext->lpVtbl->VideoProcessorSetStreamColorSpace(videoContext, s->processor, 0, &in_cs);
++        videoContext->lpVtbl->VideoProcessorSetOutputColorSpace(videoContext, s->processor, &out_cs);
++    }
++
+     ///< Process the frame
+     hr = videoContext->lpVtbl->VideoProcessorBlt(videoContext, s->processor, s->outputView, 0, 1, &stream);
+     if (FAILED(hr)) {
+@@ -282,10 +293,14 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
+     }
+ 
+     out->data[0] = (uint8_t *)output_texture;
+-    out->data[1] = (uint8_t *)(intptr_t)0;
++    out->data[1] = (uint8_t *)(intptr_t)outIdx;
+     out->width = s->width;
+     out->height = s->height;
+     out->format = AV_PIX_FMT_D3D11;
++    out->colorspace = AVCOL_SPC_BT709;
++    out->color_range = AVCOL_RANGE_MPEG;
++    out->color_primaries = AVCOL_PRI_BT709;
++    out->color_trc = AVCOL_TRC_BT709;
+ 
+     ///< Clean up resources
+     inputView->lpVtbl->Release(inputView);
