@@ -193,8 +193,11 @@ impl Encoder {
                 }
                 // AMF (as Sunshine sets it up): latency-constrained VBR, real-time mode, one frame in
                 // flight, an IDR (with SPS/PPS or the sequence header) for every forced keyframe,
-                // and a floor under the quantizer that follows the rate (`set_rate`)
+                // and a floor under the quantizer that follows the rate (`set_rate`). No ceiling:
+                // FFmpeg's default qmax, 31, reaches AMF as its maximum QP, and at 5 Mbps a 4K
+                // scroll then ran at 16-20 Mbps
                 Api::Amf => {
+                    (*ctx).qmax = if h264 { 51 } else { 255 };
                     opt("usage", "ultralowlatency");
                     opt("rc", "vbr_latency");
                     opt("filler_data", "0");
