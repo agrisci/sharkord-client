@@ -57,18 +57,21 @@ jobs:
         if: env.BUMP != 'none'
         run: npm version ${{ env.BUMP }} --no-git-tag-version
 
-      # rpm tools, plus GStreamer's development files for the native helper; the plugins only make
-      # its self-check's output complete (without a GPU it runs either way, and the installed app
-      # uses the user's own GStreamer)
-      - name: Install rpm tools and GStreamer
+      # rpm tools, and what the Linux helper's own FFmpeg and bundled Mesa drivers are built with
+      # (scripts/deps). Those builds are cached by their scripts: on a miss stage-native.js runs them
+      - name: Install rpm tools and the native helper's build dependencies
         if: matrix.dist == 'linux'
         run: |
-          sudo apt-get update
-          # The image's libunwind-14-dev (LLVM) conflicts with the libunwind-dev GStreamer needs
-          sudo apt-get remove -y libunwind-14-dev
-          sudo apt-get install -y rpm pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            gstreamer1.0-plugins-bad gstreamer1.0-pipewire
+          sudo apt-get remove -y libunwind-14-dev   # the image's; it conflicts with packages below
+          sudo apt-get install -y rpm
+          scripts/deps/ubuntu-packages.sh
           echo "SHARKORD_REQUIRE_NATIVE=1" >> "$GITHUB_ENV"
+      - name: Cache the native helper's FFmpeg and Mesa
+        if: matrix.dist == 'linux'
+        uses: actions/cache@v4
+        with:
+          path: build/deps
+          key: native-deps-${{ runner.os }}-${{ hashFiles('scripts/deps/**') }}
 
       # The native screen share helper (native/) builds against GStreamer MSVC and ships a subset
       # of its runtime (scripts/stage-native.js). Rust comes from native/rust-toolchain.toml.

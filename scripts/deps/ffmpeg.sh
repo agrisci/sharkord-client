@@ -16,6 +16,8 @@ VULKAN_HEADERS=v1.4.364     # >= 1.4.317 for av1_vulkan
 GLSLANG=16.6.0              # scale_vulkan: its shaders compiled at build time (glslang) and run time (libglslang)
 LIBVA=2.24.1                # headers for the VA-API 1.15+ AV1 encode structs
 LIBDRM=libdrm-2.4.134
+SPIRV_HEADERS=vulkan-sdk-1.4.321.0
+SPIRV_TOOLS=v2025.3
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 PREFIX=${PREFIX:-$ROOT/build/deps}
@@ -34,6 +36,19 @@ fetch vulkan-headers https://github.com/KhronosGroup/Vulkan-Headers.git $VULKAN_
 cmake -S "$SRC/vulkan-headers" -B "$SRC/vulkan-headers/build" -G Ninja -DCMAKE_INSTALL_PREFIX="$PREFIX" \
   -DVULKAN_HEADERS_ENABLE_MODULE=OFF -DVULKAN_HEADERS_ENABLE_TESTS=OFF >/dev/null
 cmake --build "$SRC/vulkan-headers/build" --target install >/dev/null
+
+# SPIRV-Tools, static: FFmpeg's configure links glslang with it (glslang itself is built without its
+# optimizer, so none of it ends up in the helper), and Mesa's shader compilers need >= 2024.1
+fetch spirv-headers https://github.com/KhronosGroup/SPIRV-Headers.git $SPIRV_HEADERS
+fetch spirv-tools https://github.com/KhronosGroup/SPIRV-Tools.git $SPIRV_TOOLS
+cmake -S "$SRC/spirv-headers" -B "$SRC/spirv-headers/build" -G Ninja -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+  -DSPIRV_HEADERS_ENABLE_TESTS=OFF >/dev/null
+cmake --build "$SRC/spirv-headers/build" --target install >/dev/null
+cmake -S "$SRC/spirv-tools" -B "$SRC/spirv-tools/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$PREFIX" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DSPIRV-Headers_SOURCE_DIR="$SRC/spirv-headers" -DSPIRV_SKIP_TESTS=ON -DSPIRV_WERROR=OFF \
+  -DSPIRV_SKIP_EXECUTABLES=ON -DBUILD_SHARED_LIBS=OFF >/dev/null
+cmake --build "$SRC/spirv-tools/build" -j "$JOBS" --target install >/dev/null
 
 # glslang without SPIRV-Tools' optimizer: FFmpeg only compiles a few small compute shaders
 fetch glslang https://github.com/KhronosGroup/glslang.git $GLSLANG
@@ -77,6 +92,10 @@ grep -q 'License: LGPL version 2.1 or later' configure.log || { echo 'FFmpeg is 
 make -j "$JOBS" >/dev/null
 make install >/dev/null
 cp configure.log "$PREFIX/ffmpeg-configure.log"
+# Licences of what ends up in the helper, for scripts/stage-native.js
+mkdir -p "$PREFIX/licenses"
+cp "$SRC/ffmpeg/COPYING.LGPLv2.1" "$PREFIX/licenses/FFmpeg-LGPL-2.1.txt"
+cp "$SRC/glslang/LICENSE.txt" "$PREFIX/licenses/glslang.txt"
 # The static libraries are bundled into ffmpeg-sys-next's rlib when that crate compiles: a
 # rebuilt FFmpeg only reaches the helper once the crate is rebuilt
 [ -d "$ROOT/native/target" ] && cargo clean -q --manifest-path "$ROOT/native/Cargo.toml" --release -p ffmpeg-sys-next || true

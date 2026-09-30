@@ -10,8 +10,9 @@
 # first on their own and the drivers after, without LLVM. libdrm is built in statically (RADV needs
 # a newer one than old distros ship).
 #
-# Usage: scripts/deps/mesa.sh            (needs meson, ninja, gcc/g++, python3-mako, pyyaml,
-#                                         glslang, llvm/clang/libclc/spirv-llvm-translator dev files)
+# Usage: scripts/deps/mesa.sh            (after ffmpeg.sh, for its glslang; needs meson >= 1.4, ninja,
+#                                         gcc/g++, python3-mako, pyyaml, llvm/clang/libclc/
+#                                         spirv-llvm-translator dev files: ubuntu-packages.sh)
 #        scripts/deps/container.sh mesa  (the same inside the release build container)
 set -euo pipefail
 
@@ -28,19 +29,25 @@ common=(--buildtype=release -Db_ndebug=true -Dgallium-drivers= -Dplatforms= -Dop
   -Dtools= -Dbuild-tests=false -Dintel-rt=disabled -Dintel-elk=false -Dxmlconfig=disabled
   -Dexpat=disabled -Dvalgrind=disabled -Dlibunwind=disabled)
 
+# From ffmpeg.sh (run it first): glslangValidator (Mesa needs >= 12.2) and SPIRV-Tools >= 2024.1
+# for mesa-clc; Ubuntu 22.04's are older
+TOOLS=$SRC/mesa/tools
+export PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig:$PREFIX/share/pkgconfig:${PKG_CONFIG_PATH:-}
+export PATH=$PREFIX/bin:$TOOLS/bin:$PATH
+
 # 1. Mesa's own shader compilers (mesa_clc, vtn_bindgen2), with LLVM: build tools only
-meson setup --wipe "$SRC/mesa/build-tools" "$SRC/mesa" --prefix="$SRC/mesa/tools" "${common[@]}" \
+meson setup --wipe "$SRC/mesa/build-tools" "$SRC/mesa" --prefix="$TOOLS" "${common[@]}" \
   -Dvulkan-drivers=intel -Dllvm=enabled -Dshared-llvm=enabled -Dmesa-clc=enabled \
   -Dprecomp-compiler=enabled -Dinstall-mesa-clc=true -Dinstall-precomp-compiler=true >/dev/null
 ninja -C "$SRC/mesa/build-tools" install >/dev/null
 
 # 2. The drivers, with those tools and no LLVM or SPIRV-Tools at run time
-PATH="$SRC/mesa/tools/bin:$PATH" meson setup --wipe "$SRC/mesa/build" "$SRC/mesa" --prefix="$SRC/mesa/install" \
+meson setup --wipe "$SRC/mesa/build" "$SRC/mesa" --prefix="$SRC/mesa/install" \
   --libdir=lib "${common[@]}" -Dstrip=true -Dvulkan-drivers=amd,intel \
   -Dvideo-codecs=h264enc,h265enc,av1enc -Dllvm=disabled -Damd-use-llvm=false -Dspirv-tools=disabled \
   -Dmesa-clc=system -Dprecomp-compiler=system \
-  --force-fallback-for=libdrm -Dlibdrm:default_library=static >/dev/null
-PATH="$SRC/mesa/tools/bin:$PATH" ninja -C "$SRC/mesa/build" install >/dev/null
+  -Dallow-fallback-for=libdrm --force-fallback-for=libdrm -Dlibdrm:default_library=static >/dev/null
+ninja -C "$SRC/mesa/build" install >/dev/null
 
 # The drivers and loader manifests pointing next to themselves (paths relative to the manifest)
 for d in radeon intel; do
@@ -48,4 +55,6 @@ for d in radeon intel; do
   api=$(python3 -c "import json;print(json.load(open('$SRC/mesa/install/share/vulkan/icd.d/${d}_icd.x86_64.json'))['ICD']['api_version'])")
   printf '{"file_format_version":"1.0.1","ICD":{"library_path":"./libvulkan_%s.so","api_version":"%s"}}\n' "$d" "$api" >"$PREFIX/mesa/${d}_icd.json"
 done
+mkdir -p "$PREFIX/licenses"
+cp "$SRC/mesa/docs/license.rst" "$PREFIX/licenses/Mesa.rst"
 echo "$MESA Vulkan drivers in $PREFIX/mesa"

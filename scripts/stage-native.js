@@ -1,8 +1,11 @@
 // Stages the native screen share helper (native/) into build/native/, which electron-builder
 // ships as resources/native/.
 //
-// Linux: just the helper, in bin/. It links the system's GStreamer (its va and pipewire plugins
-// come from the distro), which the app probes at startup with `--check`.
+// Linux: the helper in bin/, statically linked with our FFmpeg (scripts/deps/ffmpeg.sh), and in
+// mesa/ the Mesa Vulkan drivers it falls back to where the system's can't encode H.264
+// (scripts/deps/mesa.sh), with their licences in LICENSES/. Both deps scripts run here when their
+// output is missing (CI fetches it prebuilt instead). The app probes the helper at startup with
+// `--check`.
 //
 // Windows: the helper with the GStreamer runtime it needs.
 // GStreamer's own layout -- bin/ (the helper and every DLL it pulls in), lib/gstreamer-1.0/ (six
@@ -11,9 +14,9 @@
 // set is the import closure of the helper, the plugins and the scanner, walked from their PE
 // import tables.
 //
-// Needs Rust and GStreamer's development files (MSVC on Windows, the distro's -dev/-devel packages
-// on Linux). Without them it warns and stages nothing, so `npm run dist:*` still builds, just
-// without the native share; SHARKORD_REQUIRE_NATIVE=1 (CI) makes that an error instead.
+// Needs Rust, and on Windows GStreamer's MSVC development files; on Linux what the deps scripts
+// list. Without them it warns and stages nothing (Linux: no Mesa fallback if only that fails), so
+// `npm run dist:*` still builds; SHARKORD_REQUIRE_NATIVE=1 (CI) makes that an error instead.
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
@@ -79,13 +82,45 @@ function peImports (file) {
 function copy (from, to) { fs.mkdirSync(path.dirname(to), { recursive: true }); fs.copyFileSync(from, to) }
 
 if (process.platform === 'linux') {
-  const cargo = spawnSync('cargo', ['build', '--release'], { cwd: path.join(ROOT, 'native'), stdio: 'inherit' })
-  if (cargo.error || cargo.status !== 0) skip('cargo build failed (are Rust and the GStreamer development packages installed?)')
+  const DEPS = path.join(ROOT, 'build', 'deps')
+  const script = name => spawnSync(path.join(ROOT, 'scripts', 'deps', name), { stdio: 'inherit' })
+  if (!fs.existsSync(path.join(DEPS, 'lib', 'libavcodec.a'))) {
+    const r = script('ffmpeg.sh')
+    if (r.error || r.status !== 0) skip('scripts/deps/ffmpeg.sh failed (see its header for what it needs)')
+  }
+  if (!fs.existsSync(path.join(DEPS, 'mesa', 'radeon_icd.json'))) {
+    const r = script('mesa.sh')
+    if (r.error || r.status !== 0) {
+      if (REQUIRE) { console.error('[stage-native] error: scripts/deps/mesa.sh failed'); process.exit(1) }
+      log('warning: scripts/deps/mesa.sh failed -- no bundled Vulkan drivers (clean Fedora/openSUSE get no H.264)')
+    }
+  }
+  const cargo = spawnSync('cargo', ['build', '--release'], {
+    cwd: path.join(ROOT, 'native'), stdio: 'inherit', env: { ...process.env, FFMPEG_DIR: DEPS },
+  })
+  if (cargo.error || cargo.status !== 0) skip('cargo build failed')
   fs.rmSync(OUT, { recursive: true, force: true })
   const exe = path.join(OUT, 'bin', 'sharkord-share')
   copy(EXE, exe)
-  // Proves it runs against the system's GStreamer: any answer will do. What this machine has is
-  // the app's business at runtime -- CI has no GPU, and the va plugin registers nothing without one
+  spawnSync('strip', ['--strip-debug', exe])   // 43 -> 10 MB; the build keeps line tables for backtraces
+  for (const f of fs.existsSync(path.join(DEPS, 'mesa')) ? fs.readdirSync(path.join(DEPS, 'mesa')) : []) {
+    copy(path.join(DEPS, 'mesa', f), path.join(OUT, 'mesa', f))
+  }
+  // Licences of what ships inside: FFmpeg (LGPL, static in the helper, with how to rebuild it),
+  // glslang (static, for FFmpeg's scale_vulkan), Mesa (the bundled drivers)
+  const lic = path.join(OUT, 'LICENSES')
+  for (const f of fs.readdirSync(path.join(DEPS, 'licenses'))) copy(path.join(DEPS, 'licenses', f), path.join(lic, f))
+  const ffmpeg = fs.readFileSync(path.join(ROOT, 'scripts', 'deps', 'ffmpeg.sh'), 'utf8').match(/^FFMPEG=(\S+)/m)?.[1]
+  fs.writeFileSync(path.join(lic, 'SOURCES.md'), [
+    '# Third-party code in this folder\'s helper and drivers', '',
+    `- FFmpeg ${ffmpeg} (LGPL-2.1), https://git.ffmpeg.org/ffmpeg.git, statically linked into bin/sharkord-share.`,
+    '  Configure line and patches: scripts/deps/ffmpeg.sh and scripts/deps/ffmpeg-*.patch in',
+    '  https://github.com/agrisci/sharkord-client; relink with your own FFmpeg by building native/ with FFMPEG_DIR.',
+    '- glslang (BSD-3-Clause and others, see glslang.txt), statically linked for FFmpeg\'s scale_vulkan.',
+    '- Mesa (MIT, see Mesa.rst): mesa/libvulkan_radeon.so and mesa/libvulkan_intel.so, built by scripts/deps/mesa.sh.', '',
+  ].join('\n'))
+  // Proves it runs: any answer will do. What this machine can encode is the app's business at
+  // runtime -- CI has no GPU
   const check = spawnSync(exe, ['--check'], { encoding: 'utf8' })
   try { JSON.parse(check.stdout) } catch { throw new Error(`self-check failed: ${check.stdout}${check.stderr}`) }
   log(`staged ${exe}; self-check ${check.stdout.trim()}`)

@@ -12,23 +12,21 @@
 //! - stdout, records: a 16-byte header (u8 kind, u8 flags, u16 reserved, u32 LE length,
 //!   u64 LE pts in microseconds) and the payload. Kind 1 is an encoded frame (flag 1 =
 //!   keyframe), kind 2 a JSON event: on Linux `selected` / `cancelled` for the portal dialog,
-//!   then `started` with the first frame (the sizes captured and encoded), `input` with the caps
-//!   reaching the converter (whether frames stay in GPU memory), `stream` with the first H.264
-//!   keyframe's SPS profile and level, `stats` every 2 s (with videorate's in/out/duplicate/drop
-//!   totals), `warning`, and `error` before the process gives up -- every failure after `start`
-//!   sends one.
+//!   then `started` with the first frame (the sizes captured and encoded; on Linux also `api` and
+//!   `device`), `input` with what reaches the converter (Windows: its caps; Linux: format, size,
+//!   DMA-BUF or shared memory, modifier), `stream` with the first H.264 keyframe's SPS profile and
+//!   level, `stats` every 2 s (with the totals of pictures captured, encoded, repeated and
+//!   skipped), `warning`, and `error` before the process gives up -- every failure after `start`
+//!   sends one. `--check` prints `{"missing","h264","av1"}` (Linux: plus `api`, `device`, `driver`).
 //!
-//! Windows: each part of the graph and its settings was measured on an RX 9060 XT: DXGI capture
-//! straight into `d3d11convert` and AMF with no copies, `videorate` holding the declared rate
-//! the encoder budgets against, a one-frame leaky queue so a busy encoder never holds the
-//! source back, a keyframe a minute (more on request), no B-frames, and AMF AV1's keyframe
-//! poke (it ignores force-key-unit).
+//! Windows (`gst`): GStreamer, DXGI capture into AMF (see there).
 //!
-//! Linux (Wayland): the same graph from a PipeWire stream the helper gets from the portal
-//! (`portal`), copied into VA memory and converted by `vapostproc` for a VA-API encoder. The
-//! helper shows the portal's dialog as soon as it starts, before `start`, and reports `selected`
-//! (with the source's size in logical pixels) or `cancelled`; Chromium doesn't capture at all,
-//! the page builds the share's stream (and its preview) from these frames.
+//! Linux (Wayland, `linux`): a PipeWire stream the helper gets from the portal (`portal`),
+//! converted and encoded on the GPU with FFmpeg (Vulkan video, else VA-API), on bundled Mesa
+//! drivers where the system's can't encode H.264. The helper shows the portal's dialog as soon as
+//! it starts, before `start`, and reports `selected` (with the source's size in logical pixels) or
+//! `cancelled`; Chromium doesn't capture at all, the page builds the share's stream (and its
+//! preview) from these frames.
 
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
