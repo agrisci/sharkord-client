@@ -12,9 +12,10 @@ serde_json = "1"
 # (scripts/deps/ffmpeg.sh on Linux, scripts/deps/ffmpeg-windows.sh on Windows)
 ffmpeg-sys-next = { version = "9", default-features = false, features = ["avcodec", "avfilter", "static"] }
 
-# Windows: which adapter and output drive the picked monitor (DXGI, display configuration)
+# Windows: which adapter and output drive the picked monitor (DXGI, display configuration), and
+# a picked window's monitor and title
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Devices_Display", "Win32_Graphics_Gdi"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Devices_Display", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 
 # Linux: the xdg-desktop-portal ScreenCast session (zbus is pure Rust; no tokio), its PipeWire
 # stream, and Vulkan for the DMA-BUF modifiers and fences

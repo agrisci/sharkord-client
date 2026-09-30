@@ -6,7 +6,8 @@
 //!
 //! Protocol, one share per process:
 //! - stdin, JSON lines: `{"cmd":"start","codec":"h264"|"av1","width","height","fps","kbps",
-//!   "label","primary"}` (label/primary pick the monitor on Windows), `{"cmd":"keyframe"}`,
+//!   "label","primary","window"}` (on Windows label/primary pick the monitor, or `window` an app
+//!   window by its HWND), `{"cmd":"keyframe"}`,
 //!   `{"cmd":"bitrate","kbps"}`, `{"cmd":"stop"}`.
 //!   EOF means the app is gone: stop and exit.
 //! - stdout, records: a 16-byte header (u8 kind, u8 flags, u16 reserved, u32 LE length,
@@ -86,6 +87,9 @@ struct Start {
     label: Option<String>,
     #[cfg_attr(not(windows), allow(dead_code))]
     primary: bool,
+    /// An app window instead, by its HWND (Windows)
+    #[cfg_attr(not(windows), allow(dead_code))]
+    window: Option<u64>,
 }
 
 fn parse_start(v: &Value) -> Result<Start> {
@@ -103,6 +107,7 @@ fn parse_start(v: &Value) -> Result<Start> {
         kbps: num("kbps", 4000).max(100),
         label: v.get("label").and_then(Value::as_str).map(str::to_owned),
         primary: v.get("primary").and_then(Value::as_bool).unwrap_or(true),
+        window: v.get("window").and_then(|w| w.as_u64().or_else(|| w.as_str()?.parse().ok())),
     })
 }
 

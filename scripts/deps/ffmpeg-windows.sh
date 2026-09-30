@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds the static, LGPL-only FFmpeg the Windows helper links: DXGI desktop duplication (ddagrab),
-# the D3D11 scaler, and the hardware encoders of the three GPU vendors (AMD AMF, NVIDIA NVENC,
+# Builds the static, LGPL-only FFmpeg the Windows helper links: DXGI desktop duplication (ddagrab)
+# for screens, Windows.Graphics.Capture (gfxcapture) for app windows, the D3D11 scaler, and the hardware encoders of the three GPU vendors (AMD AMF, NVIDIA NVENC,
 # Intel Quick Sync through oneVPL), no programs. Built with MSVC (Rust's MSVC target can't link
 # MinGW archives) against the static CRT, like the helper, so the helper is one self-contained exe.
 # AMF and NVENC are headers only (the drivers' DLLs load at run time); libvpl, the Quick Sync
@@ -96,12 +96,16 @@ git clean -qfdx
   --enable-avcodec --enable-avutil --enable-avfilter --enable-w32threads \
   --enable-d3d11va --enable-amf --enable-ffnvcodec --enable-nvenc --enable-libvpl \
   --enable-encoder=h264_amf,av1_amf,h264_nvenc,av1_nvenc,h264_qsv,av1_qsv \
-  --enable-filter=buffer,buffersink,format,hwmap,hwupload,ddagrab,scale_d3d11 \
+  --enable-filter=buffer,buffersink,format,hwmap,hwupload,ddagrab,gfxcapture,scale_d3d11 \
   >configure.log
 grep -q 'License: LGPL version 2.1 or later' configure.log || { echo 'FFmpeg is not LGPL-2.1 only' >&2; exit 1; }
 for e in h264_amf av1_amf h264_nvenc av1_nvenc h264_qsv av1_qsv; do
   grep -q "^$e" <(sed -n '/Enabled encoders:/,/^$/p' configure.log | tr -s ' ' '\n') ||
     { echo "configure left out $e (see $SRC/ffmpeg/configure.log)" >&2; exit 1; }
+done
+for f in ddagrab gfxcapture scale_d3d11; do
+  grep -q "^$f" <(sed -n '/Enabled filters:/,/^$/p' configure.log | tr -s ' ' '\n') ||
+    { echo "configure left out $f (see $SRC/ffmpeg/configure.log)" >&2; exit 1; }
 done
 make -j "$JOBS" >/dev/null
 make install >/dev/null

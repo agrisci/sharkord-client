@@ -1,4 +1,5 @@
-//! Windows: DXGI desktop duplication (FFmpeg's `ddagrab`) of the monitor the app picked, converted
+//! Windows: DXGI desktop duplication (FFmpeg's `ddagrab`) of the monitor the app picked, or
+//! Windows.Graphics.Capture (`gfxcapture`) of the app window it picked, converted
 //! on the GPU (`scale_d3d11`, BT.709) and encoded by the GPU's own encoder -- AMD AMF, NVIDIA NVENC
 //! or Intel Quick Sync, whichever opens on the adapter that drives that monitor (duplication only
 //! works there). No copy through memory: capture, conversion and encoder share one D3D11 device.
@@ -45,6 +46,9 @@ struct Monitor {
     /// Quarter turns clockwise that make the duplicated desktop upright: DXGI hands a rotated
     /// monitor over in its panel's orientation (a portrait 1080x1920 as 1920x1080)
     rotate: u32,
+    hmonitor: usize,
+    /// An app window on this monitor instead of the monitor itself (its HWND)
+    window: Option<u64>,
 }
 
 fn wide(s: &[u16]) -> String {
@@ -120,6 +124,8 @@ fn monitors() -> Result<Vec<Monitor>> {
                             DXGI_MODE_ROTATION_ROTATE270 => 3,
                             _ => 0,
                         },
+                        hmonitor: desc.Monitor.0 as usize,
+                        window: None,
                     });
                 }
                 o += 1;
@@ -128,6 +134,26 @@ fn monitors() -> Result<Vec<Monitor>> {
         }
     }
     Ok(found)
+}
+
+/// An app window: its monitor's adapter captures and encodes it, labelled with its title. Windows
+/// .Graphics.Capture hands it over upright, whatever the monitor's rotation.
+fn choose_window(hwnd: u64) -> Result<Monitor> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromWindow};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+    let handle = HWND(hwnd as usize as *mut _);
+    let on = unsafe { MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST) }.0 as usize;
+    let mut title = [0u16; 256];
+    let n = unsafe { GetWindowTextW(handle, &mut title) }.max(0) as usize;
+    let mut all = monitors()?;
+    let i = all.iter().position(|m| m.hmonitor == on).or(if all.is_empty() { None } else { Some(0) })
+        .ok_or_else(|| anyhow!("no monitor for the window"))?;
+    let mut m = all.swap_remove(i);
+    m.label = String::from_utf16_lossy(&title[..n]);
+    m.rotate = 0;
+    m.window = Some(hwnd);
+    Ok(m)
 }
 
 /// The monitor the app picked: by label (and primary, for two monitors of the same model), else
@@ -338,6 +364,8 @@ pub struct Share {
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     capture: Mutex<Option<JoinHandle<()>>>,
+    /// Disconnected when the capture thread ends
+    ended: Mutex<std::sync::mpsc::Receiver<()>>,
     codec: Codec,
     fps: u32,
     kbps: AtomicU32,
@@ -350,23 +378,61 @@ const REGAIN: Duration = Duration::from_secs(5);
 /// The desktop duplication of `m` on `dev`, repeats included (`ddagrab` sends its last picture again
 /// when DXGI has no new one: never blocking longer than a frame, so `stop` is seen).
 fn grab(dev: &Device, m: &Monitor, fps: u32) -> Result<Graph> {
+    // An app window: only when it changes, at most `fps` (a minimized one sends nothing, and the
+    // pull then waits: see `Share::finish`). `gfxcapture` keeps its first size: a resized window is scaled into it (pinned
+    // left, black on the right) until `capture` rebuilds it at the new size. Closed, it ends (the
+    // share with it, once the retries give up)
+    if let Some(hwnd) = m.window {
+        let args = format!("hwnd={hwnd}:max_framerate={fps}:capture_cursor=1:capture_border=0:resize_mode=scale_aspect:output_fmt=8bit");
+        return Graph::new(dev, |g| unsafe { filter(g, "gfxcapture", &args, |f| (*f).hw_device_ctx = dev.hw.new_ref()) }, &[]);
+    }
     // 8-bit BGRA even from an HDR desktop (DXGI converts): H.264/AV1 here are 8-bit SDR
     let args = format!("output_idx={}:framerate={fps}:draw_mouse=1:output_fmt=bgra:dup_frames=1", m.output);
     Graph::new(dev, |g| unsafe { filter(g, "ddagrab", &args, |f| (*f).hw_device_ctx = dev.hw.new_ref()) }, &[])
 }
 
 /// The capture thread: converts each new desktop picture for the encoder until `stop`.
+/// A window's client area (its size in whatever units: only compared), `None` while minimized.
+fn window_size(hwnd: u64) -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic};
+    let handle = HWND(hwnd as usize as *mut _);
+    let mut r = RECT::default();
+    unsafe { (!IsIconic(handle).as_bool() && GetClientRect(handle, &mut r).is_ok()).then_some((r.right - r.left, r.bottom - r.top)) }
+}
+
 fn capture(dev: &Device, m: &Monitor, fps: u32, max: (u32, u32), shared: &Shared, stop: &AtomicBool) -> Result<()> {
     let mut grabbed: Option<Graph> = None;
     let mut conv: Option<(Graph, (u32, u32))> = None;
     let mut prev: Option<Frame> = None;
     let mut lost: Option<Instant> = None;
+    // A window's size when its capture was built, and a new one with when it was first seen: the
+    // stream follows the window, rebuilt once a new size has held for 500 ms (not at each step of a
+    // drag), checked every 250 ms
+    let (mut built, mut pending, mut checked) = (None, None::<((i32, i32), Instant)>, Instant::now());
     while !stop.load(Ordering::Relaxed) {
+        if let (Some(hwnd), Some(_)) = (m.window, grabbed.as_ref())
+            && checked.elapsed() >= Duration::from_millis(250)
+        {
+            checked = Instant::now();
+            match window_size(hwnd) {
+                Some(now) if Some(now) != built => match pending {
+                    Some((size, since)) if size == now && since.elapsed() >= Duration::from_millis(500) => {
+                        eprintln!("capture: window resized, starting again at its new size");
+                        (grabbed, prev, pending) = (None, None, None);
+                    }
+                    Some((size, _)) if size == now => {}
+                    _ => pending = Some((now, Instant::now())),
+                },
+                _ => pending = None,
+            }
+        }
         let g = match grabbed.as_mut() {
             Some(g) => g,
             None => match grab(dev, m, fps) {
                 Ok(g) => {
                     lost = None;
+                    built = m.window.and_then(window_size);
                     grabbed.insert(g)
                 }
                 // Lost (a UAC prompt, a mode change, a fullscreen game): retried a while
@@ -409,7 +475,7 @@ fn capture(dev: &Device, m: &Monitor, fps: u32, max: (u32, u32), shared: &Shared
         prev = Some(frame);
         shared.put(converted, upright, Some(json!({
             "type": "input", "format": "BGRA", "size": [size.0, size.1], "memory": "d3d11",
-            "adapter": m.adapter, "output": m.output, "rotate": m.rotate * 90,
+            "adapter": m.adapter, "output": m.output, "rotate": m.rotate * 90, "window": m.window.is_some(),
         })));
     }
     Ok(())
@@ -417,17 +483,22 @@ fn capture(dev: &Device, m: &Monitor, fps: u32, max: (u32, u32), shared: &Shared
 
 impl Share {
     pub fn start(start: &Start, _out: &Out, _capture: Capture) -> Result<Share> {
-        let monitor = choose(start.label.as_deref(), start.primary)?;
+        let monitor = match start.window {
+            Some(hwnd) => choose_window(hwnd)?,
+            None => choose(start.label.as_deref(), start.primary)?,
+        };
         let (device, ..) = pick(monitor.adapter)
             .ok_or_else(|| anyhow!("{} can't encode H.264 or AV1 (AMF, NVENC or Quick Sync)", monitor.adapter_name))?;
         let device = Arc::new(device);
         let shared = Arc::new(Shared::new());
         let stop = Arc::new(AtomicBool::new(false));
+        let (ending, ended) = std::sync::mpsc::channel::<()>();
         let thread = {
             let (device, shared, stop) = (device.clone(), shared.clone(), stop.clone());
             let m = monitor.clone();
             let (fps, max) = (start.fps, (start.width, start.height));
             std::thread::Builder::new().name("capture".into()).spawn(move || {
+                let _ending = ending;
                 if let Err(e) = capture(&device, &m, fps, max, &shared, &stop) {
                     shared.fail(&e);
                 }
@@ -439,6 +510,7 @@ impl Share {
             shared,
             stop,
             capture: Mutex::new(Some(thread)),
+            ended: Mutex::new(ended),
             codec: start.codec,
             fps: start.fps,
             kbps: AtomicU32::new(start.kbps),
@@ -459,10 +531,19 @@ impl Share {
         ffmpeg::run(&pacing, &self.shared, out, stop)
     }
 
+    /// Stops the capture: waits up to 1.5 s for its thread. A minimized window sends no frames, and
+    /// FFmpeg's pull waits for one with no way to interrupt it: then the process exits without it
+    /// (the app would kill it 2 s after `stop` anyway).
     pub fn finish(&self) {
+        use std::sync::mpsc::RecvTimeoutError;
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.capture.lock().expect("capture").take() {
-            let _ = t.join();
+        let ended = self.ended.lock().expect("ended").recv_timeout(Duration::from_millis(1500));
+        match (ended, self.capture.lock().expect("capture").take()) {
+            (Err(RecvTimeoutError::Disconnected), Some(t)) => {
+                let _ = t.join();
+            }
+            (Err(RecvTimeoutError::Timeout), _) => eprintln!("capture: still waiting for a frame, exiting without it"),
+            _ => {}
         }
     }
 

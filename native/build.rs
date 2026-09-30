@@ -31,6 +31,10 @@ fn main() {
         } else if ["-lavfilter", "-lavcodec", "-lavutil"].contains(&flag) {
             continue;
         } else if windows {
+            // gfxcapture's C++ runtime: MSVC links its own (the static CRT), there is no stdc++.lib
+            if flag == "-lstdc++" {
+                continue;
+            }
             if let Some(lib) = flag.strip_prefix("-l").or_else(|| flag.strip_suffix(".lib")) {
                 println!("cargo:rustc-link-lib={lib}");
             }
