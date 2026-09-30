@@ -19,7 +19,7 @@ use anyhow::{Result, anyhow, bail};
 use ffmpeg_sys_next as ff;
 use serde_json::{Value, json};
 
-use crate::ffmpeg::{self, Api, BufRef, Frame, Pacing, Shared, check, cstr};
+use crate::ffmpeg::{self, Api, BufRef, Frame, Pacing, Shared, check as ok, cstr};
 use crate::{Codec, Out, Start, fit};
 
 /// The encode APIs, in the order they are tried (`SHARKORD_ENCODE_API=amf|nvenc|qsv` forces one).
@@ -146,7 +146,7 @@ impl Device {
     fn open(adapter: u32, api: Api) -> Result<Device> {
         let mut hw = ptr::null_mut();
         let index = cstr(&adapter.to_string());
-        check(
+        ok(
             unsafe { ff::av_hwdevice_ctx_create(&mut hw, ff::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA, index.as_ptr(), ptr::null_mut(), 0) },
             "D3D11 device",
         )?;
@@ -162,7 +162,7 @@ unsafe fn filter(graph: *mut ff::AVFilterGraph, name: &str, args: &str, setup: i
             bail!("{name} is not in this FFmpeg");
         }
         setup(f);
-        check(ff::avfilter_init_str(f, cstr(args).as_ptr()), name)?;
+        ok(ff::avfilter_init_str(f, cstr(args).as_ptr()), name)?;
         Ok(f)
     }
 }
@@ -193,15 +193,18 @@ impl Graph {
                     if *name == "hwupload" {
                         (*f).hw_device_ctx = dev.hw.new_ref();
                     }
-                    // Room for the pictures the encoder holds on to, beyond the pool's own 10
-                    (*f).extra_hw_frames = 8;
+                    // QSV maps the converted frames, which needs a fixed pool (our scale_d3d11
+                    // patch): 10 pictures, and room for those the encoder holds on to
+                    if *name == "scale_d3d11" && dev.api == Api::Qsv {
+                        (*f).extra_hw_frames = 8;
+                    }
                 })?;
-                check(ff::avfilter_link(last, 0, f, 0), name)?;
+                ok(ff::avfilter_link(last, 0, f, 0), name)?;
                 last = f;
             }
             me.sink = filter(graph, "buffersink", "", |_| {})?;
-            check(ff::avfilter_link(last, 0, me.sink, 0), "buffersink")?;
-            check(ff::avfilter_graph_config(graph, ptr::null_mut()), "filter graph")?;
+            ok(ff::avfilter_link(last, 0, me.sink, 0), "buffersink")?;
+            ok(ff::avfilter_graph_config(graph, ptr::null_mut()), "filter graph")?;
             Ok(me)
         }
     }
@@ -213,13 +216,13 @@ impl Graph {
         if r == ff::AVERROR(ff::EAGAIN) {
             return Ok(None);
         }
-        check(r, "frame")?;
+        ok(r, "frame")?;
         Ok(Some(out))
     }
 
     /// Converts one frame (a buffer source head).
     fn convert(&mut self, frame: &Frame) -> Result<Frame> {
-        unsafe { check(ff::av_buffersrc_add_frame_flags(self.head, frame.0, ff::AV_BUFFERSRC_FLAG_KEEP_REF as c_int), "convert")? };
+        unsafe { ok(ff::av_buffersrc_add_frame_flags(self.head, frame.0, ff::AV_BUFFERSRC_FLAG_KEEP_REF as c_int), "convert")? };
         self.pull()?.ok_or_else(|| anyhow!("the converter gave no frame"))
     }
 }
@@ -247,12 +250,10 @@ fn source(graph: *mut ff::AVFilterGraph, frames: Option<*mut ff::AVBufferRef>, s
         (*par).time_base = ff::AVRational { num: 1, den: 1_000_000 };
         (*par).sample_aspect_ratio = ff::AVRational { num: 1, den: 1 };
         (*par).hw_frames_ctx = frames.unwrap_or(ptr::null_mut());
-        (*par).color_space = ff::AVColorSpace::AVCOL_SPC_RGB;
-        (*par).color_range = ff::AVColorRange::AVCOL_RANGE_JPEG;
         let r = ff::av_buffersrc_parameters_set(src, par);
         ff::av_free(par as *mut _);
-        check(r, "buffer source parameters")?;
-        check(ff::avfilter_init_str(src, ptr::null()), "buffer source")?;
+        ok(r, "buffer source parameters")?;
+        ok(ff::avfilter_init_str(src, ptr::null()), "buffer source")?;
         Ok(src)
     }
 }
@@ -284,7 +285,7 @@ fn can_encode(dev: &Device, codec: Codec) -> bool {
             (*pic.0).format = ff::AVPixelFormat::AV_PIX_FMT_BGRA as c_int;
             (*pic.0).width = size.0 as c_int;
             (*pic.0).height = size.1 as c_int;
-            check(ff::av_frame_get_buffer(pic.0, 0), "frame")?;
+            ok(ff::av_frame_get_buffer(pic.0, 0), "frame")?;
             ptr::write_bytes((*pic.0).data[0], 64, (*pic.0).linesize[0] as usize * size.1 as usize);
         }
         Ok(ffmpeg::can_encode(dev.api, codec, &conv.convert(&pic)?))
@@ -467,21 +468,43 @@ impl Share {
 mod tests {
     use super::*;
 
-    /// Needs a GPU that encodes H.264: `cargo test -- --ignored`. The bench of `crate::ffmpeg`
-    /// through the upload path, on each API that opens here.
+    /// The primary monitor's picture in memory (BGRA), and the same scrolled by 120 rows: a real
+    /// desktop, where a scroll is the typical burst (random patterns don't compress under any cap).
+    fn desktop(dev: &Device) -> [Frame; 2] {
+        let mut g = grab(dev, &choose(None, true).unwrap(), 60).unwrap();
+        let hw = loop {
+            if let Some(f) = g.pull().unwrap() {
+                break f;
+            }
+        };
+        [0usize, 120].map(|shift| unsafe {
+            let sw = Frame::alloc();
+            assert!(ff::av_hwframe_transfer_data(sw.0, hw.0, 0) >= 0);
+            let (w, h) = hw.size();
+            let pic = Frame::alloc();
+            (*pic.0).format = ff::AVPixelFormat::AV_PIX_FMT_BGRA as c_int;
+            (*pic.0).width = w as c_int;
+            (*pic.0).height = h as c_int;
+            assert!(ff::av_frame_get_buffer(pic.0, 0) >= 0);
+            let (src, dst) = ((*sw.0).linesize[0] as usize, (*pic.0).linesize[0] as usize);
+            for y in 0..h as usize {
+                let sy = (y + shift) % h as usize;
+                ptr::copy_nonoverlapping((*sw.0).data[0].add(sy * src), (*pic.0).data[0].add(y * dst), w as usize * 4);
+            }
+            pic
+        })
+    }
+
+    /// Needs a GPU that encodes H.264: `cargo test -- --ignored`. The bench of `crate::ffmpeg` on
+    /// this desktop (scrolled every other frame), through the upload path, on each API that opens.
     #[test]
     #[ignore]
-    fn encodes_4k_with_keyframes_only_on_request() {
-        let (w, h) = (3840u32, 2160u32);
+    fn encodes_the_desktop_with_keyframes_only_on_request() {
         let mut ran = false;
         for api in apis() {
             let Some(dev) = (0..4).find_map(|a| Device::open(a, api).ok().filter(|d| can_encode(d, Codec::H264))) else { continue };
-            let mut conv = memory_converter(&dev, (w, h)).unwrap();
-            // The bench's pictures are BGRx; the upload takes BGRA (the same bytes)
-            let pictures = ffmpeg::bench::pictures(w, h).map(|f| {
-                unsafe { (*f.0).format = ff::AVPixelFormat::AV_PIX_FMT_BGRA as c_int };
-                f
-            });
+            let pictures = desktop(&dev);
+            let mut conv = memory_converter(&dev, pictures[0].size()).unwrap();
             ffmpeg::bench::keyframes_on_request(api, |i| conv.convert(&pictures[i % 2]).unwrap());
             ran = true;
         }

@@ -1,4 +1,9 @@
-# The Linux helper's own FFmpeg (static) and PipeWire's SPA headers, from scripts/deps/ffmpeg.sh
+# The helper's own FFmpeg (static), from scripts/deps/ffmpeg.sh (Linux, with PipeWire's SPA
+# headers) or scripts/deps/ffmpeg-windows.sh (Windows)
 [env]
 FFMPEG_DIR = { value = "../build/deps", relative = true, force = false }
 PKG_CONFIG_PATH = { value = "../build/deps/lib/pkgconfig", relative = true, force = false }
+
+# Windows: the static C runtime, as FFmpeg and libvpl are built with (/MT): one self-contained exe
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

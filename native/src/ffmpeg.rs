@@ -76,6 +76,7 @@ unsafe impl Send for BufRef {}
 unsafe impl Sync for BufRef {}
 
 impl BufRef {
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn as_ptr(&self) -> *mut ff::AVBufferRef {
         self.0
     }
@@ -188,13 +189,17 @@ impl Encoder {
                         opt("sei", "0");
                     }
                 }
-                // AMF: latency-constrained VBR under the VBV, which HRD enforcement makes the frame
-                // size cap too; real-time mode, one frame in flight, an IDR (with SPS/PPS or the
-                // sequence header) for every forced keyframe
+                // AMF (as Sunshine sets it up): latency-constrained VBR, real-time mode, one frame in
+                // flight, an IDR (with SPS/PPS or the sequence header) for every forced keyframe.
+                // Its rate control ignores the VBV, HRD and `max_au_size` on an RX 9060 XT: a mostly
+                // still screen banks the budget, and then a scroll comes out as a 1.2 MB frame (more
+                // than an IDR of the same picture). A floor under the quantizer is what caps it:
+                // QP 18 (AV1: q-index 60), near-lossless for screen content, held a 4K desktop's
+                // scroll bursts to 297 KB (AV1: 118 KB)
                 Api::Amf => {
+                    (*ctx).qmin = if h264 { 18 } else { 60 };
                     opt("usage", "ultralowlatency");
                     opt("rc", "vbr_latency");
-                    opt("enforce_hrd", "1");
                     opt("filler_data", "0");
                     opt(if h264 { "frame_skipping" } else { "skip_frame" }, "0");
                     opt("forced_idr", "1");

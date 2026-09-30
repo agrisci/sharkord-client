@@ -1,5 +1,5 @@
 diff --git a/libavfilter/vf_scale_d3d11.c b/libavfilter/vf_scale_d3d11.c
-index 1203111..e251f8d 100644
+index 1203111..7f29549 100644
 --- a/libavfilter/vf_scale_d3d11.c
 +++ b/libavfilter/vf_scale_d3d11.c
 @@ -238,9 +238,11 @@ static int scale_d3d11_filter_frame(AVFilterLink *inlink, AVFrame *in)
@@ -48,3 +48,23 @@ index 1203111..e251f8d 100644
  
      ///< Clean up resources
      inputView->lpVtbl->Release(inputView);
+@@ -373,14 +388,14 @@ static int scale_d3d11_config_props(AVFilterLink *outlink)
+     frames_ctx->sw_format = s->format;
+     frames_ctx->width = s->width;
+     frames_ctx->height = s->height;
+-    frames_ctx->initial_pool_size = 10;
+-
+-    if (ctx->extra_hw_frames > 0)
+-        frames_ctx->initial_pool_size += ctx->extra_hw_frames;
++    /* A texture per frame by default: AMD drivers refuse NV12 render target arrays (and the
++     * video encoder bind flag). A fixed pool, one texture array, only when extra frames are asked
++     * for (mapping into QSV needs one) */
++    frames_ctx->initial_pool_size = ctx->extra_hw_frames > 0 ? 10 + ctx->extra_hw_frames : 0;
+ 
+     AVD3D11VAFramesContext *frames_hwctx = frames_ctx->hwctx;
+     frames_hwctx->MiscFlags = 0;
+-    frames_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER;
++    frames_hwctx->BindFlags = D3D11_BIND_RENDER_TARGET;
+ 
+     ret = av_hwframe_ctx_init(s->hw_frames_ctx_out);
+     if (ret < 0) {

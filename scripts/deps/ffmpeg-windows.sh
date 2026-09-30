@@ -105,8 +105,6 @@ for e in h264_amf av1_amf h264_nvenc av1_nvenc h264_qsv av1_qsv; do
 done
 make -j "$JOBS" >/dev/null
 make install >/dev/null
-# MSVC's static libraries are libavcodec.a here; ffmpeg-sys-next looks for avcodec.lib
-for l in avcodec avfilter avutil; do cp "$PREFIX/lib/lib$l.a" "$PREFIX/lib/$l.lib"; done
 cp configure.log "$PREFIX/ffmpeg-configure.log"
 # Licences of what ends up in the helper, for scripts/stage-native.js
 mkdir -p "$PREFIX/licenses"
