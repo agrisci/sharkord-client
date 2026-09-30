@@ -346,8 +346,12 @@ function nativeShareNote () {
   if (!p.h264) return 'This GPU\'s driver can\'t encode H.264 here: H.264 shares use the browser\'s capture; AV1 shares go native.'
   return null
 }
+// On by default where the probe found an encoder tested live (AMD's AMF on Windows, Vulkan video or
+// VA-API on Linux); NVIDIA's NVENC and Intel's Quick Sync work but are off until tested (ROADMAP
+// #7, #8). A choice in Settings wins either way, and is only saved when made
+const nativeShareTested = () => ['amf', 'vulkan', 'vaapi'].includes(_nativeProbe?.api)
 const nativeShareOn = () => nativeShareSupported() &&
-  (process.env.SHARKORD_NATIVE_SHARE === '1' || !!loadUserSettings().nativeShare)
+  (process.env.SHARKORD_NATIVE_SHARE === '1' || (loadUserSettings().nativeShare ?? nativeShareTested()))
 
 // Which codecs this machine really encodes: the helper opens each encoder (`--check`). Once per
 // run; a share only goes native with a codec it found (native-share-pick / native-share-target).

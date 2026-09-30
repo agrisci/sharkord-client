@@ -225,10 +225,17 @@ fn main() -> Result<()> {
             Ok(_) => {}
         }
     };
+    // For testing the app's fallback: SHARKORD_TEST_FAIL=start fails the share at once, =<ms> reports
+    // an error that long after it started
+    let test_fail = std::env::var("SHARKORD_TEST_FAIL").ok();
+    if test_fail.as_deref() == Some("start") {
+        return fail(anyhow::anyhow!("SHARKORD_TEST_FAIL=start"));
+    }
     let share = match parse_start(&start).and_then(|s| platform::Share::start(&s, &out, capture)) {
         Ok(share) => share,
         Err(e) => return fail(e),
     };
+    let fail_at = test_fail.and_then(|v| v.parse::<u64>().ok()).map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
 
     let share = Arc::new(share);
     let stop = Arc::new(AtomicBool::new(false));
@@ -242,7 +249,11 @@ fn main() -> Result<()> {
         })
     };
     while !stop.load(Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(200)) {
+        if fail_at.is_some_and(|t| std::time::Instant::now() >= t) {
+            event(&out, json!({ "type": "error", "message": "SHARKORD_TEST_FAIL" }));
+            break;
+        }
+        match rx.recv_timeout(Duration::from_millis(if fail_at.is_some() { 20 } else { 200 })) {
             Ok(Command::Keyframe) => share.keyframe(),
             Ok(Command::Bitrate(kbps)) => {
                 if let Err(e) = share.bitrate(kbps) {

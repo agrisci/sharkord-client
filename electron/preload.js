@@ -687,9 +687,10 @@ const DESKTOP_OPTIONS = [
     description: 'When Sharkord opens at login, it starts in the system tray instead of showing its window.' },
   { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
-  { key: 'nativeShare',    label: 'Native screen share (experimental)',
-    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
-      (process.platform === 'linux' ? 'AMD and Intel GPUs (Vulkan video or VA-API), Wayland.' : 'AMD GPUs, whole screens.') + ' Takes effect on the next share.' },
+  { key: 'nativeShare',    label: 'Native screen share',
+    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate and sharper picture, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
+      (process.platform === 'linux' ? 'AMD and Intel GPUs (Vulkan video or VA-API), Wayland. On by default.'
+        : 'Screens and windows. On by default with AMD GPUs; NVIDIA and Intel GPUs are supported but not tested yet, turn it on to try.') + ' Takes effect on the next share.' },
   { key: 'chromiumHwEncode', label: 'Hardware encoding for other shares',
     description: 'Lets the browser encode shares that don\'t use the native share on the GPU. Turn it off if those shares look corrupted or never load for viewers. ' +
       (process.platform === 'linux' ? 'Off by default: some drivers encode incorrectly. ' : '') + 'Takes effect after restarting Sharkord.' },
