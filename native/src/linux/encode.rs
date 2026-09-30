@@ -115,7 +115,10 @@ impl Device {
                         .map_err(|e| anyhow!("waiting for the conversion: {e}"))?;
                 }
                 Api::Vaapi => {
-                    let va = (*ctx).hwctx as *mut ff::AVVAAPIDeviceContext;
+                    // The frame's own display: a DMA-BUF's `hwmap=derive_device=vaapi` opens another
+                    // one than ours, and a surface synced on the wrong display is invalid (VA error 6)
+                    let fc = (*(*frame.0).hw_frames_ctx).data as *mut ff::AVHWFramesContext;
+                    let va = (*(*fc).device_ctx).hwctx as *mut ff::AVVAAPIDeviceContext;
                     let r = vaSyncSurface((*va).display as *mut _, (*frame.0).data[3] as usize as u32);
                     if r != 0 {
                         bail!("waiting for the conversion: VA error {r}");

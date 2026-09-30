@@ -39,9 +39,10 @@ pub fn cstr(s: &str) -> CString {
     CString::new(s).expect("no NUL in FFmpeg strings")
 }
 
-/// The encode API: Linux's Vulkan video and VA-API, Windows' vendor encoders.
+/// The encode API: Linux's Vulkan video and VA-API, Windows' vendor encoders (each platform
+/// constructs only its own).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[cfg_attr(windows, allow(dead_code))]
+#[allow(dead_code)]
 pub enum Api {
     Vulkan,
     Vaapi,
@@ -163,6 +164,13 @@ impl Encoder {
             // scheduled one is a burst for nothing
             (*ctx).gop_size = i16::MAX as c_int;
             (*ctx).max_b_frames = 0;
+            if api == Api::Vulkan && s.codec == Codec::Av1 {
+                // av1_vulkan guesses its level before it knows the size (2.0: 512x288 at most) and
+                // ignores its own `level` option. Chromium's keyframe check (libgav1) enforces it:
+                // the Linux preview refused every keyframe. The level by picture size (MaxPicSize)
+                let area = u64::from(s.size.0) * u64::from(s.size.1);
+                (*ctx).level = if area <= 2_359_296 { 41 } else if area <= 8_912_896 { 51 } else { 61 };
+            }
             if matches!(api, Api::Amf | Api::Nvenc | Api::Qsv) {
                 // Each frame out as soon as it is encoded (AMF otherwise holds one back)
                 (*ctx).flags |= ff::AV_CODEC_FLAG_LOW_DELAY as c_int;

@@ -226,7 +226,9 @@ and `encode.rs` converts for the encoder (`src/ffmpeg.rs`), all with a static FF
   an **8-frame VBV** with VBR on Vulkan (a still screen costs ~130 kbps; with video the rate stays
   within 6% of the target) and CBR on VA-API (its VBR ignored the VBV), and no frame larger than that buffer (Vulkan's `maxFrameSize`, which
   FFmpeg leaves off: RADV let scene cuts in a video burst to 740-921 KB, now at most ~190 KB),
-  keyframes only on request (no GOP), no B-frames, H.264 Constrained Baseline with CAVLC, BT.709. Measured offline at 4K60 21 Mbps (still desktop, scrolling text, Big Buck
+  keyframes only on request (no GOP), no B-frames, H.264 Constrained Baseline with CAVLC, BT.709,
+  AV1's level set from the picture size (`av1_vulkan` otherwise writes 2.0, and Chromium's keyframe
+  check -- libgav1, in the preview's `VideoDecoder` -- refuses anything over 512x288). Measured offline at 4K60 21 Mbps (still desktop, scrolling text, Big Buck
   Bunny, RX 9060 XT): VMAF 95.9 on video against 91.8 for GStreamer's `vah264enc` CBR, the rate on
   target, keyframes ~370-515 KB. `vah264enc` couldn't cap frame size (`cpb-size` is inert): a still
   4K screen keyed at 1.1-1.8 MB, more than Chromium's hardware decoder path absorbs (the viewer
@@ -488,7 +490,8 @@ There are no automated tests. After a change, check what it touches:
   out with the reason, and "This GPU can hardware encode" lists H.264 / AV1. Share with H.264:
   **one** portal dialog then the audio step, the local preview moves, a viewer gets 60 fps, stats
   show `GPU (Native: Vulkan (hardware), h264_vulkan)`, and the `sent` lines show `native keys` only
-  on request (`req`) and none after a bitrate change. A still screen shows the helper's `padding`
+  on request (`req`) and none after a bitrate change. With AV1 the local preview moves too (no
+  `preview:` errors in the log). With `SHARKORD_ENCODE_API=vaapi` the share is `h264_vaapi` at 60 fps. A still screen shows the helper's `padding`
   near the rate and the estimate staying up; motion after it is at full rate at once, with the
   pacer under 250 ms. At 4K a still screen then motion: no storm of
   keyframe requests on the viewer (`watching … pli` near 0). On a clean Fedora install (no RPM
