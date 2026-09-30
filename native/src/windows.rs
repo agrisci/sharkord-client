@@ -208,6 +208,9 @@ struct Graph {
     graph: *mut ff::AVFilterGraph,
     head: *mut ff::AVFilterContext,
     sink: *mut ff::AVFilterContext,
+    /// Run the graph once per `pull`, not until a frame comes (`gfxcapture`: a minimized window
+    /// sends none, and FFmpeg would keep asking it -- the capture thread never saw `stop`)
+    poll: bool,
 }
 
 unsafe impl Send for Graph {}
@@ -221,7 +224,7 @@ impl Graph {
             if graph.is_null() {
                 bail!("filter graph");
             }
-            let mut me = Graph { graph, head: ptr::null_mut(), sink: ptr::null_mut() };
+            let mut me = Graph { graph, head: ptr::null_mut(), sink: ptr::null_mut(), poll: false };
             me.head = make_head(graph)?;
             let mut last = me.head;
             for (name, args) in chain {
@@ -245,10 +248,20 @@ impl Graph {
         }
     }
 
-    /// The next frame out of the sink.
+    /// The next frame out of the sink; when polling, `None` after one run of the graph without one.
     fn pull(&mut self) -> Result<Option<Frame>> {
         let out = Frame::alloc();
-        let r = unsafe { ff::av_buffersink_get_frame(self.sink, out.0) };
+        let r = if self.poll {
+            let flag = ff::AV_BUFFERSINK_FLAG_NO_REQUEST as c_int;
+            let mut r = unsafe { ff::av_buffersink_get_frame_flags(self.sink, out.0, flag) };
+            if r == ff::AVERROR(ff::EAGAIN) {
+                ok(unsafe { ff::avfilter_graph_request_oldest(self.graph) }, "capture")?;
+                r = unsafe { ff::av_buffersink_get_frame_flags(self.sink, out.0, flag) };
+            }
+            r
+        } else {
+            unsafe { ff::av_buffersink_get_frame(self.sink, out.0) }
+        };
         if r == ff::AVERROR(ff::EAGAIN) {
             return Ok(None);
         }
@@ -377,11 +390,14 @@ const REGAIN: Duration = Duration::from_secs(5);
 /// when DXGI has no new one: never blocking longer than a frame, so `stop` is seen).
 fn grab(dev: &Device, m: &Monitor, fps: u32) -> Result<Graph> {
     // An app window: only when it changes, at most `fps`, and never waiting more than a second (so
-    // `stop` is seen). A resized window is scaled into its first size, keeping its shape: viewers
-    // keep one picture size. Closed, it ends (the share with it, once the retries give up)
+    // `stop` is seen). `gfxcapture` keeps its first size: a resized window is scaled into it (pinned
+    // left, black on the right) until `capture` rebuilds it at the new size. Closed, it ends (the
+    // share with it, once the retries give up)
     if let Some(hwnd) = m.window {
         let args = format!("hwnd={hwnd}:max_framerate={fps}:capture_cursor=1:capture_border=0:resize_mode=scale_aspect:output_fmt=8bit");
-        return Graph::new(dev, |g| unsafe { filter(g, "gfxcapture", &args, |f| (*f).hw_device_ctx = dev.hw.new_ref()) }, &[]);
+        let mut g = Graph::new(dev, |g| unsafe { filter(g, "gfxcapture", &args, |f| (*f).hw_device_ctx = dev.hw.new_ref()) }, &[])?;
+        g.poll = true;
+        return Ok(g);
     }
     // 8-bit BGRA even from an HDR desktop (DXGI converts): H.264/AV1 here are 8-bit SDR
     let args = format!("output_idx={}:framerate={fps}:draw_mouse=1:output_fmt=bgra:dup_frames=1", m.output);
@@ -389,17 +405,47 @@ fn grab(dev: &Device, m: &Monitor, fps: u32) -> Result<Graph> {
 }
 
 /// The capture thread: converts each new desktop picture for the encoder until `stop`.
+/// A window's client area (its size in whatever units: only compared), `None` while minimized.
+fn window_size(hwnd: u64) -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic};
+    let handle = HWND(hwnd as usize as *mut _);
+    let mut r = RECT::default();
+    unsafe { (!IsIconic(handle).as_bool() && GetClientRect(handle, &mut r).is_ok()).then_some((r.right - r.left, r.bottom - r.top)) }
+}
+
 fn capture(dev: &Device, m: &Monitor, fps: u32, max: (u32, u32), shared: &Shared, stop: &AtomicBool) -> Result<()> {
     let mut grabbed: Option<Graph> = None;
     let mut conv: Option<(Graph, (u32, u32))> = None;
     let mut prev: Option<Frame> = None;
     let mut lost: Option<Instant> = None;
+    // A window's size when its capture was built, and a new one with when it was first seen: the
+    // stream follows the window, rebuilt once a new size has held for 500 ms (not at each step of a
+    // drag), checked every 250 ms
+    let (mut built, mut pending, mut checked) = (None, None::<((i32, i32), Instant)>, Instant::now());
     while !stop.load(Ordering::Relaxed) {
+        if let (Some(hwnd), Some(_)) = (m.window, grabbed.as_ref())
+            && checked.elapsed() >= Duration::from_millis(250)
+        {
+            checked = Instant::now();
+            match window_size(hwnd) {
+                Some(now) if Some(now) != built => match pending {
+                    Some((size, since)) if size == now && since.elapsed() >= Duration::from_millis(500) => {
+                        eprintln!("capture: window resized, starting again at its new size");
+                        (grabbed, prev, pending) = (None, None, None);
+                    }
+                    Some((size, _)) if size == now => {}
+                    _ => pending = Some((now, Instant::now())),
+                },
+                _ => pending = None,
+            }
+        }
         let g = match grabbed.as_mut() {
             Some(g) => g,
             None => match grab(dev, m, fps) {
                 Ok(g) => {
                     lost = None;
+                    built = m.window.and_then(window_size);
                     grabbed.insert(g)
                 }
                 // Lost (a UAC prompt, a mode change, a fullscreen game): retried a while
