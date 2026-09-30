@@ -2,7 +2,8 @@
 //! share's size, and the hardware encoder (Vulkan video, or VA-API).
 //!
 //! The settings come from an offline bench (4K60 at 21 Mbps: a still desktop, scrolling text and
-//! Big Buck Bunny, on an RX 9060 XT): CBR with an 8-frame VBV. A one-frame buffer made 60-96 KB
+//! Big Buck Bunny, on an RX 9060 XT): an 8-frame VBV (CBR in the bench; Vulkan now runs VBR under
+//! it, see `Encoder::open`). A one-frame buffer made 60-96 KB
 //! keyframes that stayed blurry for ~0.9 s (1% low VMAF 25-29); FFmpeg's default ~1 s buffer let a
 //! still 4K screen key at 1.2 MB, which Chromium's hardware decoder path couldn't absorb (the viewer
 //! asked for a keyframe 4x/s, each one as large). 8 frames: keyframes ~370-515 KB, VMAF 95.9 on
@@ -450,7 +451,11 @@ impl Encoder {
             (*ctx).max_b_frames = 0;
             me.set_rate(s.kbps);
             let opt = |k: &str, v: &str| ff::av_opt_set((*ctx).priv_data, cstr(k).as_ptr(), cstr(v).as_ptr(), 0);
-            opt("rc_mode", if dev.api == Api::Vaapi { "CBR" } else { "cbr" });
+            // Vulkan: VBR, which a still screen leaves at ~130 kbps; our FFmpeg caps its frames at the
+            // VBV (scene cuts stayed under 170 KB at 4K, the rate within 6% of the target). VA-API has
+            // no such cap and its VBR ignored the VBV (1.2 MB frames in the bench): CBR, which pads a
+            // still screen up to the target
+            opt("rc_mode", if dev.api == Api::Vaapi { "CBR" } else { "vbr" });
             opt("idr_interval", &i32::MAX.to_string());
             opt("async_depth", "1");
             if s.codec == Codec::H264 {
@@ -470,7 +475,7 @@ impl Encoder {
         }
     }
 
-    /// CBR at `kbps`, with 8 frames of it as the VBV (see the module comment).
+    /// The target `kbps` (also the peak), with 8 frames of it as the VBV (see the module comment).
     pub fn set_rate(&self, kbps: u32) {
         let bps = i64::from(kbps.max(100)) * 1000;
         unsafe {

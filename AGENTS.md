@@ -167,7 +167,8 @@ and `encode.rs` converts and encodes with a static FFmpeg of our own (`scripts/d
 - **Conversion** on the GPU: `hwmap` of the DMA-BUF into Vulkan → `scale_vulkan` to NV12 at the
   fitted size (`fit`), no copy through memory.
 - **Encoder**: `h264_vulkan`/`av1_vulkan` (VA-API's `h264_vaapi`/`av1_vaapi` if Vulkan can't),
-  CBR with an **8-frame VBV**, and no frame larger than that buffer (Vulkan's `maxFrameSize`, which
+  an **8-frame VBV** with VBR on Vulkan (a still screen costs ~130 kbps; with video the rate stays
+  within 6% of the target) and CBR on VA-API (its VBR ignored the VBV), and no frame larger than that buffer (Vulkan's `maxFrameSize`, which
   FFmpeg leaves off: RADV let scene cuts in a video burst to 740-921 KB, now at most ~190 KB),
   keyframes only on request (no GOP), no B-frames, H.264 Constrained Baseline with CAVLC, BT.709. Measured offline at 4K60 21 Mbps (still desktop, scrolling text, Big Buck
   Bunny, RX 9060 XT): VMAF 95.9 on video against 91.8 for GStreamer's `vah264enc` CBR, the rate on

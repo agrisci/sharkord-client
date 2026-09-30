@@ -43,7 +43,8 @@ export PATH=$PREFIX/bin:$TOOLS/bin:$PATH
 # 1. Mesa's own shader compilers (mesa_clc, vtn_bindgen2), with LLVM: build tools only
 meson setup --wipe "$SRC/mesa/build-tools" "$SRC/mesa" --prefix="$TOOLS" "${common[@]}" \
   -Dvulkan-drivers=intel -Dllvm=enabled -Dshared-llvm=enabled -Dmesa-clc=enabled \
-  -Dprecomp-compiler=enabled -Dinstall-mesa-clc=true -Dinstall-precomp-compiler=true >/dev/null
+  -Dprecomp-compiler=enabled -Dinstall-mesa-clc=true -Dinstall-precomp-compiler=true \
+  -Dmesa-clc-bundle-headers=enabled >/dev/null
 ninja -C "$SRC/mesa/build-tools" install >/dev/null
 
 # 2. The drivers, with those tools and no LLVM or SPIRV-Tools at run time
