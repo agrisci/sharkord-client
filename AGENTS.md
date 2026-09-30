@@ -420,7 +420,8 @@ There are no automated tests. After a change, check what it touches:
 - **Unreachable page**: stop the server → Retry and Change server both work.
 - **Log files**: launch from the menu (no terminal): `logs/main.log` in the settings folder has the
   `[flags]`, probe and `[gpu]` lines; a restart moves it to `main.old.log`; a second launch while
-  running leaves both untouched; `GST_DEBUG=9` never leaves more than the two files, each <= 5 MB.
+  running leaves both untouched; a flood of helper output never leaves more than the two files,
+  each <= 5 MB.
 - **Theme**: switch Sharkord to light, restart with the server down — local pages and the
   picker should be light too.
 - **Screen share picker**: on X11 (source grid) and Wayland (portal, then audio step); cancel

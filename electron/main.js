@@ -340,7 +340,7 @@ function probeNativeShare () {
   const exe = nativeShareExe()
   if (!exe || (process.platform === 'linux' && !isWayland)) return
   // spawn, not execFile: its stderr goes to the log as it comes (execFile buffers it and kills
-  // the helper past 1 MB, which a chatty driver or GST_DEBUG reaches)
+  // the helper past 1 MB, which a chatty driver or FFmpeg's verbose logging reaches)
   const proc = spawn(exe, ['--check'], { windowsHide: true })
   let stdout = '', finished = false
   proc.stdout.on('data', d => { stdout += d })
