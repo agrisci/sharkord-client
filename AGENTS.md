@@ -159,9 +159,12 @@ Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18
   there; a hybrid laptop's cross-adapter case is ROADMAP #11).
 - **A window** (`nativeTargetFor` passes its HWND): `gfxcapture` (Windows.Graphics.Capture, FFmpeg
   9), on the adapter of the monitor it is on, labelled with its title; a picture only when it
-  changes (it waits at most 1 s, so a stop is seen), upright whatever the monitor's rotation. A
-  resized window is scaled into its first size, keeping its shape (`resize_mode=scale_aspect`), so
-  viewers keep one picture size; a closed one ends the share once the capture retries give up.
+  changes, upright whatever the monitor's rotation. The
+  stream follows the window's size: `gfxcapture` keeps its first size (scaling a resized window into
+  it, pinned left), so the capture is rebuilt once a new client size has held for 500 ms (checked
+  every 250 ms, not while minimized). A minimized window sends nothing and FFmpeg's pull waits for
+  a frame with no way to interrupt it, so on stop the helper waits for its capture thread 1.5 s at
+  most, then exits without it. A closed window ends the share once the capture retries give up.
   FFmpeg's `-lstdc++` for it is skipped in `build.rs` (MSVC's static CRT has the C++ runtime).
 - **Capture** of a screen: `ddagrab`, a picture every tick (its repeats are skipped). It polls DXGI at each tick
   (our `ddagrab-poll` patch): `AcquireNextFrame` holds the device's unfair lock while it waits
@@ -454,8 +457,10 @@ There are no automated tests. After a change, check what it touches:
   each incoming video (once, and again if it changes); Chromium only names it while the page
   captures (the mic in a voice channel). Every 10 s `[native-share] watching …` gives what the viewer
   got: fps, dropped, freezes, jitter buffer, keys, pli, lost, nack, kbps. A window share goes
-  native too (`input` shows `"window":true`, `started` its title and size); resizing it keeps the
-  picture size, closing it ends the share. VP8, or the setting off, must behave exactly as before.
+  native too (`input` shows `"window":true`, `started` its title and size); resizing it changes
+  the viewer's picture size within ~0.5 s (`capture: window resized`), minimizing keeps the last
+  picture, stopping while minimized ends the helper by itself (`exited (0)`), closing it ends the
+  share. VP8, or the setting off, must behave exactly as before.
   The `[flags] GPUs:` line lists the adapters; with an AMD GPU `ExpandMediaFoundationEncodingResolutions`
   is disabled, without one it is not (a 4K Chromium-path share then encodes on the GPU).
 - **Native screen share (Linux Wayland; AMD, Intel)**: the switch is usable only when the startup

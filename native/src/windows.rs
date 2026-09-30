@@ -208,9 +208,6 @@ struct Graph {
     graph: *mut ff::AVFilterGraph,
     head: *mut ff::AVFilterContext,
     sink: *mut ff::AVFilterContext,
-    /// Run the graph once per `pull`, not until a frame comes (`gfxcapture`: a minimized window
-    /// sends none, and FFmpeg would keep asking it -- the capture thread never saw `stop`)
-    poll: bool,
 }
 
 unsafe impl Send for Graph {}
@@ -224,7 +221,7 @@ impl Graph {
             if graph.is_null() {
                 bail!("filter graph");
             }
-            let mut me = Graph { graph, head: ptr::null_mut(), sink: ptr::null_mut(), poll: false };
+            let mut me = Graph { graph, head: ptr::null_mut(), sink: ptr::null_mut() };
             me.head = make_head(graph)?;
             let mut last = me.head;
             for (name, args) in chain {
@@ -248,20 +245,10 @@ impl Graph {
         }
     }
 
-    /// The next frame out of the sink; when polling, `None` after one run of the graph without one.
+    /// The next frame out of the sink.
     fn pull(&mut self) -> Result<Option<Frame>> {
         let out = Frame::alloc();
-        let r = if self.poll {
-            let flag = ff::AV_BUFFERSINK_FLAG_NO_REQUEST as c_int;
-            let mut r = unsafe { ff::av_buffersink_get_frame_flags(self.sink, out.0, flag) };
-            if r == ff::AVERROR(ff::EAGAIN) {
-                ok(unsafe { ff::avfilter_graph_request_oldest(self.graph) }, "capture")?;
-                r = unsafe { ff::av_buffersink_get_frame_flags(self.sink, out.0, flag) };
-            }
-            r
-        } else {
-            unsafe { ff::av_buffersink_get_frame(self.sink, out.0) }
-        };
+        let r = unsafe { ff::av_buffersink_get_frame(self.sink, out.0) };
         if r == ff::AVERROR(ff::EAGAIN) {
             return Ok(None);
         }
@@ -377,6 +364,8 @@ pub struct Share {
     shared: Arc<Shared>,
     stop: Arc<AtomicBool>,
     capture: Mutex<Option<JoinHandle<()>>>,
+    /// Disconnected when the capture thread ends
+    ended: Mutex<std::sync::mpsc::Receiver<()>>,
     codec: Codec,
     fps: u32,
     kbps: AtomicU32,
@@ -389,15 +378,13 @@ const REGAIN: Duration = Duration::from_secs(5);
 /// The desktop duplication of `m` on `dev`, repeats included (`ddagrab` sends its last picture again
 /// when DXGI has no new one: never blocking longer than a frame, so `stop` is seen).
 fn grab(dev: &Device, m: &Monitor, fps: u32) -> Result<Graph> {
-    // An app window: only when it changes, at most `fps`, and never waiting more than a second (so
-    // `stop` is seen). `gfxcapture` keeps its first size: a resized window is scaled into it (pinned
+    // An app window: only when it changes, at most `fps` (a minimized one sends nothing, and the
+    // pull then waits: see `Share::finish`). `gfxcapture` keeps its first size: a resized window is scaled into it (pinned
     // left, black on the right) until `capture` rebuilds it at the new size. Closed, it ends (the
     // share with it, once the retries give up)
     if let Some(hwnd) = m.window {
         let args = format!("hwnd={hwnd}:max_framerate={fps}:capture_cursor=1:capture_border=0:resize_mode=scale_aspect:output_fmt=8bit");
-        let mut g = Graph::new(dev, |g| unsafe { filter(g, "gfxcapture", &args, |f| (*f).hw_device_ctx = dev.hw.new_ref()) }, &[])?;
-        g.poll = true;
-        return Ok(g);
+        return Graph::new(dev, |g| unsafe { filter(g, "gfxcapture", &args, |f| (*f).hw_device_ctx = dev.hw.new_ref()) }, &[]);
     }
     // 8-bit BGRA even from an HDR desktop (DXGI converts): H.264/AV1 here are 8-bit SDR
     let args = format!("output_idx={}:framerate={fps}:draw_mouse=1:output_fmt=bgra:dup_frames=1", m.output);
@@ -505,11 +492,13 @@ impl Share {
         let device = Arc::new(device);
         let shared = Arc::new(Shared::new());
         let stop = Arc::new(AtomicBool::new(false));
+        let (ending, ended) = std::sync::mpsc::channel::<()>();
         let thread = {
             let (device, shared, stop) = (device.clone(), shared.clone(), stop.clone());
             let m = monitor.clone();
             let (fps, max) = (start.fps, (start.width, start.height));
             std::thread::Builder::new().name("capture".into()).spawn(move || {
+                let _ending = ending;
                 if let Err(e) = capture(&device, &m, fps, max, &shared, &stop) {
                     shared.fail(&e);
                 }
@@ -521,6 +510,7 @@ impl Share {
             shared,
             stop,
             capture: Mutex::new(Some(thread)),
+            ended: Mutex::new(ended),
             codec: start.codec,
             fps: start.fps,
             kbps: AtomicU32::new(start.kbps),
@@ -541,10 +531,19 @@ impl Share {
         ffmpeg::run(&pacing, &self.shared, out, stop)
     }
 
+    /// Stops the capture: waits up to 1.5 s for its thread. A minimized window sends no frames, and
+    /// FFmpeg's pull waits for one with no way to interrupt it: then the process exits without it
+    /// (the app would kill it 2 s after `stop` anyway).
     pub fn finish(&self) {
+        use std::sync::mpsc::RecvTimeoutError;
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.capture.lock().expect("capture").take() {
-            let _ = t.join();
+        let ended = self.ended.lock().expect("ended").recv_timeout(Duration::from_millis(1500));
+        match (ended, self.capture.lock().expect("capture").take()) {
+            (Err(RecvTimeoutError::Disconnected), Some(t)) => {
+                let _ = t.join();
+            }
+            (Err(RecvTimeoutError::Timeout), _) => eprintln!("capture: still waiting for a frame, exiting without it"),
+            _ => {}
         }
     }
 
