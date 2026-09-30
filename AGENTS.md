@@ -130,14 +130,14 @@ Sharkord's state; a renamed key or field only turns the helper off:
 
 **How a helper share runs.**
 
-| | Windows (whole screens; AMD, NVIDIA, Intel) | Linux (Wayland; AMD, Intel) |
+| | Windows (AMD, NVIDIA, Intel) | Linux (Wayland; AMD, Intel) |
 |---|---|---|
 | The rule is applied | after the pick (`native-share-target`, with the codec) | before the pick (`native-share-pick`, with the codec) |
 | Pickers | our source grid, then the audio step | the helper's portal dialog (once), then the audio step |
 | Capture | helper **and** Chromium's own, still running | helper only |
 | Local preview | Chromium's capture | the helper's frames, decoded in the page |
-| Graph | `ddagrab` (D3D11) → `scale_d3d11` → `h264_amf` / `av1_amf` (NVENC, QSV; below) | PipeWire (DMA-BUF) → `scale_vulkan` → `h264_vulkan` / `av1_vulkan` (below) |
-| Windows (app windows) | Chromium's share | helper (the portal offers them) |
+| Graph | `ddagrab` (a screen) or `gfxcapture` (a window), D3D11 → `scale_d3d11` → `h264_amf` / `av1_amf` (NVENC, QSV; below) | PipeWire (DMA-BUF) → `scale_vulkan` → `h264_vulkan` / `av1_vulkan` (below) |
+| Windows (app windows) | helper (`window:<HWND>` from our picker) | helper (the portal offers them) |
 
 **When it fails anyway** (the `s.fallback` cases; a share is never left on the black placeholder):
 
@@ -157,7 +157,13 @@ Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18
   Electron's `Display.label` is, from `DisplayConfigGetDeviceInfo`) and primary. Capture, conversion
   and encoder share one D3D11 device on the adapter driving that monitor (duplication only works
   there; a hybrid laptop's cross-adapter case is ROADMAP #11).
-- **Capture**: `ddagrab`, a picture every tick (its repeats are skipped). It polls DXGI at each tick
+- **A window** (`nativeTargetFor` passes its HWND): `gfxcapture` (Windows.Graphics.Capture, FFmpeg
+  9), on the adapter of the monitor it is on, labelled with its title; a picture only when it
+  changes (it waits at most 1 s, so a stop is seen), upright whatever the monitor's rotation. A
+  resized window is scaled into its first size, keeping its shape (`resize_mode=scale_aspect`), so
+  viewers keep one picture size; a closed one ends the share once the capture retries give up.
+  FFmpeg's `-lstdc++` for it is skipped in `build.rs` (MSVC's static CRT has the C++ runtime).
+- **Capture** of a screen: `ddagrab`, a picture every tick (its repeats are skipped). It polls DXGI at each tick
   (our `ddagrab-poll` patch): `AcquireNextFrame` holds the device's unfair lock while it waits
   (Sunshine found the same), which starved the converter and AMF -- the encode loop ran at 39-53 fps,
   now 60. A lost capture (UAC prompt, mode change, fullscreen game) is rebuilt, retried for 5 s
@@ -382,12 +388,15 @@ the sender's `outbound-rtp` `encoderImplementation` (e.g. `MediaFoundationVideoE
 on Windows, not `OpenH264`). On Windows it relies on `PlatformH264CbpEncoding`: without it
 Chromium encodes Constrained Baseline H.264 (`42e01f`, what Sharkord negotiates) in software,
 and on `WebRtcAllowWgcUsingTexture`: without it 4K screen capture stalls around 36 fps (compare
-the `media-source` `framesPerSecond` with the encoder's). AV1 uses `WebRtcAV1HWEncode` with
-`ExpandMediaFoundationEncodingResolutions` disabled, because Chromium drops AMD's AV1 encoder when
-it can't query its resolutions. That feature is on by default in Chromium; turning it off caps
-every hardware encoder, on every GPU, at 1080p, so 1440p/4K shares on Chromium's path fall back to
-software (`OpenH264` / `libaom`). NVIDIA never gets hardware Constrained Baseline H.264 in Chromium
-(crbug 1088650), and texture capture fails for good if the GPU adapter changes (hybrid laptops).
+the `media-source` `framesPerSecond` with the encoder's); it is only enabled with a single hardware
+GPU, as texture capture fails for good if the GPU adapter changes (hybrid laptops, #90). AV1 uses
+`WebRtcAV1HWEncode`, and where an AMD GPU is present `ExpandMediaFoundationEncodingResolutions` is
+disabled, because Chromium drops AMD's AV1 encoder when it can't query its resolutions. That
+feature is on by default in Chromium; turning it off caps every hardware encoder at 1080p, so on
+AMD 1440p/4K shares on Chromium's path fall back to software (`OpenH264` / `libaom`); NVIDIA and
+Intel keep it (#88). The GPUs come from one registry query before `ready` (`gpuVendors`, the
+`[flags] GPUs:` line; virtual adapters don't count; unreadable: the old unconditional flags).
+NVIDIA never gets hardware Constrained Baseline H.264 in Chromium (crbug 1088650).
 All four flags are experimental: see ROADMAP.md #88-#91 before relying on or changing them. On Linux
 the only flag is `AcceleratedVideoEncoder`, off by default (see ROADMAP.md, Linux flags).
 
@@ -444,8 +453,11 @@ There are no automated tests. After a change, check what it touches:
   While watching, `[native-share] incoming <codec> <size>: decoder …, GPU|CPU` names the decoder of
   each incoming video (once, and again if it changes); Chromium only names it while the page
   captures (the mic in a voice channel). Every 10 s `[native-share] watching …` gives what the viewer
-  got: fps, dropped, freezes, jitter buffer, keys, pli, lost, nack, kbps. A window share, VP8, or
-  the setting off must behave exactly as before.
+  got: fps, dropped, freezes, jitter buffer, keys, pli, lost, nack, kbps. A window share goes
+  native too (`input` shows `"window":true`, `started` its title and size); resizing it keeps the
+  picture size, closing it ends the share. VP8, or the setting off, must behave exactly as before.
+  The `[flags] GPUs:` line lists the adapters; with an AMD GPU `ExpandMediaFoundationEncodingResolutions`
+  is disabled, without one it is not (a 4K Chromium-path share then encodes on the GPU).
 - **Native screen share (Linux Wayland; AMD, Intel)**: the switch is usable only when the startup
   probe passes (`[native-share] probe` in the log, with `api` and `driver`); otherwise it's greyed
   out with the reason, and "This GPU can hardware encode" lists H.264 / AV1. Share with H.264:
