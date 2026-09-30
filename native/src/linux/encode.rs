@@ -95,6 +95,48 @@ impl Device {
         Ok(Device { api, render_node: render_node.to_owned(), drm, hw: BufRef(hw) })
     }
 
+    /// DRM format modifiers the GPU can sample BGRx/BGRA images with, single-plane only (what a
+    /// compositor may render the screen cast into for us to import without a copy). Asked through
+    /// Vulkan, from this device or one derived for the purpose; empty if there is no Vulkan.
+    pub fn modifiers(&self) -> Vec<u64> {
+        use ash::vk::{self, Handle};
+        let owned;
+        let hw = if self.api == Api::Vulkan {
+            &self.hw
+        } else {
+            let mut vk_dev = ptr::null_mut();
+            let ret = unsafe {
+                ff::av_hwdevice_ctx_create_derived(&mut vk_dev, ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN, self.drm.as_ptr(), 0)
+            };
+            if ret < 0 {
+                return Vec::new();
+            }
+            owned = BufRef(vk_dev);
+            &owned
+        };
+        unsafe {
+            let ctx = (*(hw.as_ptr())).data as *mut ff::AVHWDeviceContext;
+            let vkctx = (*ctx).hwctx as *mut ff::AVVulkanDeviceContext;
+            let Some(gipa) = (*vkctx).get_proc_addr else { return Vec::new() };
+            let static_fn = ash::StaticFn { get_instance_proc_addr: std::mem::transmute::<_, vk::PFN_vkGetInstanceProcAddr>(gipa) };
+            let instance = ash::Instance::load(&static_fn, vk::Instance::from_raw((*vkctx).inst as u64));
+            let pd = vk::PhysicalDevice::from_raw((*vkctx).phys_dev as u64);
+            let query = |mods: &mut [vk::DrmFormatModifierPropertiesEXT]| {
+                let mut list = vk::DrmFormatModifierPropertiesListEXT::default().drm_format_modifier_properties(mods);
+                let mut props = vk::FormatProperties2::default().push_next(&mut list);
+                instance.get_physical_device_format_properties2(pd, vk::Format::B8G8R8A8_UNORM, &mut props);
+                list.drm_format_modifier_count as usize
+            };
+            let mut mods = vec![vk::DrmFormatModifierPropertiesEXT::default(); query(&mut [])];
+            let n = query(&mut mods);
+            mods.truncate(n);
+            mods.iter()
+                .filter(|m| m.drm_format_modifier_plane_count == 1 && m.drm_format_modifier_tiling_features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE))
+                .map(|m| m.drm_format_modifier)
+                .collect()
+        }
+    }
+
     /// Render nodes, in the kernel's order (the first is usually the GPU driving the desktop).
     pub fn render_nodes() -> Vec<String> {
         let mut nodes: Vec<String> = std::fs::read_dir("/dev/dri")
@@ -123,6 +165,61 @@ impl Frame {
 impl Drop for Frame {
     fn drop(&mut self) {
         unsafe { ff::av_frame_free(&mut self.0) }
+    }
+}
+
+/// A captured DMA-BUF as a DRM PRIME frame for the converter, no copy. `release` runs when
+/// FFmpeg lets go of it (once the GPU has read it): the buffer goes back to the compositor.
+pub fn drm_frame<R>(frames: &BufRef, size: (u32, u32), alpha: bool, fd: i32, len: usize, offset: u32, stride: i32, modifier: u64, release: R) -> Result<Frame> {
+    unsafe extern "C" fn free<R>(opaque: *mut std::ffi::c_void, data: *mut u8) {
+        unsafe {
+            drop(Box::from_raw(opaque as *mut R));
+            ff::av_free(data as *mut _);
+        }
+    }
+    unsafe {
+        let desc = ff::av_mallocz(std::mem::size_of::<ff::AVDRMFrameDescriptor>()) as *mut ff::AVDRMFrameDescriptor;
+        if desc.is_null() {
+            bail!("out of memory");
+        }
+        (*desc).nb_objects = 1;
+        (*desc).objects[0] = ff::AVDRMObjectDescriptor { fd, size: len, format_modifier: modifier };
+        (*desc).nb_layers = 1;
+        // DRM fourccs for PipeWire's BGRx / BGRA (little-endian XRGB / ARGB)
+        (*desc).layers[0].format = if alpha { 0x3432_5241 } else { 0x3432_5258 };
+        (*desc).layers[0].nb_planes = 1;
+        (*desc).layers[0].planes[0] = ff::AVDRMPlaneDescriptor { object_index: 0, offset: offset as isize, pitch: stride as isize };
+        let frame = Frame::alloc();
+        (*frame.0).format = ff::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
+        (*frame.0).width = size.0 as c_int;
+        (*frame.0).height = size.1 as c_int;
+        (*frame.0).data[0] = desc as *mut u8;
+        (*frame.0).buf[0] = ff::av_buffer_create(
+            desc as *mut u8,
+            std::mem::size_of::<ff::AVDRMFrameDescriptor>(),
+            Some(free::<R>),
+            Box::into_raw(Box::new(release)) as *mut _,
+            0,
+        );
+        (*frame.0).hw_frames_ctx = frames.new_ref();
+        Ok(frame)
+    }
+}
+
+/// A frame in shared memory, copied (the compositor gets the buffer back at once).
+pub fn memory_frame(size: (u32, u32), alpha: bool, data: &[u8], stride: usize) -> Result<Frame> {
+    unsafe {
+        let frame = Frame::alloc();
+        (*frame.0).format = (if alpha { ff::AVPixelFormat::AV_PIX_FMT_BGRA } else { ff::AVPixelFormat::AV_PIX_FMT_BGR0 }) as c_int;
+        (*frame.0).width = size.0 as c_int;
+        (*frame.0).height = size.1 as c_int;
+        check(ff::av_frame_get_buffer(frame.0, 0), "frame")?;
+        let (row, dst_stride) = (size.0 as usize * 4, (*frame.0).linesize[0] as usize);
+        for y in 0..size.1 as usize {
+            let src = data.get(y * stride..y * stride + row).ok_or_else(|| anyhow!("short frame"))?;
+            std::ptr::copy_nonoverlapping(src.as_ptr(), (*frame.0).data[0].add(y * dst_stride), row);
+        }
+        Ok(frame)
     }
 }
 
@@ -227,6 +324,7 @@ impl Convert {
     }
 
     /// The pool the converted frames come from: the encoder allocates from its description.
+    #[cfg(test)]
     pub fn frames(&self) -> *mut ff::AVBufferRef {
         unsafe { ff::av_buffersink_get_hw_frames_ctx(self.sink) }
     }
@@ -359,9 +457,10 @@ impl Drop for Encoder {
 mod tests {
     use super::*;
 
-    /// Needs a GPU that encodes H.264: `cargo test -- --ignored`. Encodes 3 s of a still 4K
-    /// desktop-like picture through the memory path and checks what the bench measured: one IDR
-    /// at the start, one more only when asked, and keyframes capped by the 8-frame VBV.
+    /// Needs a GPU that encodes H.264: `cargo test -- --ignored` (SHARKORD_TEST_FRAME: a real
+    /// desktop). Encodes 3 s of a still 4K picture through the memory path on Vulkan and VA-API and
+    /// checks what the bench measured: one IDR at the start, one more only when asked, keyframes
+    /// capped by the 8-frame VBV, and a bitrate change applied without a keyframe.
     #[test]
     #[ignore]
     fn encodes_4k_with_keyframes_only_on_request() {
@@ -394,6 +493,7 @@ mod tests {
             let first = conv.convert(&src).unwrap();
             let mut enc = Encoder::open(&dev, conv.frames(), &Settings { codec: Codec::H264, size: (w, h), fps: 60, kbps: 21250 }).unwrap();
             let mut keys = Vec::new();
+            let mut bytes = [0usize; 3];
             for i in 0..180 {
                 let f = if i == 0 { first.share() } else { conv.convert(&src).unwrap() };
                 enc.send(&f, i, i == 0 || i == 120).unwrap();
@@ -401,13 +501,15 @@ mod tests {
                     enc.set_rate(12000);   // must not key
                 }
                 enc.receive(|data, key, pts| {
-                    if key { keys.push((pts, data.len())); }
+                    if key { keys.push((pts, data.len())); } else { bytes[(pts / 60) as usize] += data.len(); }
                     Ok(())
                 }).unwrap();
             }
-            eprintln!("{} keyframes (picture, bytes): {keys:?}", enc.name);
+            eprintln!("{} keyframes (picture, bytes): {keys:?}; kbps per second (P frames): {:?}", enc.name, bytes.map(|b| b * 8 / 1000));
             assert_eq!(keys.iter().map(|k| k.0).collect::<Vec<_>>(), vec![0, 120], "{}", enc.name);
             assert!(keys.iter().all(|k| k.1 < 600 * 1024), "{}: keyframe over 600 KB", enc.name);
+            // 21.25 -> 12 Mbps at picture 60 (our FFmpeg patches): the next second follows it
+            assert!(bytes[1] * 8 / 1000 < 14000, "{}: bitrate change not applied", enc.name);
         }
     }
 }

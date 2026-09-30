@@ -192,16 +192,19 @@ fn main() -> Result<()> {
     // Linux: the screen is picked in the portal's dialog now, while the app waits to build the
     // share's stream; `start` only comes once Sharkord has negotiated the codec
     #[cfg(target_os = "linux")]
-    let capture = match portal::select() {
-        Ok(Some(p)) => {
-            event(&out, json!({ "type": "selected", "source": p.size.map(|(w, h)| [w, h]) }));
-            p
-        }
-        Ok(None) => {
-            event(&out, json!({ "type": "cancelled" }));
-            return Ok(());
-        }
-        Err(e) => return fail(e),
+    let capture = match std::env::var("SHARKORD_TEST_NODE").ok().and_then(|n| n.parse().ok()) {
+        Some(node) => platform::Capture { portal: None, node },
+        None => match portal::select() {
+            Ok(Some(p)) => {
+                event(&out, json!({ "type": "selected", "source": p.size.map(|(w, h)| [w, h]) }));
+                platform::Capture { node: p.node, portal: Some(p) }
+            }
+            Ok(None) => {
+                event(&out, json!({ "type": "cancelled" }));
+                return Ok(());
+            }
+            Err(e) => return fail(e),
+        },
     };
     #[cfg(windows)]
     let capture: platform::Capture = ();

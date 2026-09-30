@@ -19,8 +19,9 @@ gstreamer-video = "0.25"
 # stream, and FFmpeg's Vulkan/VA-API encoders, linked statically from scripts/deps/ffmpeg.sh
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13", default-features = false, features = ["screencast", "async-io"] }
-pipewire = "0.10"
+pipewire = { version = "0.10", features = ["v0_3_33"] }
 ffmpeg-sys-next = { version = "9", default-features = false, features = ["avcodec", "avfilter", "static"] }
+ash = { version = "0.38", default-features = false, features = ["std"] }
 
 [profile.release]
 debug = "line-tables-only"

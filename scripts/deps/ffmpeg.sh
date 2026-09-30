@@ -55,10 +55,11 @@ meson setup --reconfigure "$SRC/libva/build" "$SRC/libva" --prefix="$PREFIX" --l
   --buildtype=release -Dwith_x11=no -Dwith_glx=no -Dwith_wayland=no -Dwith_win32=no >/dev/null
 ninja -C "$SRC/libva/build" install >/dev/null
 
+# Our patches on a clean tree: runtime bitrate changes without an IDR (Vulkan, VA-API)
 fetch ffmpeg https://git.ffmpeg.org/ffmpeg.git $FFMPEG
+git -C "$SRC/ffmpeg" checkout -q -- .
 for p in "$ROOT"/scripts/deps/ffmpeg-*.patch; do
-  [ -e "$p" ] || continue
-  git -C "$SRC/ffmpeg" apply --check "$p" 2>/dev/null && git -C "$SRC/ffmpeg" apply "$p"
+  git -C "$SRC/ffmpeg" apply "$p"
 done
 mkdir -p "$SRC/ffmpeg/build"
 cd "$SRC/ffmpeg/build"
@@ -76,4 +77,7 @@ grep -q 'License: LGPL version 2.1 or later' configure.log || { echo 'FFmpeg is 
 make -j "$JOBS" >/dev/null
 make install >/dev/null
 cp configure.log "$PREFIX/ffmpeg-configure.log"
+# The static libraries are bundled into ffmpeg-sys-next's rlib when that crate compiles: a
+# rebuilt FFmpeg only reaches the helper once the crate is rebuilt
+[ -d "$ROOT/native/target" ] && cargo clean -q --manifest-path "$ROOT/native/Cargo.toml" --release -p ffmpeg-sys-next || true
 echo "FFmpeg $FFMPEG in $PREFIX"
