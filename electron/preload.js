@@ -301,22 +301,21 @@ function installNativeShare (workerSource, helperPicks) {
       try { s.port?.postMessage({ cmd: 'stop' }); s.port?.close() } catch {}
       s.port = null
     }
-    // Before any native frame went out (an unsupported codec, a helper that never started) the
-    // connection just gets Chromium's own capture -- if there is one: a share the helper picked
-    // (Linux) has nothing else, and ends. Mid-share, the share ends instead, as if the
-    // capture had stopped: Sharkord cleans up on the track's `ended`, viewers see the share end, and
-    // shares for the rest of the session use Chromium's own path (not after a suspend, which loses
-    // the capture without the helper being at fault). Continuing in place didn't work:
-    // swapping the capture track in restarted the RTP timestamps from its older clock (viewers
-    // dropped every frame as stale), and the hardware encoder Chromium switches to at <= 1080p
-    // stalled after a few frames.
+    // Before the placeholder reached a connection, the connection just gets Chromium's own capture
+    // -- if there is one: a share the helper picked (Linux) has nothing else, and ends. Once a
+    // connection carried it, the share ends instead, as if the capture had stopped: Sharkord cleans
+    // up on the track's `ended`, viewers see the share end, and shares for the rest of the session
+    // use Chromium's own path (not after a suspend, which loses the capture without the helper
+    // being at fault). Swapping Chromium's capture in after that left viewers black even before
+    // any native frame was swapped (#87: the helper failing 0.3 s in), and mid-share it restarted
+    // the RTP timestamps from its older clock (viewers dropped every frame as stale); the hardware
+    // encoder Chromium switches to at <= 1080p stalled after a few frames.
     s.fallback = why => {
       if (s.fell || s.stopped) return
       s.fell = true
       closeHelper()
-      if (!s.owned && (!s.sender || !s.stats.swapped)) {
+      if (!s.owned && !s.sender) {
         log('using Chromium capture:', why)
-        if (s.sender) { s.sender.transform = null; replaceTrack.call(s.sender, video).catch(e => log('fallback:', e.message)) }
         return
       }
       log('ending the share:', why)
