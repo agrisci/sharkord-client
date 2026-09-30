@@ -1,0 +1,3 @@
+# The static FFmpeg the Linux helper links (scripts/deps/ffmpeg.sh builds it there)
+[env]
+FFMPEG_DIR = { value = "../build/deps", relative = true, force = false }

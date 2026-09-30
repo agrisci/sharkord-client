@@ -7,3 +7,5 @@ Desktop.ini
 LAB.local.md
 native/target/
 build/native/
+build/deps/
+build/deps-src/
