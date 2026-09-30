@@ -6,4 +6,4 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 RUN=$(command -v podman || command -v docker)
 "$RUN" run --rm -v "$ROOT:/src:z" -w /src docker.io/library/ubuntu:22.04 bash -c \
-  "scripts/deps/ubuntu-packages.sh && for s in $*; do PREFIX=${PREFIX:-/src/build/deps} SRC=/src/build/deps-src-jammy scripts/deps/\$s.sh || exit 1; done"
+  "bash scripts/deps/ubuntu-packages.sh && for s in $*; do PREFIX=${PREFIX:-/src/build/deps} SRC=/src/build/deps-src-jammy bash scripts/deps/\$s.sh || exit 1; done"

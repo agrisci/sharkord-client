@@ -83,7 +83,7 @@ function copy (from, to) { fs.mkdirSync(path.dirname(to), { recursive: true }); 
 
 if (process.platform === 'linux') {
   const DEPS = path.join(ROOT, 'build', 'deps')
-  const script = name => spawnSync(path.join(ROOT, 'scripts', 'deps', name), { stdio: 'inherit' })
+  const script = name => spawnSync('bash', [path.join(ROOT, 'scripts', 'deps', name)], { stdio: 'inherit' })
   if (!fs.existsSync(path.join(DEPS, 'lib', 'libavcodec.a'))) {
     const r = script('ffmpeg.sh')
     if (r.error || r.status !== 0) skip('scripts/deps/ffmpeg.sh failed (see its header for what it needs)')

@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo apt-get remove -y libunwind-14-dev   # the image's; it conflicts with packages below
           sudo apt-get install -y rpm
-          scripts/deps/ubuntu-packages.sh
+          bash scripts/deps/ubuntu-packages.sh
           echo "SHARKORD_REQUIRE_NATIVE=1" >> "$GITHUB_ENV"
       - name: Cache the native helper's FFmpeg and Mesa
         if: matrix.dist == 'linux'
