@@ -1,7 +1,8 @@
 # AGENTS.md
 
 Guide for AI agents working on the Sharkord desktop client. See [README.md](README.md) for
-what the app does from a user's point of view — this file covers how the code is organized.
+what the app does from a user's point of view and [CONTRIBUTING.md](CONTRIBUTING.md) for building
+and releasing — this file covers how the code is organized.
 
 This is a thin Electron shell around a self-hosted [Sharkord](https://github.com/Sharkord/sharkord)
 server: it loads the server's own web app and adds only what a browser can't do — a screen
@@ -266,7 +267,7 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
 - Clean up on every exit path: close the picker, `venmicUnlink()` and deny pending
   display-media callbacks when windows close or the server changes.
 - **Every change checks for stale documentation** in the same commit: search `AGENTS.md`,
-  `README.md`, `ROADMAP.md`, code comments and the settings / picker texts for what changed —
+  `README.md` (for users), `CONTRIBUTING.md` (building and releasing), `ROADMAP.md`, code comments and the settings / picker texts for what changed —
   names, paths, file and package names, settings keys, IPC channels, option labels, behaviour
   and platform notes — and fix every mention, including the manual test checklist. Comments
   describe the code as it is, never how it used to be.

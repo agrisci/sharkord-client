@@ -187,7 +187,7 @@ shares* on (off by default):
 |---|-----|------|--------|-------|
 | 66 | P1 | Supported hardware page | 📋 | What each GPU vendor gets (native vs Chromium path, codecs, resolutions) and what viewers need to decode it. |
 | 67 | P1 | Troubleshooting guide | 📋 | Black screen, low bitrate, stutter: what to check and how to attach diagnostics (#34). |
-| 68 | P2 | Contributor guide | 💡 | Building the helper, running with logging, testing with two accounts (`AGENTS.md` covers most of it for agents). |
+| 68 | P2 | Contributor guide | ✅ | `CONTRIBUTING.md`: prerequisites, building, CI, releases and the project structure, moved out of the README, which is now for users only. |
 
 ## Done
 
