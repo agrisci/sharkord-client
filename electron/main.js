@@ -5,7 +5,7 @@ const {
   app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, net, shell, desktopCapturer, session,
   screen, MessageChannelMain, dialog, powerMonitor,
 } = require('electron')
-const { spawn } = require('child_process')
+const { spawn, execFileSync } = require('child_process')
 const path = require('path')
 const fs   = require('fs')
 const os   = require('os')
@@ -72,27 +72,42 @@ const chromiumHwEncodeSetting = () => loadUserSettings().chromiumHwEncode ?? pro
 const chromiumHwEncodeSource  = () => process.env.SHARKORD_CHROMIUM_DEFAULTS === '1' ? 'env'
   : typeof loadUserSettings().chromiumHwEncode === 'boolean' ? 'setting' : 'default'
 const chromiumHwEncode        = () => chromiumHwEncodeSource() !== 'env' && chromiumHwEncodeSetting()
+
+// Windows: the display adapters' PCI vendors, before `ready` (Electron has no GPU info yet): one
+// registry query, ~30 ms (wmic is gone on 24H2, PowerShell's CIM takes ~1.3 s). Virtual adapters
+// (Root\..., e.g. Parsec's) don't count. null when it can't be read: then every rule stays as before
+function gpuVendors () {
+  try {
+    const out = execFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe'),
+      ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}', '/s', '/v', 'MatchingDeviceId'],
+      { encoding: 'utf8', windowsHide: true, timeout: 2000 })
+    const names = { '1002': 'amd', '10de': 'nvidia', '8086': 'intel' }
+    return [...out.matchAll(/PCI\\VEN_([0-9A-F]{4})/gi)].map(m => names[m[1].toLowerCase()] || m[1].toLowerCase())
+  } catch (e) { log('[flags] GPU vendors unknown:', e.message); return null }
+}
 {
   const enable = [], disable = []
   if (chromiumHwEncode() && process.platform === 'linux') {
     enable.push('AcceleratedVideoEncoder')   // VA-API encode (was VaapiVideoEncoder before Chromium 131)
   } else if (chromiumHwEncode() && process.platform === 'win32') {
+    const gpus = gpuVendors()
+    log('[flags] GPUs:', gpus ? gpus.join(', ') || 'none' : 'unknown')
     enable.push(
       // Media Foundation encodes Baseline H.264 in hardware, but WebRTC's usual
       // Constrained Baseline (42e01f, what Sharkord negotiates) falls back to
       // OpenH264 unless this is on (off by default in Chromium, pending rollout)
       'PlatformH264CbpEncoding',
-      // Screen capture (WGC on Win11 24H2+) copies every frame to CPU memory and
-      // is throttled to half the CPU time; at 4K that caps it near 36 fps. GPU
-      // textures keep it at 60.
-      'WebRtcAllowWgcUsingTexture',
       // AV1 hardware encoding for WebRTC (libaom otherwise)
       'WebRtcAV1HWEncode',
     )
-    // Chromium asks each encoder for its max resolutions and drops the ones that
-    // don't answer, like AMD's AV1 encoder. Without the query every hardware
-    // encoder is limited to 1080p (above that WebRTC falls back to software).
-    disable.push('ExpandMediaFoundationEncodingResolutions')
+    // Screen capture (WGC on Win11 24H2+) copies every frame to CPU memory and is throttled to
+    // half the CPU time; at 4K that caps it near 36 fps. GPU textures keep it at 60, but only with
+    // one GPU: on hybrid and multi-GPU machines an adapter change breaks capture for good
+    if (!gpus || gpus.length === 1) enable.push('WebRtcAllowWgcUsingTexture')
+    // Chromium asks each encoder for its max resolutions and drops the ones that don't answer,
+    // like AMD's AV1 encoder. Without the query every hardware encoder is limited to 1080p (above
+    // that WebRTC falls back to software), so only where an AMD GPU is
+    if (!gpus || gpus.includes('amd')) disable.push('ExpandMediaFoundationEncodingResolutions')
   }
   // Merged with the command line's, which a second appendSwitch would override; a feature
   // disabled there wins, so --disable-features=... always works for support
@@ -357,10 +372,14 @@ function probeNativeShare () {
   proc.on('error', err => done(err.message))
 }
 
-// Windows: only whole screens, the helper captures monitors. Linux goes native through
-// native-share-pick instead, never through Chromium's pick.
+// Windows: a whole screen (the helper duplicates its monitor) or an app window (Electron's
+// `window:<HWND>:0`; the helper captures it with Windows.Graphics.Capture). Linux goes native
+// through native-share-pick instead, never through Chromium's pick.
 function nativeTargetFor (src) {
-  if (process.platform !== 'win32' || !src.id.startsWith('screen:') || !nativeShareOn()) return null
+  if (process.platform !== 'win32' || !nativeShareOn()) return null
+  const hwnd = /^window:(\d+):/.exec(src.id)?.[1]
+  if (hwnd) return { window: hwnd }
+  if (!src.id.startsWith('screen:')) return null
   const display = screen.getAllDisplays().find(d => String(d.id) === src.display_id)
   return display ? { label: display.label, primary: display.id === screen.getPrimaryDisplay().id } : { primary: true }
 }
