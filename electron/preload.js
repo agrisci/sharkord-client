@@ -467,16 +467,18 @@ function installNativeShare (workerSource, helperPicks) {
         const setting = +(sec?.match(/x-google-max-bitrate=(\d+)/)?.[1]) || Infinity
         const cap = Math.round(Math.min(setting, capFor({ ...s.want, width: s.encoder.width, height: s.encoder.height })))
         const clean = performance.now() - (s.congestedAt ?? -Infinity) > 10000
-        // Clean: the estimate itself, never down. It grows ~8%/s whenever at least 2/3 of it is
+        // Clean: 0.9x the estimate, never down. It grows ~8%/s whenever at least 2/3 of it is
         // sent, so running ahead doesn't ramp faster -- straight to the cap queued up to 1.3 s in
         // Chromium's pacer, 1.5x the estimate still 0.85 s, while it climbed 5 -> 25 Mbps in ~20 s.
+        // And the whole estimate left no room for audio, overhead and keyframes on a link that
+        // really is that fast: on a 3 Mbps upload each step up queued 0.5-0.7 s.
         // Except after a still screen: the helper sent under half what it was asked (VBR, a few
         // hundred kbps), Chromium's estimate fell to what was acknowledged (32 -> 5.8 Mbps), and
         // motion then went out at the old 25 Mbps into it: 1.4 s in the pacer for ~6 s. Then down
         // to the estimate, and up with it again
         // (The helper's padding counts: it holds the estimate up while the screen is still)
         const idle = (s.helper.kbps ?? Infinity) + (s.helper.padding ?? 0) < s.kbps * 0.5 && bwe < s.kbps
-        const aim = clean && !idle ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * (clean ? 1 : 0.85)))
+        const aim = clean && !idle ? Math.min(cap, Math.max(s.kbps, Math.round(bwe * 0.9))) : Math.min(cap, Math.round(bwe * (clean ? 0.9 : 0.85)))
         s.cap = cap
         // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under the step
         const [step, every] = [1.1, 2000]

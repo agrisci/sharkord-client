@@ -158,7 +158,7 @@ shares* on (off by default):
 
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
-| 23 | P1 | Test on real internet uploads | 🧪 | Only tested on a LAN. Try a slow and a bufferbloated home upload: does the loss / round-trip check back off early enough? |
+| 23 | P1 | Test on real internet uploads | 🧪 | Tested on Windows with a 3 Mbps upload cap on the LAN (a QoS policy on `electron.exe`: a deep queue, like a bufferbloated upload), 4K60 H.264 with a video playing. The estimate follows the cap within 2-4 s; the helper overshot it (AMF can't reach ~2 Mbps at 4K60, and padding ran over the rate): fixed with a frame dropper and budgeted padding (AGENTS.md, step 5). Now 51-58 fps on the viewer, short freezes after Chromium's own estimate dips; back to full rate ~40 s after the cap is lifted. Left: a real ADSL/cellular upload (loss, not just a queue), and Linux. |
 | 24 | P1 | Faster start | 📋 | Reaching full rate takes 20-30 s: Chromium's estimate starts at ~5-6 Mbps and grows ~8%/s. Tried: the rate a previous share held (per server and network, identified by the router's MAC: a link can be fast one day and ADSL the next) as `x-google-start-bitrate` in the share's answer -- applied, but the estimate still started at 5.9 Mbps (the voice call's transport already runs), so it was dropped -- and lowering then raising `maxBitrate` (no effect). Padding above the estimate is out (it would send past what the link was measured to carry). Left: a way to make Chromium probe higher at the start; remembering a rate is only worth adding back with one. |
 | 106 | P1 | Full quality right after a still screen | 🧪 | The helper pads a still screen to 90% of its rate (H.264 filler NAL, AV1 private metadata OBU), so Chromium's estimate doesn't collapse (25 -> 5 Mbps) and motion is back at 25 Mbps at once instead of ~8%/s over 15-20 s. Measured 4K60 H.264 and AV1 to the Renoir laptop: estimate held, pacer < 15 ms at motion. Cost: full rate while still. Its periodic dips (#28) can still meet motion: once, 0.7 s in the pacer for ~4 s. Screen-content mode and a `maxBitrate` probe didn't help. Could become a setting (bandwidth vs. instant quality). |
 | 25 | P2 | Fewer keyframes on bitrate changes | ✅ | FFmpeg patched to apply a bitrate change on the next frame without an IDR: Vulkan re-issues only its rate control, VA-API re-sends its rate-control parameter (#104), AMF sets its rate properties, NVENC reconfigures without reset, Quick Sync resets without a new sequence (#103). The page steps 10% every 2 s on both platforms. |
@@ -234,7 +234,7 @@ shares* on (off by default):
 | # | Item | Notes |
 |---|------|-------|
 | 20 | Bitrate from Chromium's transport estimate | Not `targetBitrate`, which the transform's extra bytes halve (libwebrtc post-encode overhead). |
-| 21 | Hold through false estimate dips | Step up with the estimate while loss and round trip are clean, never down; 0.85x on real congestion. |
+| 21 | Hold through false estimate dips | Step up to 0.9x the estimate while loss and round trip are clean, never down; 0.85x on real congestion. |
 | 22 | Cap from Sharkord's bitrate slider | Plus 0.05 bits per pixel per frame (~25 Mbps at 4K60). |
 | 43 | Tray Quit during a call | Sharkord's leave guard silently blocked closing; Quit always wins, X asks first. |
 | 81 | In-memory placeholder frames | Canvas frames needed a GPU readback and stalled the share at 15 fps under GPU load. |

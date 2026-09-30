@@ -485,7 +485,9 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
     // ~8%/s again once motion resumed (15-20 s of lower quality); its screen-content mode and a
     // bandwidth probe didn't hold or restore it. SHARKORD_PAD sets the share (0 turns it off)
     let pad = std::env::var("SHARKORD_PAD").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.9).clamp(0.0, 1.0);
-    let mut padding = 0u64;
+    let (mut padding, mut bank) = (0u64, 0i64);
+    // Bytes encoded over the rate, and the ticks skipped for it this period (the frame dropper)
+    let (mut over, mut held) = (0i64, 0u64);
     while !stop.load(Ordering::Relaxed) {
         if let Some(e) = shared.failed.lock().expect("failed").take() {
             bail!(e);
@@ -530,6 +532,17 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
             kbps = wanted;
             e.set_rate(kbps);
         }
+        // libwebrtc's frame dropper: an encoder at its coarsest can't go under what the picture
+        // needs (AMF at 4K60 with a video playing: 2.2-4 Mbps asked for 1.1, a 3 Mbps upload queued
+        // 1-1.4 s in Chromium's pacer). Once it runs 250 ms of the rate over, skip ticks: fewer
+        // frames at the same resolution, as Chromium does for screen content. Never a keyframe
+        let per_tick = i64::from(kbps) * 1000 / 8 / i64::from(fps.max(1));
+        over = (over - per_tick).max(0);
+        if over > per_tick * i64::from(fps) / 4 && !key {
+            tick += 1;
+            held += 1;
+            continue;
+        }
         let name = e.name.clone();
         e.send(&frame, tick, key)?;
         tick += 1;
@@ -555,8 +568,13 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
                 reported_sps = true;
             }
             let pts_us = (pts.max(0) as u64) * 1_000_000 / u64::from(fps);
-            let min = (pad * f64::from(rate) * 1000.0 / 8.0 / f64::from(fps)) as usize;
-            let filled = padded(p.codec, data, min);
+            // Against a running budget, not per frame: in motion small frames were padded while large
+            // ones ran over, 20% over the rate at 15 Mbps, and on a 3 Mbps upload over Chromium's
+            // estimate (1.4 s in its pacer). Overshoot is remembered for a second
+            let budget = (pad * f64::from(rate) * 1000.0 / 8.0 / f64::from(fps)) as i64;
+            bank = (bank + budget - data.len() as i64).max(-budget * i64::from(fps));
+            let filled = if bank > 0 { padded(p.codec, data, data.len() + bank as usize) } else { None };
+            bank = bank.min(0);
             if let Some(f) = &filled {
                 padding += (f.len() - data.len()) as u64;
             }
@@ -564,6 +582,7 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
             frames += 1;
             keys += u64::from(key);
             bytes += data.len() as u64;
+            over += data.len() as i64;
             Ok(())
         })?;
         let elapsed = since.elapsed();
@@ -577,9 +596,10 @@ pub fn run(p: &Pacing, shared: &Shared, out: &Out, stop: &AtomicBool) -> Result<
                 "kbps": (bytes as f64 * 8.0 / 1000.0 / s).round(),
                 "padding": (padding as f64 * 8.0 / 1000.0 / s).round(),
                 "keyframes": keys,
+                "held": held,
                 "rate": rate,
             }));
-            (frames, keys, bytes, padding, since) = (0, 0, 0, 0, Instant::now());
+            (frames, keys, bytes, padding, held, since) = (0, 0, 0, 0, 0, Instant::now());
         }
     }
     Ok(())

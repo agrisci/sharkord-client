@@ -288,12 +288,14 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
 5. The helper's bitrate follows Chromium's transport estimate (`availableOutgoingBitrate`), not
    `targetBitrate`: Chromium counts the bytes the transform adds as post-encode overhead and halves
    the encoder target, and its estimate only grows to 1.5x what is acknowledged. While loss, round
-   trip and Chromium's pacer queue stay clean it only steps up with the estimate (which dips 15-50%
-   every few seconds on a clean LAN with mediasoup); on congestion (loss, a growing round trip, or
+   trip and Chromium's pacer queue stay clean it only steps up, to 0.9x the estimate (which dips
+   15-50% every few seconds on a clean LAN with mediasoup; the tenth is room for audio, overhead and
+   keyframes on a link that really is that fast); on congestion (loss, a growing round trip, or
    packets waiting over 250 ms in the pacer, i.e. the estimate really below what goes out; a
    keyframe's 50-180 ms doesn't count) it drops to 0.85x.
    **While the screen is still the helper pads** (`padded` in `src/ffmpeg.rs`): frames are filled
-   up to 90% of the rate with data decoders skip (an H.264 filler NAL unit; for AV1 a private
+   up to 90% of the rate, against a running budget (never over it with the video counted), with
+   data decoders skip (an H.264 filler NAL unit; for AV1 a private
    metadata OBU, as Chromium's AV1 packetizer drops padding OBUs), and the page counts it as sent.
    Without it the encoder sends ~0.1 Mbps, Chromium's estimate falls to 0.85x what was acknowledged
    (25 -> 5 Mbps), and after motion resumes it only grows ~8%/s: 15-20 s of lower quality, or, sent
@@ -303,6 +305,13 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
    pacing added 600-860 ms), and a probe by lowering and raising `maxBitrate` (no effect).
    `SHARKORD_PAD=<0..1>` sets the share (0: off); the page still follows the estimate down when the
    helper sends under half its rate, padding included.
+   **A frame dropper** keeps the helper at its rate when the encoder can't get under it (AMF at 4K60
+   with a video playing needs 2-4 Mbps at its coarsest): once it has sent 250 ms of the rate over,
+   it skips ticks (never a keyframe) -- fewer frames at the same resolution, as Chromium does for
+   screen content (`held` in the helper's stats). Measured with a 3 Mbps upload cap (a Windows QoS
+   policy on `electron.exe`), 4K60 H.264, a video playing: before, the helper sent 2.4-4 Mbps asked
+   for 1-2, 1.2-1.4 s in the pacer, the viewer at 22-41 fps with 2.5-5.4 s of freezes per 10 s;
+   now 51-58 fps, under 0.8 s, the pacer mostly under 20 ms.
    The helper changes it in place, without a keyframe, so it steps 10% at least 2 s apart; keyframe
    requests go to it at most every 300 ms. Capped by Sharkord's bitrate
    setting and ~25 Mbps at 4K60; the resolution stays what the user picked.
@@ -452,7 +461,11 @@ There are no automated tests. After a change, check what it touches:
   isn't left black, the next share is Chromium's. Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `GPU (Native: AMF, h264_amf)`. A UAC prompt or a
-  resolution change mid-share: the picture freezes briefly and comes back. Two monitors: each one;
+  resolution change mid-share: the picture freezes briefly and comes back. A slow upload (admin
+  PowerShell: `New-NetQosPolicy -Name cap -AppPathNameMatchCondition electron.exe
+  -ThrottleRateActionBitsPerSecond 3000000 -PolicyStore ActiveStore`, gone at reboot or with
+  `Remove-NetQosPolicy`), mid-share and from the start: the viewer stays around 50-60 fps, the
+  `sent` lines' pacer mostly under 250 ms, the helper's `held` above 0; lifted, full rate within ~40 s. Two monitors: each one;
   a portrait monitor arrives upright (`input` shows `rotate`, `started` the upright size). The `[native-share] sent …` lines (DevTools console, and the app's log,
   `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero
   (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for;
