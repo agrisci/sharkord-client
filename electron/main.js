@@ -301,7 +301,7 @@ async function handleDisplayMediaRequest (_req, callback) {
 //   the preload swaps its frames into Sharkord's own share.
 //   Frames go straight to the page over a MessagePort; the page sends keyframe
 //   and bitrate requests back the same way. The `nativeShare` setting turns it
-//   on (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
+//   on, by default where the encoder is tested (SHARKORD_NATIVE_SHARE=1 forces it, for testing).
 //   Linux: the helper owns the pick. The page asks for it (native-share-pick)
 //   instead of calling Chromium's getDisplayMedia, so the portal asks once: the
 //   helper shows it, then the picker's audio step, and the page builds the
@@ -346,8 +346,12 @@ function nativeShareNote () {
   if (!p.h264) return 'This GPU\'s driver can\'t encode H.264 here: H.264 shares use the browser\'s capture; AV1 shares go native.'
   return null
 }
+// On by default where the probe found an encoder tested live (AMD's AMF on Windows, Vulkan video or
+// VA-API on Linux); NVIDIA's NVENC and Intel's Quick Sync work but are off until tested (ROADMAP
+// #7, #8). A choice in Settings wins either way, and is only saved when made
+const nativeShareTested = () => ['amf', 'vulkan', 'vaapi'].includes(_nativeProbe?.api)
 const nativeShareOn = () => nativeShareSupported() &&
-  (process.env.SHARKORD_NATIVE_SHARE === '1' || !!loadUserSettings().nativeShare)
+  (process.env.SHARKORD_NATIVE_SHARE === '1' || (loadUserSettings().nativeShare ?? nativeShareTested()))
 
 // Which codecs this machine really encodes: the helper opens each encoder (`--check`). Once per
 // run; a share only goes native with a codec it found (native-share-pick / native-share-target).

@@ -301,22 +301,21 @@ function installNativeShare (workerSource, helperPicks) {
       try { s.port?.postMessage({ cmd: 'stop' }); s.port?.close() } catch {}
       s.port = null
     }
-    // Before any native frame went out (an unsupported codec, a helper that never started) the
-    // connection just gets Chromium's own capture -- if there is one: a share the helper picked
-    // (Linux) has nothing else, and ends. Mid-share, the share ends instead, as if the
-    // capture had stopped: Sharkord cleans up on the track's `ended`, viewers see the share end, and
-    // shares for the rest of the session use Chromium's own path (not after a suspend, which loses
-    // the capture without the helper being at fault). Continuing in place didn't work:
-    // swapping the capture track in restarted the RTP timestamps from its older clock (viewers
-    // dropped every frame as stale), and the hardware encoder Chromium switches to at <= 1080p
-    // stalled after a few frames.
+    // Before the placeholder reached a connection, the connection just gets Chromium's own capture
+    // -- if there is one: a share the helper picked (Linux) has nothing else, and ends. Once a
+    // connection carried it, the share ends instead, as if the capture had stopped: Sharkord cleans
+    // up on the track's `ended`, viewers see the share end, and shares for the rest of the session
+    // use Chromium's own path (not after a suspend, which loses the capture without the helper
+    // being at fault). Swapping Chromium's capture in after that left viewers black even before
+    // any native frame was swapped (#87: the helper failing 0.3 s in), and mid-share it restarted
+    // the RTP timestamps from its older clock (viewers dropped every frame as stale); the hardware
+    // encoder Chromium switches to at <= 1080p stalled after a few frames.
     s.fallback = why => {
       if (s.fell || s.stopped) return
       s.fell = true
       closeHelper()
-      if (!s.owned && (!s.sender || !s.stats.swapped)) {
+      if (!s.owned && !s.sender) {
         log('using Chromium capture:', why)
-        if (s.sender) { s.sender.transform = null; replaceTrack.call(s.sender, video).catch(e => log('fallback:', e.message)) }
         return
       }
       log('ending the share:', why)
@@ -468,16 +467,18 @@ function installNativeShare (workerSource, helperPicks) {
         const setting = +(sec?.match(/x-google-max-bitrate=(\d+)/)?.[1]) || Infinity
         const cap = Math.round(Math.min(setting, capFor({ ...s.want, width: s.encoder.width, height: s.encoder.height })))
         const clean = performance.now() - (s.congestedAt ?? -Infinity) > 10000
-        // Clean: the estimate itself, never down. It grows ~8%/s whenever at least 2/3 of it is
+        // Clean: 0.9x the estimate, never down. It grows ~8%/s whenever at least 2/3 of it is
         // sent, so running ahead doesn't ramp faster -- straight to the cap queued up to 1.3 s in
         // Chromium's pacer, 1.5x the estimate still 0.85 s, while it climbed 5 -> 25 Mbps in ~20 s.
+        // And the whole estimate left no room for audio, overhead and keyframes on a link that
+        // really is that fast: on a 3 Mbps upload each step up queued 0.5-0.7 s.
         // Except after a still screen: the helper sent under half what it was asked (VBR, a few
         // hundred kbps), Chromium's estimate fell to what was acknowledged (32 -> 5.8 Mbps), and
         // motion then went out at the old 25 Mbps into it: 1.4 s in the pacer for ~6 s. Then down
         // to the estimate, and up with it again
         // (The helper's padding counts: it holds the estimate up while the screen is still)
         const idle = (s.helper.kbps ?? Infinity) + (s.helper.padding ?? 0) < s.kbps * 0.5 && bwe < s.kbps
-        const aim = clean && !idle ? Math.min(cap, Math.max(s.kbps, bwe)) : Math.min(cap, Math.round(bwe * (clean ? 1 : 0.85)))
+        const aim = clean && !idle ? Math.min(cap, Math.max(s.kbps, Math.round(bwe * 0.9))) : Math.min(cap, Math.round(bwe * (clean ? 0.9 : 0.85)))
         s.cap = cap
         // The last step may be smaller: the cap (Sharkord's bitrate slider) is often under the step
         const [step, every] = [1.1, 2000]
@@ -687,9 +688,10 @@ const DESKTOP_OPTIONS = [
     description: 'When Sharkord opens at login, it starts in the system tray instead of showing its window.' },
   { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
-  { key: 'nativeShare',    label: 'Native screen share (experimental)',
-    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
-      (process.platform === 'linux' ? 'AMD and Intel GPUs (Vulkan video or VA-API), Wayland.' : 'AMD GPUs, whole screens.') + ' Takes effect on the next share.' },
+  { key: 'nativeShare',    label: 'Native screen share',
+    description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate and sharper picture, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
+      (process.platform === 'linux' ? 'AMD and Intel GPUs (Vulkan video or VA-API), Wayland. On by default.'
+        : 'Screens and windows. On by default with AMD GPUs; NVIDIA and Intel GPUs are supported but not tested yet, turn it on to try.') + ' Takes effect on the next share.' },
   { key: 'chromiumHwEncode', label: 'Hardware encoding for other shares',
     description: 'Lets the browser encode shares that don\'t use the native share on the GPU. Turn it off if those shares look corrupted or never load for viewers. ' +
       (process.platform === 'linux' ? 'Off by default: some drivers encode incorrectly. ' : '') + 'Takes effect after restarting Sharkord.' },

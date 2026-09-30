@@ -40,8 +40,9 @@ belongs to rather than adding files.
   `serverUrl` (saved without a trailing slash — use `savedServerUrl()`), `theme`
   (`'dark' | 'light'`, remembered from the page so local pages match it), `audio` (venmic
   options, merged over `AUDIO_DEFAULTS`), `minimizeToTray` (default off), `startMinimized` (a login launch stays in the
-  tray), `nativeShare` (default
-  off; usable only when the helper's `--check` probe at startup encodes with a codec -- AMF, NVENC
+  tray), `nativeShare` (unset: on where the probe's encoder has been tested -- AMF, Vulkan video,
+  VA-API -- off with NVENC and Quick Sync until they are (`nativeShareTested`); a choice saved in
+  Settings or the tray wins either way; usable only when the helper's `--check` probe at startup encodes with a codec -- AMF, NVENC
   or Quick Sync on Windows, Vulkan video or VA-API on Linux Wayland -- and a share goes native only with a codec it found; where it
   can't run, its switch is greyed out and `nativeShareNote` says why, and `nativeShareCodecs` lists
   what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross),
@@ -100,12 +101,13 @@ replaces steps 1-3 with the helper's portal pick and the picker's audio step).
    virtual mic from `enumerateDevices`, and calls `virtmic-stop` when the share ends. Sharkord
    ends shares with `track.stop()`, which fires no `ended` event, so both are hooked.
 
-### Native screen share (Windows, Linux Wayland; experimental)
+### Native screen share (Windows, Linux Wayland)
 
-With the `nativeShare` setting on (or `SHARKORD_NATIVE_SHARE=1`), some shares are captured and
-encoded outside Chromium by the helper in `native/`, while Sharkord and Chromium keep everything
-else (connection, packetization, bandwidth estimate). **Chromium's own share is the default**; the
-helper is opt-in per share, so nothing it can't handle ever reaches it.
+With the `nativeShare` setting on (by default where the encoder is tested, see *Settings*; or
+`SHARKORD_NATIVE_SHARE=1`), some shares are captured and encoded outside Chromium by the helper in
+`native/`, while Sharkord and Chromium keep everything else (connection, packetization, bandwidth
+estimate). **Chromium's own share takes every share the helper isn't sure of**: the helper is
+chosen per share, so nothing it can't handle ever reaches it.
 
 **Which path a share takes.** At startup `probeNativeShare` runs the helper's `--check` once: it
 encodes a frame with each codec (Windows: AMF, else NVENC, else Quick Sync, on the first adapter
@@ -143,7 +145,7 @@ Sharkord's state; a renamed key or field only turns the helper off:
 
 | Failure | Windows | Linux |
 |---|---|---|
-| Before the first native frame (the encoder won't start despite the probe, a codec other than the settings said) | the connection gets Chromium's capture; the share goes on | the share **ends** (nothing to fall back to); later shares that session are Chromium's |
+| Before the first native frame (the encoder won't start despite the probe, a codec other than the settings said) | before the placeholder reached a connection, the share goes on with Chromium's capture; after it, the share **ends** as mid-share (swapping the capture in then left viewers black, #87) | the share **ends** (nothing to fall back to); later shares that session are Chromium's |
 | Mid-share (helper error or exit, watchdog: no frame for 10 s / none swapped for 6 s) | the share ends; later shares that session are Chromium's (logged at each share), unless the system was suspended during it (`powerMonitor`, sent as a `suspend` event on the share's port) | same |
 | A picker or the audio step cancelled | no share | no share; the helper is stopped |
 
@@ -198,7 +200,9 @@ Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18
 - **Pacing and bitrate** as on Linux (`src/ffmpeg.rs`): our patches change AMF's, NVENC's and Quick
   Sync's rate in place, without a keyframe. `cargo test -- --ignored` encodes this desktop
   (scrolled every other frame): keyframes on request only, ≤ 600 KB, a bitrate change without one.
-  `SHARKORD_ENCODE_API=amf|nvenc|qsv` forces an API.
+  `SHARKORD_ENCODE_API=amf|nvenc|qsv` forces an API. `SHARKORD_TEST_FAIL=start` makes the helper
+  fail its share at once, `=<ms>` send an `error` that long after starting (both platforms), to
+  test the fallback.
 
 **Linux details.** The page's `getDisplayMedia` hook calls `native-share-pick` instead of
 Chromium's; main spawns the helper, which opens its own ScreenCast portal session at once
@@ -284,12 +288,14 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
 5. The helper's bitrate follows Chromium's transport estimate (`availableOutgoingBitrate`), not
    `targetBitrate`: Chromium counts the bytes the transform adds as post-encode overhead and halves
    the encoder target, and its estimate only grows to 1.5x what is acknowledged. While loss, round
-   trip and Chromium's pacer queue stay clean it only steps up with the estimate (which dips 15-50%
-   every few seconds on a clean LAN with mediasoup); on congestion (loss, a growing round trip, or
+   trip and Chromium's pacer queue stay clean it only steps up, to 0.9x the estimate (which dips
+   15-50% every few seconds on a clean LAN with mediasoup; the tenth is room for audio, overhead and
+   keyframes on a link that really is that fast); on congestion (loss, a growing round trip, or
    packets waiting over 250 ms in the pacer, i.e. the estimate really below what goes out; a
    keyframe's 50-180 ms doesn't count) it drops to 0.85x.
    **While the screen is still the helper pads** (`padded` in `src/ffmpeg.rs`): frames are filled
-   up to 90% of the rate with data decoders skip (an H.264 filler NAL unit; for AV1 a private
+   up to 90% of the rate, against a running budget (never over it with the video counted), with
+   data decoders skip (an H.264 filler NAL unit; for AV1 a private
    metadata OBU, as Chromium's AV1 packetizer drops padding OBUs), and the page counts it as sent.
    Without it the encoder sends ~0.1 Mbps, Chromium's estimate falls to 0.85x what was acknowledged
    (25 -> 5 Mbps), and after motion resumes it only grows ~8%/s: 15-20 s of lower quality, or, sent
@@ -299,6 +305,13 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
    pacing added 600-860 ms), and a probe by lowering and raising `maxBitrate` (no effect).
    `SHARKORD_PAD=<0..1>` sets the share (0: off); the page still follows the estimate down when the
    helper sends under half its rate, padding included.
+   **A frame dropper** keeps the helper at its rate when the encoder can't get under it (AMF at 4K60
+   with a video playing needs 2-4 Mbps at its coarsest): once it has sent 250 ms of the rate over,
+   it skips ticks (never a keyframe) -- fewer frames at the same resolution, as Chromium does for
+   screen content (`held` in the helper's stats). Measured with a 3 Mbps upload cap (a Windows QoS
+   policy on `electron.exe`), 4K60 H.264, a video playing: before, the helper sent 2.4-4 Mbps asked
+   for 1-2, 1.2-1.4 s in the pacer, the viewer at 22-41 fps with 2.5-5.4 s of freezes per 10 s;
+   now 51-58 fps, under 0.8 s, the pacer mostly under 20 ms.
    The helper changes it in place, without a keyframe, so it steps 10% at least 2 s apart; keyframe
    requests go to it at most every 300 ms. Capped by Sharkord's bitrate
    setting and ~25 Mbps at 4K60; the resolution stays what the user picked.
@@ -442,10 +455,17 @@ There are no automated tests. After a change, check what it touches:
   voice echoed; audio unlinks when the share stops or the picker is closed.
 - **Share audio (Windows)**: "Stream With Audio" loopback.
 - **Native screen share (Windows; AMD, NVIDIA, Intel)**: the probe (`[native-share] probe` in the
-  log) names the `api` and `device`. Turn it on in Settings → Desktop Client (or the tray). Share a
+  log) names the `api` and `device`. With AMF it is on by default (no `nativeShare` in
+  `settings.json`), NVENC and Quick Sync need it turned on in Settings → Desktop Client (or the
+  tray); turning it off sticks. `SHARKORD_TEST_FAIL=300`: the share ends within ~2 s, the viewer
+  isn't left black, the next share is Chromium's. Share a
   screen with H.264, then AV1, simulcast off: a viewer gets 60 fps, rejoining shows a picture
   within a second, and Sharkord's stats show `GPU (Native: AMF, h264_amf)`. A UAC prompt or a
-  resolution change mid-share: the picture freezes briefly and comes back. Two monitors: each one;
+  resolution change mid-share: the picture freezes briefly and comes back. A slow upload (admin
+  PowerShell: `New-NetQosPolicy -Name cap -AppPathNameMatchCondition electron.exe
+  -ThrottleRateActionBitsPerSecond 3000000 -PolicyStore ActiveStore`, gone at reboot or with
+  `Remove-NetQosPolicy`), mid-share and from the start: the viewer stays around 50-60 fps, the
+  `sent` lines' pacer mostly under 250 ms, the helper's `held` above 0; lifted, full rate within ~40 s. Two monitors: each one;
   a portrait monitor arrives upright (`input` shows `rotate`, `started` the upright size). The `[native-share] sent …` lines (DevTools console, and the app's log,
   `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero
   (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for;
