@@ -332,7 +332,9 @@ There are no automated tests. After a change, check what it touches:
   `logs/main.log`, as `[page] [native-share] …`) should keep `lost`/`resync` near zero
   (`pli`/`fir`: keyframe requests from viewers or mediasoup; `keyreq`: helper keyframes asked for;
   `native keys [<KB> rate|req|other]`: the helper's keyframes and why), and an `estimate fell` line
-  marks a collapse of Chromium's estimate with the keyframe before it.
+  marks a collapse of Chromium's estimate with the keyframe before it. `resynced after <why>: <ms>,
+  <n> frames not sent` reports each loss of the frame swap's sync (a Chromium keyframe for a request,
+  frames Chromium dropped) and how long it took to get back.
   While watching, `[native-share] incoming <codec> <size>: decoder …, GPU|CPU` names the decoder of
   each incoming video (once, and again if it changes); Chromium only names it while the page
   captures (the mic in a voice channel). Every 10 s `[native-share] watching …` gives what the viewer

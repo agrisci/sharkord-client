@@ -99,7 +99,9 @@ contextBridge.executeInMainWorld({ func: installShareAudioHooks, args: ['vencord
 // and when a viewer's PLI makes Chromium key on its own.
 const NATIVE_SHARE_WORKER = `
 const queue = [], stats = { swapped: 0, bootstrap: 0, noMatch: 0, lost: 0, chromeKeys: 0, resync: 0, nativeKeys: 0, ckNoNk: 0, nkNoCk: 0 }
-let offset = null, codec = null, synced = false, askedKey = false
+let offset = null, codec = null, synced = false, askedKey = false, lostAt = 0, lostWhy = '', unsent = 0
+// A loss of sync and how long it took to get back, reported once sync is back
+const unsync = why => { if (synced || !lostAt) { lostAt = performance.now(); lostWhy = why; unsent = 0 } synced = false }
 const needKey = () => { if (!askedKey) { askedKey = true; self.postMessage({ type: 'need-key' }) } }
 self.onmessage = e => {
   const m = e.data
@@ -127,14 +129,15 @@ self.onrtctransform = e => {
     queue.forEach((q, k) => { if (q.w !== meta.width || q.h !== meta.height) return   // the size pins keyframes to the right frame
       const d = (rtpOf(q.ts) - meta.rtpTimestamp) | 0; if (Math.abs(d) <= 720 && (i < 0 || Math.abs(d) < Math.abs(err))) { i = k; err = d } })
     if (i >= 0) offset = (offset - Math.round(err * 0.2)) >>> 0   // follow Chromium's timestamp smoothing
-    if (i < 0) { stats.noMatch++; if (ckey) { synced = false; needKey() } continue }
-    if (i > 0) { if (queue.slice(0, i).some(q => q.data)) { stats.lost += i; synced = false } queue.splice(0, i) }
+    if (i < 0) { stats.noMatch++; if (ckey) { unsync('keyframe without a match'); needKey() } continue }
+    if (i > 0) { if (queue.slice(0, i).some(q => q.data)) { stats.lost += i; unsync('frames dropped by Chromium') } queue.splice(0, i) }
     const f = queue.shift()
     if (!f.data) { stats.bootstrap++; continue }          // placeholder sent before the helper's frames
-    if (synced && ckey && !f.key) synced = false          // a viewer asked for a keyframe
+    if (synced && ckey && !f.key) unsync('Chromium keyframe (a request)')   // a viewer asked for a keyframe
     if (!synced) {
-      if (!(ckey && f.key)) { stats.resync++; if (ckey) stats.ckNoNk++; if (f.key) stats.nkNoCk++; needKey(); continue }
+      if (!(ckey && f.key)) { stats.resync++; unsent++; if (ckey) stats.ckNoNk++; if (f.key) stats.nkNoCk++; needKey(); continue }
       synced = true
+      if (lostAt) { self.postMessage({ type: 'resynced', why: lostWhy, ms: Math.round(performance.now() - lostAt), unsent }); lostAt = 0 }
     }
     frame.data = f.data; stats.swapped++
     await out.write(frame)
@@ -350,6 +353,7 @@ function installNativeShare (workerSource, helperPicks) {
       if (m.type === 'stats') s.stats = m.stats
       if (m.type === 'anchored') s.anchored = true
       if (m.type === 'need-key') requestKeyframe()
+      if (m.type === 'resynced') log(`resynced after ${m.why}: ${m.ms} ms, ${m.unsent} frames not sent, keyframe asked ${s.keyAt ? Math.round(performance.now() - s.keyAt) + ' ms ago' : 'never'}`)
       if (m.type === 'codec' && !s.port && !s.fell) {
         const codec = CODECS[m.codec]
         if (!codec) return s.fallback(m.codec + ' has no native encoder')
