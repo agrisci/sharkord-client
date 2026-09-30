@@ -183,11 +183,15 @@ and `encode.rs` converts and encodes with a static FFmpeg of our own (`scripts/d
 - **Bitrate** changes apply to the next frame without a keyframe (FFmpeg otherwise sends rate
   control only with the first picture on Vulkan, and only with IDRs on VA-API; the drivers accept it
   on any frame). Our FFmpeg patches (`scripts/deps/ffmpeg-*.patch`) do that and the frame cap.
-- **Drivers**: the system's Mesa first. Fedora and openSUSE build Mesa without H.264 (VA-API and
-  Vulkan), so the package ships RADV and ANV built with it (`scripts/deps/mesa.sh`, `resources/
-  native/mesa/`): when the system's can't encode H.264, the helper re-runs itself with the Vulkan
-  loader pointed at them (`VK_DRIVER_FILES`, `SHARKORD_BUNDLED_DRIVER=1`). Only the helper loads
-  them. NVIDIA needs NVIDIA's own driver (nouveau can't encode).
+- **Drivers**, in this order: the system's Vulkan; the bundled Vulkan drivers; the system's VA-API.
+  Fedora and openSUSE build Mesa without H.264 (VA-API and Vulkan), so the package ships RADV and
+  ANV built with it (`scripts/deps/mesa.sh`, `resources/native/mesa/`): when the system's Vulkan
+  can't encode H.264, the helper re-runs itself with the Vulkan loader pointed at them
+  (`VK_DRIVER_FILES`, `SHARKORD_BUNDLED_DRIVER=1`) -- ahead of a system VA-API that could (RPM
+  Fusion's), because VBR under the frame cap beats VA-API's CBR. VA-API stays for GPUs Mesa's Vulkan
+  can't encode on (AMD before VCN, Intel before Gen12). Only the helper loads the bundled drivers.
+  NVIDIA needs NVIDIA's own driver (nouveau can't encode). VBR aims 6% under the target (it runs
+  that much over).
 - For testing: `SHARKORD_TEST_NODE=<PipeWire node id>` captures that node without the portal's
   dialog, `SHARKORD_PORTAL_TOKEN=<file>` keeps the portal's restore token there (one dialog, then
   none), `SHARKORD_ENCODE_API=vulkan|vaapi` forces an API. The helper's stderr (`capture:` lines:

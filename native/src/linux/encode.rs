@@ -414,6 +414,7 @@ pub struct Encoder {
     pkt: *mut ff::AVPacket,
     pub name: String,
     fps: u32,
+    vbr: bool,
 }
 
 unsafe impl Send for Encoder {}
@@ -432,7 +433,7 @@ impl Encoder {
                 bail!("{name} is not in this FFmpeg");
             }
             let ctx = ff::avcodec_alloc_context3(codec);
-            let me = Encoder { ctx, pkt: ff::av_packet_alloc(), name: name.to_owned(), fps: s.fps };
+            let me = Encoder { ctx, pkt: ff::av_packet_alloc(), name: name.to_owned(), fps: s.fps, vbr: dev.api == Api::Vulkan };
             (*ctx).width = s.size.0 as c_int;
             (*ctx).height = s.size.1 as c_int;
             (*ctx).time_base = ff::AVRational { num: 1, den: s.fps as c_int };
@@ -475,11 +476,14 @@ impl Encoder {
         }
     }
 
-    /// The target `kbps` (also the peak), with 8 frames of it as the VBV (see the module comment).
+    /// The target `kbps` (the peak; VBR's average a little under it), with 8 frames of it as the VBV
+    /// (see the module comment).
     pub fn set_rate(&self, kbps: u32) {
         let bps = i64::from(kbps.max(100)) * 1000;
         unsafe {
-            (*self.ctx).bit_rate = bps;
+            // Vulkan's VBR ran ~6% over its average: aimed at 94%, it lands on the target (sending
+            // over Chromium's estimate queued 200-500 ms when motion resumed)
+            (*self.ctx).bit_rate = if self.vbr { bps * 94 / 100 } else { bps };
             (*self.ctx).rc_max_rate = bps;
             (*self.ctx).rc_buffer_size = (bps * 8 / i64::from(self.fps.max(1))) as c_int;
         }

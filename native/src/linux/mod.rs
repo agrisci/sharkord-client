@@ -63,7 +63,11 @@ fn pick() -> Option<(Device, bool, bool)> {
         Ok("vulkan") => vec![Api::Vulkan],
         _ => vec![Api::Vulkan, Api::Vaapi],
     };
-    for api in apis {
+    pick_from(&apis)
+}
+
+fn pick_from(apis: &[Api]) -> Option<(Device, bool, bool)> {
+    for &api in apis {
         for node in Device::render_nodes() {
             let Ok(dev) = Device::open(&node, api) else { continue };
             let (h264, av1) = (can_encode(&dev, Codec::H264), can_encode(&dev, Codec::Av1));
@@ -104,12 +108,18 @@ fn bundled_drivers() -> Option<String> {
     })
 }
 
-/// Where the system's drivers can't encode H.264 (Fedora and openSUSE build Mesa without it) and
-/// the bundled ones are here, runs this same helper again on those: only this process loads them,
-/// never the app. Called first thing, before the portal's dialog.
+/// Where the system's Vulkan driver can't encode H.264 (Fedora and openSUSE build Mesa without it,
+/// NVIDIA aside) and the bundled ones are here, runs this same helper again on those: only this
+/// process loads them, never the app. Called first thing, before the portal's dialog. Ahead of the
+/// system's VA-API, which may encode there too (with RPM Fusion's driver): VBR under the frame cap
+/// beats VA-API's CBR, which pads a still screen. On the bundled drivers the helper still falls back
+/// to VA-API where they can't encode (AMD before VCN, Intel before Gen12).
 pub fn prefer_bundled_driver() {
     use std::os::unix::process::CommandExt;
-    if std::env::var_os(BUNDLED).is_some() || pick().is_some_and(|(_, h264, _)| h264) {
+    if std::env::var_os(BUNDLED).is_some()
+        || std::env::var("SHARKORD_ENCODE_API").as_deref() == Ok("vaapi")
+        || pick_from(&[Api::Vulkan]).is_some_and(|(_, h264, _)| h264)
+    {
         return;
     }
     let Some(icds) = bundled_drivers() else { return };
