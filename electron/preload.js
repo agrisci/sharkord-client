@@ -378,7 +378,7 @@ function installNativeShare (workerSource, helperPicks) {
               }
               s.pending.push({ key: msg.key, data: d.byteOffset === 0 && d.byteLength === d.buffer.byteLength ? d.buffer : d.slice().buffer })
               pace()
-            } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps, padding: msg.padding }
+            } else if (msg.event === 'stats') s.helper = { fps: msg.fps, kbps: msg.kbps, padding: msg.padding, held: msg.held }
             else if (msg.event === 'error') s.fallback('helper failed: ' + msg.message)
             else if (msg.event === 'suspend') { s.suspended = true; log('system suspending') }
             else if (msg.event === 'started') { s.encoder = { name: msg.encoder, width: msg.size?.[0], height: msg.size?.[1] }; log(msg.event, JSON.stringify(msg)) }
