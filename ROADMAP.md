@@ -33,7 +33,7 @@ Things best fixed in Sharkord itself; the client can only work around them.
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 28 | P1 | Upgrade mediasoup to ≥ 3.27 | 💡 | Sharkord pins mediasoup 3.19.19 (`apps/server/package.json`), whose transport-cc feedback carries arrival times in whole milliseconds. That matches the 15-50% estimate dips we measured on a clean LAN. Fixed in [mediasoup 3.27.0](https://github.com/versatica/mediasoup/blob/v3/CHANGELOG.md) (PRs #1914, #1917). Would also let #21 be simplified. |
-| 79 | P1 | H.264 High profile for screen share | 💡 | The server already offers High `640032` next to Constrained Baseline (`apps/server/src/runtimes/voice.ts:63-73`); the share uses the first H.264 entry. High (CABAC, 8x8 transform) gives noticeably better quality per bit. Needs a Sharkord option or picking it in our hook, plus #72 set to `high`. |
+| 79 | P1 | H.264 High profile for screen share | 🧪 | The server offers High `640032` next to Constrained Baseline (`apps/server/src/runtimes/voice.ts:63-73`); Sharkord's client takes the first H.264 entry. The native share doesn't need it: the helper's AMF encodes High (#48) under the Baseline label. Chromium's own path still needs a Sharkord option or picking High in our hook. |
 | 32 | P3 | "Bundled payload type collision" on viewers | 💡 | Logged when Sharkord renegotiates the receive connection, with "Inconsistent congestion control feedback types, ignoring all". May weaken the server-to-viewer rate control; report upstream if confirmed. |
 | 31 | P2 | Stale-stream keyframe requests | 📋 | A viewer requested keyframes 5x/s for a stream that no longer existed, after earlier shares. Find out whether Sharkord or the client keeps the consumer alive. |
 
@@ -107,7 +107,7 @@ shares* on (off by default):
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 47 | ✅ | H.264 and AV1 on the native path | ✅ | AMD AMF; AV1 keyframes forced with a GOP poke. |
-| 48 | P1 | H.264 High profile | 📋 | Client side of #79: pin the profile (#72), then encode High when the server's High entry is negotiated. |
+| 48 | P1 | H.264 High profile | 🧪 | AMF (#103) encodes High with CABAC under Sharkord's `42e01f`: VMAF on a 4K desktop, same quality at 34% fewer bits (text), better at 39% fewer (video). Live to the Renoir laptop (VA-API): 60 fps, 0 freezes, at 25 and 15 Mbps. Left: NVENC, Quick Sync, Linux (Vulkan/VA-API), other viewers (a Windows viewer, Firefox). |
 | 49 | P1 | AV1 on NVIDIA and Intel | 🧪 | Built in with #7/#8: `av1_nvenc` (RTX 40+), `av1_qsv` (Arc, newer iGPUs); the probe reports AV1 only where one encodes. |
 | 50 | P2 | VP9 on the native path | 💡 | The server offers VP9 profile 0; Intel encodes VP9 (`qsvvp9enc`) on GPUs without AV1. VP8/VP9 fall back to Chromium today. |
 | 52 | P2 | Suggest the codec from the probe | 💡 | Propose the best codec the sender's GPU encodes and viewers can decode, instead of a fixed setting. |

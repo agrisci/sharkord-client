@@ -176,7 +176,14 @@ Quick Sync), so it is one exe (1.6 MiB; the GStreamer subset it replaced was ~18
   a share starts with (8 keyframe requests in 15 s). It also makes a lower rate take hold at once:
   without it AMF took over 2 s to follow a cut. FFmpeg's default `qmax` (31) is lifted to the
   codec's maximum: it reached AMF as its maximum QP, and 4K motion then couldn't get under 16-20
-  Mbps. H.264 is real Constrained Baseline (`424033`, the constraint flag set: #86).
+  Mbps. H.264 is **High profile with CABAC** (`640433`), sent under Sharkord's Baseline label
+  (`42e01f`): decoders go by the stream's SPS, as they already did for its level (5.1, not 3.1);
+  the laptop decodes it on its GPU at 60 fps. Measured with VMAF on a 4K desktop (`h264_amf`, the
+  helper's settings): the same quality as Constrained Baseline at 34% fewer bits on scrolling text,
+  and better quality at 39% fewer on video; at 3 Mbps text's 1% low went 63 -> 85. AMF's `quality`
+  preset and pre-analysis made it worse or slower (57-67 fps). `SHARKORD_H264_PROFILE=baseline`
+  goes back to Constrained Baseline (`424033`, the constraint flag set: #86). NVENC and Quick
+  Sync stay Constrained Baseline until tested.
 - **Pacing and bitrate** as on Linux (`src/ffmpeg.rs`): our patches change AMF's, NVENC's and Quick
   Sync's rate in place, without a keyframe. `cargo test -- --ignored` encodes this desktop
   (scrolled every other frame): keyframes on request only, ≤ 600 KB, a bitrate change without one.
@@ -255,8 +262,8 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
    work: swapping a capture track in restarts the RTP timestamps from its older clock (viewers
    dropped every frame as stale), and the hardware encoder Chromium switches to mid-share at
    <= 1080p stalled.
-   For H.264 the helper pins Constrained Baseline (what Sharkord's `42e01f` promises, FFmpeg's
-   `profile`) and reports the first keyframe's SPS as
+   For H.264 the helper pins its profile (FFmpeg's `profile`: High on AMF, Constrained Baseline
+   elsewhere, under Sharkord's `42e01f` either way) and reports the first keyframe's SPS as
    a `stream` event, so the log shows what viewers really get.
 4. Each helper frame gets one placeholder frame (paced: Chromium thins out bursts), and the worker
    swaps its payload into the matching outgoing frame. Chromium derives the RTP timestamp from the
