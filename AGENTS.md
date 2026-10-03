@@ -18,7 +18,7 @@ side is ~3000 lines and the native helper ~3300 (`native/`, `scripts/stage-nativ
 | Path                         | What it is                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
 | `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, updates (electron-updater), diagnostics (the redacted report file), lifecycle |
-| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), the page's visibility (`document.hidden` from the window, see *Notifications* below), the page-side log lines (`[notify]`, `[ws]`, `[hook]`, `[page] error:`), injected "Change server" controls, a **Desktop Client** tab in the user settings (the options and a Diagnostics card with **Save diagnostics…**) and the update arrow in the header |
+| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM; on Windows main shows the toast), the page's visibility (`document.hidden` from the window, see *Notifications* below), the page-side log lines (`[notify]`, `[ws]`, `[hook]`, `[page] error:`), injected "Change server" controls, a **Desktop Client** tab in the user settings (the options and a Diagnostics card with **Save diagnostics…**) and the update arrow in the header |
 | `electron/picker.html`       | Screen share picker (source grid + audio step), styled like Sharkord                          |
 | `electron/picker-preload.js` | `pickerAPI` bridge for the picker window                                                      |
 | `electron/first-launch.html` | Server URL prompt (first run and Change server)                                               |
@@ -565,7 +565,8 @@ There are no automated tests. After a change, check what it touches:
   account while Sharkord's window isn't focused shows a native notification, in any channel,
   flashes the taskbar until focused (X11; Wayland ignores it), and clicking it brings the window
   back (also from the tray) and opens that channel or DM — test from the channel list and from the
-  DM list. On Windows (installed build) the toast is labelled Sharkord. With *Minimize to tray* on,
+  DM list. On Windows the installed build's toast is labelled Sharkord (`npm start`'s Electron,
+  under its own ID). With *Minimize to tray* on,
   leave a text channel open, close the window (`[window] close: hidden to the tray`, `[page]
   [window] page visibility: hidden`) and send a message into that channel: it notifies (`[page]
   [notify] shown: … hidden true`, `[notify] shown: window hidden, unfocused → flash true`, `[page]
