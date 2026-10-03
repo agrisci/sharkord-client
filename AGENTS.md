@@ -93,7 +93,8 @@ belongs to rather than adding files.
   release's `files` lists AppImage, deb and rpm; a prerelease version publishes its own channel,
   `beta.yml`, that stable installs ignore). Per install: NSIS runs the installer with `--updated /S`;
   the AppImage is replaced in place (renamed to the new version's name when the old one had a
-  version, so `appimage-filename-updated` rewrites the autostart entry); deb and rpm go through
+  version, so `appimage-filename-updated` rewrites the autostart entry; a name without a version,
+  `Sharkord.AppImage`, is kept, which the README recommends for shortcuts); deb and rpm go through
   `pkexec dpkg -i` / `dnf install`, a password dialog (`needsPassword`), so `autoInstallOnAppQuit` is
   on only for Windows and the AppImage; they run synchronously in the main process (measured ~12 s
   for the rpm), so `installUpdate` hides the window first and the error handler shows it again if
@@ -105,6 +106,8 @@ belongs to rather than adding files.
   single-instance lock is retried for 5 s while the old process quits. Not packaged, or an AppImage run from its extracted files:
   the updater is off with the reason in `autoUpdateNote`. Unsigned Windows builds: the updater skips
   the Authenticode check without a `publisherName` and trusts `latest.yml`'s SHA-512.
+  At startup the installer of the running version is removed from electron-updater's cache
+  (`<cache>/sharkord-updater/pending`); a newer pending download is kept.
   `SHARKORD_UPDATE_FEED=<url>` (installed builds) replaces GitHub with a directory of
   `latest*.yml` + installers, to test the whole flow offline; `SHARKORD_TEST_UPDATE=install|quit`
   restarts into a downloaded update at once, or quits (the install-on-quit path). Logged as

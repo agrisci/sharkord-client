@@ -809,6 +809,17 @@ function loadUpdater () {
     try { if (openAtLogin()) setOpenAtLogin(true) } catch (e) { log('[update] autostart entry:', e.message) }
   })
   log('[update] enabled:', app.getVersion(), process.platform === 'linux' ? (process.env.APPIMAGE ? 'AppImage' : packageType()) : 'nsis')
+  // A deb/rpm installer stays in electron-updater's cache (90-130 MB) after its install, until the
+  // next download; the one of the version now running is dropped here, with its update-info.json
+  // (left alone too by an AppImage install, which moves the file out). A newer installer is kept: a
+  // download that outlived a restart
+  try {
+    const pending = path.join(app.getPath('cache'), 'sharkord-updater', 'pending')   // updaterCacheDirName in app-update.yml
+    const files = fs.readdirSync(pending), installed = files.filter(f => f.includes(`-${app.getVersion()}-`))
+    const newer = files.filter(f => !installed.includes(f) && f !== 'update-info.json')
+    if (!newer.length) for (const f of [...installed, 'update-info.json']) fs.rmSync(path.join(pending, f), { force:true })
+    if (installed.length) log('[update] removed the installed update from the cache:', installed.join(', '))
+  } catch {}
 }
 
 // electron-updater's errors carry a page of response headers; the tab gets one plain sentence (the

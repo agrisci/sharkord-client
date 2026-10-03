@@ -26,7 +26,7 @@ page.
 | **Windows 10 / 11** | `Sharkord-<version>-x64.exe` | Run it. The installer isn't code-signed yet, so Windows SmartScreen may warn the first time: **More info → Run anyway** |
 | **Fedora, openSUSE** | `Sharkord-<version>-x86_64.rpm` | Open it with your software center, or `sudo dnf install ./Sharkord-<version>-x86_64.rpm` |
 | **Ubuntu 22.04+, Debian 12+, Linux Mint** | `Sharkord-<version>-amd64.deb` | Open it with your software center, or `sudo apt install ./Sharkord-<version>-amd64.deb` |
-| **Any other Linux** | `Sharkord-<version>-x86_64.AppImage` | Make it executable and run it |
+| **Any other Linux** | `Sharkord-<version>-x86_64.AppImage` | Make it executable and run it. Rename it to `Sharkord.AppImage` if you make a shortcut to it: updates then keep the file name (a versioned name changes with each update) |
 
 On first launch Sharkord asks for your server's address (e.g. `https://sharkord.example.com`).
 
