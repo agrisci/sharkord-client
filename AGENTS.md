@@ -111,7 +111,8 @@ belongs to rather than adding files.
   At startup the installer of the running version is removed from electron-updater's cache
   (`<cache>/sharkord-updater/pending`); a newer pending download is kept.
   `SHARKORD_UPDATE_FEED=<url>` (installed builds) replaces GitHub with a directory of
-  `latest*.yml` + installers, to test the whole flow offline; `SHARKORD_TEST_UPDATE=install|quit`
+  `latest*.yml` + installers, to test the whole flow offline, `SHARKORD_UPDATE_INTERVAL=<ms>` shortens
+  the periodic check; `SHARKORD_TEST_UPDATE=install|quit`
   restarts into a downloaded update at once, or quits (the install-on-quit path). Logged as
   `[update]`. The tab's card header shows the client's version (`version` in `desktop-settings-get`).
 

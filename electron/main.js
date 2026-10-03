@@ -768,7 +768,7 @@ function updateTrayMenu () {
 //   (preload.js), the tray and the Desktop Client tab until the user restarts into it. Windows and
 //   the AppImage also install on quit; deb and rpm install through pkexec (a password dialog), so
 //   only when asked. No dialogs: the arrow is the whole prompt.
-const UPDATE_CHECK_EVERY = 4 * 60 * 60 * 1000
+const UPDATE_CHECK_EVERY = Number(process.env.SHARKORD_UPDATE_INTERVAL) || 4 * 60 * 60 * 1000   // ms; the env var for testing
 const UPDATE_FEED = process.env.SHARKORD_UPDATE_FEED   // a directory with latest*.yml + installers, for testing
 // electron-builder marks deb and rpm installs; the updater picks dpkg/dnf over the AppImage one by it
 const packageType = () => { try { return fs.readFileSync(path.join(process.resourcesPath, 'package-type'), 'utf8').trim() } catch { return '' } }
