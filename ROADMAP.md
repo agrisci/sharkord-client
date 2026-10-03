@@ -219,7 +219,7 @@ shares* on (off by default):
 | 38 | P1 | Tests for the pairing logic | 📋 | The worker's frame pairing is the most fragile code and needs no GPU: feed it synthetic frames (drops, timestamp drift, keyframes, PLIs) in CI. |
 | 58 | P1 | Installer smoke test | 📋 | Install the NSIS build on the runner, launch it, assert a local page loads and the app quits cleanly. |
 | 39 | P1 | Code signing | 📋 | Unsigned installer plus a spawned `.exe` trips SmartScreen and antivirus tools (README already warns about SmartScreen). |
-| 42 | P2 | Auto-update | 💡 | electron-updater with GitHub Releases works for NSIS and AppImage (not Flatpak). |
+| 42 | P2 | Auto-update | ✅ | electron-updater against the GitHub Releases: background download, a green arrow in the header (and the tray, and the Desktop Client tab) that restarts into the new version; NSIS and the AppImage also install on quit, deb/rpm through pkexec on click. CI uploads `latest*.yml` and the blockmaps. Tested from a local feed on Linux (AppImage and rpm, three hops each) and Windows (NSIS). Left: no Flatpak; unsigned Windows builds skip the Authenticode check until #39. |
 | 59 | P2 | Checksums and provenance | 💡 | SHA-256 sums and GitHub artifact attestations with each Release. |
 | 60 | P2 | ARM64 builds | 💡 | electron-builder handles NSIS and AppImage arm64; the native helper would need an ARM encoder. |
 | 41 | P2 | Licence notices | 🚧 | The helper ships `LICENSES/` with FFmpeg's LGPL (and `SOURCES.md`: source, configure line and patches) on both platforms, plus glslang's and Mesa's on Linux (#104), libvpl's and the AMF/NVENC headers' on Windows (#103). Missing: a top-level third-party notice and an About entry. |
