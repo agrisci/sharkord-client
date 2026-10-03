@@ -11,14 +11,14 @@ There is no build step, no TypeScript and no bundler: plain CommonJS JavaScript 
 
 Core principle: **no over-engineering**. Follow the existing pattern, add the smallest thing
 that works, and don't introduce abstractions or dependencies for a single use case. The Electron
-side is ~2500 lines and the native helper ~3300 (`native/`, `scripts/stage-native.js`, `scripts/deps/`), on purpose.
+side is ~3000 lines and the native helper ~3300 (`native/`, `scripts/stage-native.js`, `scripts/deps/`), on purpose.
 
 ## Architecture
 
 | Path                         | What it is                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, lifecycle |
-| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls and a **Desktop Client** tab in the user settings |
+| `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, updates (electron-updater), diagnostics (the redacted report file), lifecycle |
+| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM; on Windows main shows the toast), the page's visibility (`document.hidden` from the window, see *Notifications* below), the page-side log lines (`[notify]`, `[ws]`, `[hook]`, `[page] error:`), injected "Change server" controls, a **Desktop Client** tab in the user settings (the options and a Diagnostics card with **Save diagnostics…**) and the update arrow in the header |
 | `electron/picker.html`       | Screen share picker (source grid + audio step), styled like Sharkord                          |
 | `electron/picker-preload.js` | `pickerAPI` bridge for the picker window                                                      |
 | `electron/first-launch.html` | Server URL prompt (first run and Change server)                                               |
@@ -28,6 +28,7 @@ side is ~2500 lines and the native helper ~3300 (`native/`, `scripts/stage-nativ
 | `native/`                    | Native screen share helper (Rust + our static FFmpeg, `src/ffmpeg.rs`: encoder and paced encode loop): captures a monitor (Windows: DXGI desktop duplication → AMF, NVENC or Quick Sync, `src/windows.rs`) or a portal pick (Linux Wayland: PipeWire → Vulkan video or VA-API, `src/linux/`), frames on stdout (see *Native screen share*) |
 | `scripts/stage-native.js`    | Builds the helper and stages it into `build/native/` (shipped as `resources/native/`): on Windows one static exe, on Linux with the bundled Mesa Vulkan drivers (`mesa/`); licences in `LICENSES/` |
 | `scripts/deps/`              | The helper's FFmpeg, static LGPL with our patches (`ffmpeg-*.patch` Linux, `ffmpeg-windows-*.patch` Windows): `ffmpeg.sh` (Linux), `ffmpeg-windows.sh` (Windows, MSVC from MSYS2's bash); Linux also `mesa.sh` (RADV/ANV with H.264 encode, the helper's fallback), `ubuntu-packages.sh` (their build dependencies, CI), `container.sh` (the same in Ubuntu 22.04 via podman) |
+| `.github/ISSUE_TEMPLATE/`   | The bug report template: asks for the diagnostics file                                       |
 | `.github/workflows/build.yml` | CI: builds on Linux + Windows runners for PRs into `dev`/`main` and pushes to `dev` (artifacts); run manually on `main` with a version bump to release |
 | `upstream/`                  | Gitignored local clones for reference only (`sharkord-src`, `Sunshine`, ...) — never edit or import |
 
@@ -48,24 +49,59 @@ belongs to rather than adding files.
   what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross),
   `chromiumHwEncode` (hardware encoding for shares on Chromium's own path, i.e. the Chromium flags
   below; default on on Windows, off on Linux; read once at launch, `SHARKORD_CHROMIUM_DEFAULTS=1`
-  forces it off). *Open at login* is not
+  forces it off), `autoUpdate` (default on; see *Updates* below; `autoUpdateNote` is the state line
+  the tab shows, or why the updater can't run here, in which case the key is left out and the switch
+  greyed out). *Open at login* is not
   stored: the OS login item / `~/.config/autostart/sharkord.desktop` is the source of truth.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
   - Page → main: `virtmic-active`, `virtmic-unmute`, `virtmic-stop`, `change-server` (`send`),
-    `desktop-settings-get`, `desktop-settings-set`, `notification-shown` / `notification-clicked`
-    (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
-    `native-share-start` / `native-share-stop` (`send`) — only accepted from the main window's
-    webContents.
+    `desktop-settings-get`, `desktop-settings-set`, `notification-shown` (on Windows with the
+    notification for main to show) / `notification-clicked` / `notification-skipped` (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
+    `native-share-start` / `native-share-stop` (`send`), `update-get`, `update-check`,
+    `update-install` (`send`), `diagnostics-save` — only accepted from the main window's webContents.
   - Main → page: `native-share-port` (a `MessagePort` tagged with the share's `id`, forwarded
     into the page world with `window.postMessage`): helper frames and events one way,
-    `keyframe`/`bitrate`/`stop` the other.
+    `keyframe`/`bitrate`/`stop` the other; `update-state` (the updater's `{ status, version,
+    percent, needsPassword, note, notesUrl }` on every change; `notesUrl`, the release's page while
+    one downloads or is ready, is the *What's new* link in the tab and the arrow's dialog);
+    `window-visible` (a boolean on every show, hide, minimize, restore, focus, blur and page load, forwarded into
+    the page world with `window.postMessage`); `notification-click` (Windows: the id of a toast main
+    showed, forwarded the same way, so the page opens its channel).
   - Picker → main: `virtmic-list`, `audio-settings-get`, `audio-settings-set`,
     `picker-go-live`, `picker-cancelled` (`send`).
   - Main → picker: `init` (sources, `skipPicker`, `platform`, `theme`).
 - **First-launch window** has no preload. It reports back through `console-message`:
   `cancel` or `form:{json}` (same channel Vesktop's first-launch view uses). Main answers
   with `executeJavaScript('setError(...)')`.
+- **Notifications** show exactly when Sharkord's window isn't focused (hidden to the tray,
+  minimized, behind another app), the open channel included. Sharkord notifies (`new
+  Notification`) for a channel that isn't open, or any channel while `document.hidden` is true;
+  with `backgroundThrottling` off (voice keeps running in the tray) Chromium never marks the page
+  hidden, so main sends `window-visible` and the page's `installVisibility` shadows
+  `document.hidden` / `visibilityState` with it and fires `visibilitychange`. Hidden means hidden,
+  minimized **or unfocused**: a minimize by the compositor never reaches Electron on Wayland (no
+  event, `isMinimized()` false), focus does. Sharkord reads it only for notifications (and its voice
+  debug log). While the window is focused the hook skips the notification Sharkord makes for
+  another channel (`[notify] skipped: the window is focused`); its sound and unread badge stay.
+  `[window] page visibility:` is logged once a state has held 1 s (switching windows leaves none).
+  **On Windows main shows the toast** (Electron's `Notification`): Electron makes Chromium's
+  notification id (`n#<origin>#<hash>`) the toast's tag, which Windows caps at 64 characters, so
+  with a server address over ~29 characters every toast was refused, silently (the page gets no
+  `error`). The page hook hands the title and body to main instead (`| by main`), whose toast gets
+  a UUID; its click comes back as `notification-click`. A toast leaves the notification centre when
+  its popup times out, and any on screen is closed at quit: there is no COM activator, so a click
+  there after a quit would find the app gone. Electron's `show` only means Windows took it; a
+  refusal (Windows' switches for all notifications or Sharkord's) is `[notify] error:` with
+  Windows' reason. Not packaged, the AppUserModelID is `com.sharkord.client.dev`: Electron's first
+  toast leaves a Start menu `Electron.lnk` with the ID, after which Windows labelled the installed
+  build's toasts Electron (and the login item, named after the ID, was the dev build's). Linux keeps Chromium's, where `[notify] no show after 10 s` marks one dropped
+  without an event. Logged on both ends: `[hook] notifications:` (permission and Sharkord's switches, from its
+  localStorage keys `sharkord-browser-notifications*`) once per load, `[hook] switch …` on a
+  change, `[notify] shown:` from the page (permission, hidden, focus, switches) and from main
+  (window state, flash), the OS's `show`/`error`/`close` (Windows: from main, `close:` with the
+  reason), and `[notify] click:` (dm or channel,
+  item found, sidebar switched), never the title or body.
 - **Unreachable page** buttons are links to `sharkord://retry` and `sharkord://change-server`,
   intercepted by the main window's `will-navigate`.
 - **Local pages** get their state through `loadFile(..., { query })` (`theme`, `url`,
@@ -73,12 +109,68 @@ belongs to rather than adding files.
 - **Tray / no menu bar**: there is no application menu (`Menu.setApplicationMenu(null)`);
   shortcuts are handled in `before-input-event`. The tray menu (Open, Change Server…, Open at
   login, Start minimized, Minimize to tray, Quit) is the non-DOM fallback. With *Minimize to tray*
-  on, `close` hides the window unless `quitting`. Autostart launches with `--hidden`, which only
+  on, `close` hides the window unless `quitting`. A notification shown while the window isn't
+  focused puts a red dot on the tray icon (`setBadge`, drawn by `withDot` into the icon's bitmap;
+  Wayland ignores the taskbar flash) and on Windows on the taskbar button (`setOverlayIcon`; the tray
+  icon often sits in the overflow), cleared when the window is focused (`[tray] badge on|off`). Autostart launches with `--hidden`, which only
   marks a login launch: it starts in the tray when *Start minimized* is on (independent of
-  *Minimize to tray*, like Discord's and Vesktop's). A single-instance lock makes a second launch show the window.
+  *Minimize to tray*, like Vesktop's). A single-instance lock makes a second launch show the window.
 - **Server check**: `checkServer` fetches `<url>/info` and expects `serverId` and `name`
   strings → `'ok' | 'not-sharkord' | 'unreachable'`. `loadServer` checks before loading —
   navigating to an unreachable URL and then to a local page can leave the window unable to paint.
+- **Updates**: `electron-updater` against this repo's GitHub Releases: a check 15 s
+  after launch, every 4 h and 30 s after a resume from suspend (`checkForUpdates`; off with
+  `autoUpdate` false, a manual check from the tab's button or the tray still works; while a native
+  share runs an automatic check is postponed 10 min, one at a time), the download in the background, then a green
+  `circle-arrow-down` cloned from the ☰ server-menu button (`server-menu-trigger`) in Sharkord's
+  header, a *Restart to update to vX* tray item and the tab's state line, until the user restarts
+  into it (`quitAndInstall(true, true)`: silent, relaunch). The feed comes from
+  `resources/app-update.yml` (electron-builder writes it from `build.publish`) and the
+  `latest.yml` / `latest-linux.yml` + `*.blockmap` CI uploads next to the installers (a CI step
+  fails the build when they are missing; the
+  release's `files` lists AppImage, deb and rpm; a prerelease version publishes its own channel,
+  `beta.yml`, that stable installs ignore). Per install: NSIS runs the installer with `--updated /S`;
+  the AppImage is replaced in place (renamed to the new version's name when the old one had a
+  version, so `appimage-filename-updated` rewrites the autostart entry; a name without a version,
+  `Sharkord.AppImage`, is kept, which the README recommends for shortcuts); deb and rpm go through
+  `pkexec dpkg -i` / `dnf install`, a password dialog (`needsPassword`), so `autoInstallOnAppQuit` is
+  on only for Windows and the AppImage; they run synchronously in the main process (measured ~12 s
+  for the rpm), so `installUpdate` hides the window first and the error handler shows it again if
+  the dialog is cancelled (the note then says the install failed). After a deb/rpm install the new
+  version is started by our own detached `spawn` (`SHARKORD_RELAUNCHED=1`), not electron-updater's
+  `app.relaunch()`: Electron relaunches through a helper that sets no-new-privileges, under which
+  pkexec can't elevate ("pkexec must be setuid root"), so the *next* update would have failed.
+  Relaunched that way, or by electron-updater's AppImage install (`APPIMAGE_SILENT_INSTALL`), the
+  single-instance lock is retried for 5 s while the old process quits. Not packaged, or an AppImage run from its extracted files:
+  the updater is off with the reason in `autoUpdateNote`. Unsigned Windows builds: the updater skips
+  the Authenticode check without a `publisherName` and trusts `latest.yml`'s SHA-512.
+  30 s after startup (the NSIS installer is still running from it) the installer of the running version is removed from electron-updater's cache
+  (`sharkord-updater/pending` in `%LOCALAPPDATA%` or `~/.cache`); a newer pending download is kept.
+  `SHARKORD_UPDATE_FEED=<url>` (installed builds) replaces GitHub with a directory of
+  `latest*.yml` + installers, to test the whole flow offline, `SHARKORD_UPDATE_INTERVAL=<ms>` shortens
+  the periodic check; `SHARKORD_TEST_UPDATE=install|quit`
+  restarts into a downloaded update at once, or quits (the install-on-quit path). Logged as
+  `[update]`. The tab's Updates card shows the client's version (`version` in `desktop-settings-get`).
+- **Diagnostics**: the tab's Diagnostics card has **Save diagnostics…** (`diagnostics-save` →
+  `saveDiagnostics`): a save dialog, then one text file (default `sharkord-diagnostics-<date>-<time>.txt`
+  in Downloads) with a header naming the replacements, the `[sys]` lines, `SHARKORD_*` env, the
+  Chromium flags (read back from `app.commandLine`), GPU status, the helper's probe, the updater's
+  state, a State section (the window's state and tray, the startup options, Electron's
+  `Notification.isSupported()`, and `pageState()`: the page's notification permission,
+  `document.hidden`, focus, `navigator.onLine` and Sharkord's four notification switches, read with
+  `executeJavaScript` within 2 s; the notifications shown, skipped, clicked and failed this run, with
+  the badge; on Windows its switches for all notifications and Sharkord's, `windowsToasts()` from the
+  registry), the settings without `serverUrl`, and `main.log` then
+  `main.old.log` as they are on disk.
+  `redact()` is the safety net on top of what the log never gets (below): the server URL, its host
+  and hostname → `<server>`, the paths again, and the user name as a whole word (3+ chars, any
+  case) → `<user>`. The hostname is left alone (nothing logs it; `fedora` as a hostname would
+  mangle unrelated lines). Returns the path, `null` cancelled, `false` failed (the card's note says
+  so). Only in the tab, not the tray (it looked out of place there); the README keeps the log
+  path as the manual way. `SHARKORD_TEST_DIAGNOSTICS=<file>` writes the file there 8 s after
+  startup without the dialog, to check its content. The card's one-line description promises a
+  redacted log; the file's header and the README say what is replaced: keep them true when adding
+  log lines.
 
 ## Screen share flow
 
@@ -354,13 +446,30 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
 - 2-space indent, no semicolons, single quotes, dense aligned one-liners like the surrounding
   code. `picker.html`'s inline script is ES5 (`var`, `function`) — match it there.
 - Short comments that explain *why* (platform quirks, Electron/Chromium behaviour), not what.
-- Log through `log()` with a `[tag]` prefix (`[venmic]`, `[load]`, `[check]`, `[gpu]`). It prints to
+- Log through `log()` with a `[tag]` prefix, one per area (`[window]`, `[tray]`, `[settings]`, `[app]`,
+  `[power]`, `[load]`, `[check]`, `[notify]`, `[screen-share]`, `[venmic]`, `[gpu]`, ...). The page logs with
+  `console.log` and our tag; main's `console-message` forwards only `[native-share]`, `[share]`,
+  `[notify]`, `[ws]` (Sharkord's WebSocket: connecting, open, close code), `[hook]` (our injected
+  controls added, or their anchor missing) and `[window]` lines as `[page] …`, and the page's uncaught
+  errors as `[page] error:` (first line, 300 chars, the script's file name, 50 per load), with the
+  server replaced (`scrubServer`) in the last two kinds. Every user-facing action and state change
+  leaves a line, so a diagnostics file answers a report. It prints to
   the console and appends to `userData/logs/main.log` (the previous run in `main.old.log`; each
   capped at 5 MB, rotated, so never more than two files). Only the primary instance writes;
   lines logged before the single-instance lock wait in memory. The helper's stderr (probe and
-  shares) is logged line by line as `[helper]`.
-- New dependencies need a real reason; the only runtime dependency is `@vencord/venmic`
-  (optional, Linux-only; listed in `asarUnpack` because it's a native module).
+  shares) is logged line by line as `[helper]`. Two `[sys]` lines at startup (`sysLines()`, also
+  in the diagnostics file): version and packaging, Electron/Chromium/Node, OS, locale, CPU, RAM,
+  display sizes, session type and desktop, whether the helper is there.
+  **The log never identifies the user**, as it goes into bug reports as it is: `log()` replaces
+  the settings and home folders in every line (`<userData>`, `<home>`; any separators, any case
+  on Windows), and no line carries the server or a page URL (`[check]`, `[load]` log only the
+  error), window titles (a window share's `started.monitor` becomes `<window>` before it is
+  logged or sent to the page), the apps picked for share audio (a count), notification titles or
+  bodies, channel, DM or user names, a WebSocket close's reason (a moderator's text: its length),
+  hostnames or usernames. Log what helps (versions, hardware, states, errors), never what names someone.
+- New dependencies need a real reason; the runtime dependencies are `@vencord/venmic`
+  (optional, Linux-only; listed in `asarUnpack` because it's a native module) and
+  `electron-updater` (updates; electron-builder's own, and it knows NSIS, AppImage, deb and rpm).
 
 ## Commands
 
@@ -427,7 +536,7 @@ There are no automated tests. After a change, check what it touches:
 - **Change server**: ☰ server menu item, login-screen button, `Ctrl+Shift+O`, tray →
   **Change Server…**; Cancel returns to the current server.
 - **Desktop settings**: user Settings → **Desktop Client** (after Others; not in server settings). Picking it
-  shows our card in place of Sharkord's, with only Desktop Client highlighted; changes show Sharkord's
+  shows our cards (Startup and Tray, Screen Sharing, Updates, Diagnostics) in place of Sharkord's, with only Desktop Client highlighted; changes show Sharkord's
   "You have unsaved changes / Save Changes" bar and apply only on Save. Leaving with unsaved changes
   (another entry, the back button, Escape) asks first; Desktop Client doesn't open while Sharkord's own
   tab has unsaved changes. On a narrow window the drawer closes after picking it.
@@ -439,16 +548,62 @@ There are no automated tests. After a change, check what it touches:
   `[flags]` lines show it (`on|off (setting|default|env)`) and the features, and with it on a
   Chromium-path share's encoder is the GPU's (not `OpenH264`); a `--disable-features=...` on the
   command line removes a feature from the list.
+- **Updates** (installed builds; `npm start` shows the switch greyed out with "Updates need an
+  installed build"; the Updates card names the running version): build the current version, bump `package.json` and build again into another
+  directory, serve that one (`python3 -m http.server`) and start the older build with
+  `SHARKORD_UPDATE_FEED=http://localhost:8000`. The log shows `[update]` checking, downloading and
+  "ready"; the tab's note follows (empty until the first check; the button `Check for updates`, a filled `Restart to install X` once downloaded; neither shows the save bar), the tray gets
+  *Restart to update to vX*, and a green arrow appears before ☰ in the header (not on the login
+  screen). Clicking any of them restarts into the new version (the arrow asks first, in a dialog like
+  Sharkord's; Cancel keeps it): on Windows and the AppImage without a further prompt (and quitting instead installs it too; the AppImage is renamed and, with *Open at login* on,
+  the autostart entry points at the new file); a deb or rpm asks for the password with the window hidden (cancelling it
+  brings the window back with the update still ready), and never installs on quit. Then update
+  **again** from the relaunched app (a third build on the feed): the password dialog must appear and
+  the install go through (`NoNewPrivs: 0` in `/proc/<pid>/status` of the relaunched main process). With the switch off nothing is checked after a
+  restart; the tray's *Check for updates…* still works.
 - **Notifications**: enable them in Sharkord → Settings → Notifications; a message from another
-  account while the channel isn't open (or the window is hidden) shows a native notification,
+  account while Sharkord's window isn't focused shows a native notification, in any channel,
   flashes the taskbar until focused (X11; Wayland ignores it), and clicking it brings the window
   back (also from the tray) and opens that channel or DM — test from the channel list and from the
-  DM list. On Windows (installed build) the toast is labelled Sharkord.
-- **Unreachable page**: stop the server → Retry and Change server both work.
+  DM list. On Windows the installed build's toast is labelled Sharkord (`npm start`'s Electron,
+  under its own ID). With *Minimize to tray* on,
+  leave a text channel open, close the window (`[window] close: hidden to the tray`, `[page]
+  [window] page visibility: hidden`) and send a message into that channel: it notifies (`[page]
+  [notify] shown: … hidden true`, `[notify] shown: window hidden, unfocused → flash true`, `[page]
+  [notify] show`; on Windows `… | by main` and `[notify] show` from main, then `[notify] close:
+  timedOut` and the toast is gone from the notification centre); the same minimized (on Wayland: no `[window] minimized` line, the blur is what
+  hides it) and with another app focused; with Sharkord focused, none, on that channel or another
+  (`[notify] skipped: the window is focused` for another). A notification puts a red dot on the
+  tray icon (`[tray] badge on`; on Windows on the taskbar button too), gone once the window is
+  focused (`[tray] badge off`). Clicking it logs `[notify] click: channel, item found, …` and
+  `[window] show (notification)`; no line names the channel, the author or the message. On Windows
+  with Sharkord switched off in Settings → System → Notifications: no toast, `[notify] error: …
+  Settings prevent the notification from being delivered`, and the diagnostics file's State says
+  `failed 1` and `windows notifications: all on, Sharkord off`.
+- **Unreachable page**: stop the server → Retry and Change server both work. While connected, the
+  log has `[page] [ws] connecting #1` / `open #1`; the network off gives `[ws] offline`, a `close #1:
+  code 1006, unclean` and `connecting #2`... (one per reconnect attempt), back on `[ws] online`.
 - **Log files**: launch from the menu (no terminal): `logs/main.log` in the settings folder has the
-  `[flags]`, probe and `[gpu]` lines; a restart moves it to `main.old.log`; a second launch while
+  `[sys]`, `[flags]`, probe and `[gpu]` lines; a restart moves it to `main.old.log`; a second launch while
   running leaves both untouched; a flood of helper output never leaves more than the two files,
-  each <= 5 MB.
+  each <= 5 MB. Nothing in it names the user: `[log]` names the run's date and no path, the server down gives
+  `[check] unreachable:` and `[load] failed: server page` without the URL, and an error with a
+  path (rename `settings.json` to a directory, change a setting) reads `<userData>/settings.json`;
+  on Linux a per-app share audio link logs `[venmic] link 2 app(s)`. A broken `settings.json` (`{`) logs
+  `[settings] unreadable:` once; a setting changed in the tab or the tray logs `[settings] <key>: false
+  → true (tab|tray)`; `[tray] created`, the second `[sys]` line ends `tray yes`; a second launch logs
+  `[app] second launch` and `[window] show (second instance)`; a `throw` in DevTools' console of the
+  page (`setTimeout(() => { throw new Error('x') })`) logs `[page] error: uncaught Error: x`.
+- **Diagnostics**: Settings → Desktop Client → the Diagnostics card describes the file; **Save
+  diagnostics…** opens a save dialog in Downloads with `sharkord-diagnostics-<date>-<time>.txt`; Cancel
+  leaves the note empty, Save shows `Saved to …`; the save bar never appears, the switches stay,
+  and leaving the tab asks nothing; a double click opens one dialog. The file has the header, the
+  sections in order (System, Chromium flags, GPU, Native share, Updates, State, Settings, main.log,
+  main.old.log) and both logs; State's `page:` line has the notification permission, `hidden` and
+  the four switches, `notifications this run:` the counts, and on Windows `windows notifications:`; `grep` it for the server's host, `$HOME`, the settings folder and
+  the user name: no hits, only `<server>`, `<home>`, `<userData>`, `<user>`; the logs on disk
+  are unchanged. With `logs/` deleted while running the sections say `(not available: ENOENT)`
+  and the save still works. On Windows a JSON path in the probe reads `<home>` (the `\\` form).
 - **Theme**: switch Sharkord to light, restart with the server down — local pages and the
   picker should be light too.
 - **Screen share picker**: on X11 (source grid) and Wayland (portal, then audio step); cancel
@@ -479,7 +634,8 @@ There are no automated tests. After a change, check what it touches:
   each incoming video (once, and again if it changes); Chromium only names it while the page
   captures (the mic in a voice channel). Every 10 s `[native-share] watching …` gives what the viewer
   got: fps, dropped, freezes, jitter buffer, keys, pli, lost, nack, kbps. A window share goes
-  native too (`input` shows `"window":true`, `started` its title and size); resizing it changes
+  native too (`input` shows `"window":true`, `started` its size with `"monitor":"<window>"`, never
+  the title); resizing it changes
   the viewer's picture size within ~0.5 s (`capture: window resized`), minimizing keeps the last
   picture, stopping while minimized ends the helper by itself (`exited (0)`), closing it ends the
   share. VP8, or the setting off, must behave exactly as before.

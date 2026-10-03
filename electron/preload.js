@@ -6,8 +6,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   virtmicUnmute: () => ipcRenderer.invoke('virtmic-unmute'),
   virtmicStop:   () => ipcRenderer.invoke('virtmic-stop'),
   // Desktop notifications
-  notificationShown:   () => ipcRenderer.send('notification-shown'),
+  notificationShown:   toast => ipcRenderer.send('notification-shown', toast),
   notificationClicked: () => ipcRenderer.send('notification-clicked'),
+  notificationSkipped: () => ipcRenderer.send('notification-skipped'),
   // Native screen share (the nativeShare setting): the picked monitor, or null when the
   // share should stay Chromium's own; start hands the page a MessagePort (below)
   // Linux: pick asks the helper to pick the screen (instead of Chromium): 'ok', 'cancelled', or
@@ -178,10 +179,18 @@ function installNativeShare (workerSource, helperPicks) {
   // Sharkord's WebSocket (on joining, and again when an admin changes them). Read from each message
   // as Sharkord receives it, never changed. null until seen
   let serverSimulcast = null
+  // Also Sharkord's connection, for the log ([ws]): it opens a new socket for each reconnect
+  // attempt, so the number counts them. A close's reason is a moderator's text (kick, ban): its length only
   const WS = window.WebSocket
+  let sockets = 0
   window.WebSocket = class WebSocket extends WS {
     constructor (...args) {
       super(...args)
+      const n = ++sockets, t0 = Date.now()
+      console.log('[ws] connecting #' + n)
+      this.addEventListener('open', () => console.log(`[ws] open #${n} after ${Date.now() - t0} ms`))
+      this.addEventListener('close', e => console.log(`[ws] close #${n}: code ${e.code}, ${e.wasClean ? 'clean' : 'unclean'}, reason ${e.reason?.length || 0} chars | online ${navigator.onLine}`))
+      this.addEventListener('error', () => console.log(`[ws] error #${n}`))
       this.addEventListener('message', e => {
         const m = typeof e.data === 'string' && e.data.match(/"webRtcSimulcastEnabled":(true|false)/)
         if (m && serverSimulcast !== (m[1] === 'true')) { serverSimulcast = m[1] === 'true'; log('server simulcast:', serverSimulcast) }
@@ -579,9 +588,20 @@ if (process.platform === 'win32' || process.platform === 'linux')
 
 // Sharkord shows plain `new Notification(...)` without an onclick, so hook the
 // constructor: flash the taskbar when one is shown, bring the window back on click.
-function installNotificationHooks () {
+// Logged (console → main's log as [page]): the permission, Sharkord's four switches, each
+// notification with the page's state, its OS events and the click's outcome. Never its title or body
+// Windows: main shows it (viaMain): Electron makes Chromium's notification id
+// ("n#<origin>#<hash>") the toast's tag, which Windows caps at 64 characters, so with a longer
+// server address every toast failed, silently. Main's own Notification gets a UUID
+ipcRenderer.on('notification-click', (_e, id) => window.postMessage({ sharkordNotificationClick: id }, '*'))
+function installNotificationHooks (viaMain) {
   const N = window.Notification
-  if (!N) return
+  if (!N) return console.log('[hook] notifications: not supported')
+  const switches = () => {
+    try { return ['', '-for-mentions', '-for-dms', '-for-replies'].map(k => (k.slice(5) || 'all') + '=' + (localStorage.getItem('sharkord-browser-notifications' + k) ?? '-').slice(0, 8)).join(' ') }
+    catch { return 'unreadable' }
+  }
+  console.log('[hook] notifications: permission', N.permission, '| switches', switches())
 
   const items   = id => [...document.querySelectorAll(`[data-testid="${id}"]`)]
   const waitFor = async find => {
@@ -592,33 +612,108 @@ function installNotificationHooks () {
   // "<author> in #<channel>" or "<author> (DM)". A DM notified through "All messages"
   // gets the channel form, with the DM channel's name "DM - <id>:<id>". Open the
   // matching sidebar item; if nothing matches, the window is just shown.
+  // What it did, for the log: never the title
   const openSource = async title => {
     const dm = title.match(/^(.*) \(DM\)$/) || title.match(/^(.*) in #DM - \d+:\d+$/)
     const ch = !dm && title.match(/^.* in #(.*)$/)
-    if (!dm && !ch) return
+    if (!dm && !ch) return 'other'
     const matches = dm
       ? () => items('dm-item').filter(el => el.querySelector('span.truncate')?.textContent === dm[1])
       : () => items('channel-item').filter(el => el.querySelector('.lucide-hash') && el.querySelector('span')?.textContent === ch[1])
     // Same name twice: the one the message went to has an unread badge
     const find = () => { const m = matches(); return m.find(el => el.querySelector('[data-testid="unread-count"]')) || m[0] }
     // Channels and DMs share the sidebar: switch it if the other list is showing
-    if (!!dm === !!items('channel-item').length) document.querySelector('[data-testid="dm-toggle"]')?.click()
-    ;(await waitFor(find))?.click()
+    const switched = !!dm === !!items('channel-item').length
+    if (switched) document.querySelector('[data-testid="dm-toggle"]')?.click()
+    const el = await waitFor(find)
+    el?.click()
+    return `${dm ? 'dm' : 'channel'}, item ${el ? 'found' : 'not found'}, sidebar ${switched ? 'switched' : 'kept'}`
   }
 
+  const click = title => openSource(title).then(r => console.log('[notify] click:', r), e => console.log('[notify] click error:', e?.name))
+  const titles = new Map()   // main's notification id → its title, until clicked (viaMain)
+  let lastId = 0
+  window.addEventListener('message', e => {
+    if (e.source !== window || typeof e.data?.sharkordNotificationClick !== 'number') return
+    const title = titles.get(e.data.sharkordNotificationClick)
+    if (title !== undefined) click(title)
+  })
+
   window.Notification = class Notification extends N {
-    constructor (...a) {
-      super(...a)
-      window.electronAPI.notificationShown()
-      this.addEventListener('click', () => {
-        window.electronAPI.notificationClicked()
-        openSource(this.title).catch(() => {})
-      })
+    static get permission () { return N.permission }
+    static requestPermission (...a) {
+      return N.requestPermission(...a).then(r => { console.log('[notify] permission request →', r); return r })
     }
+    constructor (...a) {
+      // Not while Sharkord's window is focused (and shown: document.hidden false, from
+      // installVisibility): Sharkord would notify for any other channel, a browser tab's habit.
+      // Its sound and unread badge stay. A stand-in is returned, as Sharkord ignores the object
+      if (!document.hidden) {
+        console.log('[notify] skipped: the window is focused |', switches())
+        window.electronAPI.notificationSkipped()
+        return Object.assign(new EventTarget(), { close () {} })
+      }
+      if (viaMain) {
+        const [title, opts] = a, id = ++lastId
+        titles.set(id, String(title))
+        if (titles.size > 50) titles.delete(titles.keys().next().value)
+        console.log('[notify] shown: permission', N.permission, '| hidden', document.hidden, '| focus', document.hasFocus(), '|', switches(), '| by main')
+        window.electronAPI.notificationShown({ id, title: String(title), body: String(opts?.body ?? ''), silent: !!opts?.silent })
+        return Object.assign(new EventTarget(), { close () {} })
+      }
+      super(...a)
+      console.log('[notify] shown: permission', N.permission, '| hidden', document.hidden, '| focus', document.hasFocus(), '|', switches())
+      const silent = setTimeout(() => console.log('[notify] no show after 10 s'), 10000)   // dropped without an error
+      for (const ev of ['show', 'error', 'close']) this.addEventListener(ev, () => { clearTimeout(silent); console.log('[notify]', ev) })
+      window.electronAPI.notificationShown()
+      this.addEventListener('click', () => { window.electronAPI.notificationClicked(); click(this.title) })
+    }
+  }
+
+  // Sharkord's switches are its own localStorage writes, which fire no storage event in this document
+  const setItem = Storage.prototype.setItem
+  Storage.prototype.setItem = function (k, v) {
+    if (this === localStorage && String(k).startsWith('sharkord-browser-notifications') && this.getItem(k) !== String(v))
+      console.log('[hook] switch', String(k).slice(9), '→', ['true', 'false'].includes(String(v)) ? String(v) : 'other')
+    return setItem.call(this, k, v)
   }
 }
 
-contextBridge.executeInMainWorld({ func: installNotificationHooks })
+contextBridge.executeInMainWorld({ func: installNotificationHooks, args: [process.platform === 'win32'] })
+
+// Main says whether the window is shown and focused (window-visible): with backgroundThrottling off
+// Chromium keeps the page "visible" in the tray, and Sharkord only notifies for the open channel
+// while document.hidden is true. Shadowed in the page's world, with the event Sharkord would get
+ipcRenderer.on('window-visible', (_e, v) => window.postMessage({ sharkordVisible: !!v }, '*'))
+function installVisibility () {
+  // The log line waits until a state has held 1 s: switching windows back and forth leaves none
+  let hidden = false, logged = false, timer = null
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' })
+  window.addEventListener('message', e => {
+    if (e.source !== window || typeof e.data?.sharkordVisible !== 'boolean' || hidden === !e.data.sharkordVisible) return
+    hidden = !e.data.sharkordVisible
+    document.dispatchEvent(new Event('visibilitychange'))
+    clearTimeout(timer)
+    timer = setTimeout(() => { if (hidden !== logged) { logged = hidden; console.log('[window] page visibility:', hidden ? 'hidden' : 'visible') } }, 1000)
+  })
+}
+contextBridge.executeInMainWorld({ func: installVisibility })
+
+// The page's uncaught errors and the network going away, for the log. An error's first line, capped,
+// and the script's file name, never its URL (main replaces the server in these lines too); 50 per load
+function installPageLog () {
+  let errors = 0
+  const file = f => { try { return new URL(f).pathname.split('/').pop() } catch { return '' } }
+  const report = (what, msg, where = '') => {
+    if (++errors > 50) return errors === 51 && console.log('[page] error: more than 50 this load, the rest are not logged')
+    console.log('[page] error:', what, String(msg ?? '').split('\n')[0].slice(0, 300), where)
+  }
+  window.addEventListener('error', e => report('uncaught', e.error?.name ? e.error.name + ': ' + e.error.message : e.message, `(${file(e.filename)}:${e.lineno}:${e.colno})`))
+  window.addEventListener('unhandledrejection', e => report('unhandled rejection', e.reason?.name ? e.reason.name + ': ' + e.reason.message : e.reason))
+  for (const ev of ['online', 'offline']) window.addEventListener(ev, () => console.log('[ws]', ev))
+}
+contextBridge.executeInMainWorld({ func: installPageLog })
 
 // ── "Change server" inside Sharkord's UI ────────────────────────────────
 //   Added to the ☰ server menu (above Disconnect) and the login screen (under
@@ -628,6 +723,7 @@ contextBridge.executeInMainWorld({ func: installNotificationHooks })
 //   (Ctrl+Shift+O and the tray menu still work).
 const MARK = 'data-client-change-server'
 
+const _changeServerLogged = new Set()
 function cloneAs (anchor, label, place) {
   if (anchor.parentElement.querySelector(`[${MARK}]`)) return null
   const el = anchor.cloneNode(false)
@@ -636,12 +732,19 @@ function cloneAs (anchor, label, place) {
   el.textContent = label
   el.addEventListener('click', () => ipcRenderer.send('change-server'))
   anchor[place](el)
+  const where = place === 'before' ? 'server menu' : 'login screen'
+  if (!_changeServerLogged.has(where)) { _changeServerLogged.add(where); console.log('[hook] added: change server (' + where + ')') }   // once: re-added at each menu open
   return el
 }
 
+let _noDisconnectLogged = false
 function addChangeServerControls () {
   // ☰ server menu: styled like Disconnect minus its red
   const disconnect = document.querySelector('[data-testid="server-menu-disconnect"]')
+  // An anchor Sharkord renamed only shows as a missing item: said once, while the menu is open
+  if (!disconnect && !_noDisconnectLogged && document.querySelector('[data-testid="server-menu-trigger"][aria-expanded="true"]')) {
+    _noDisconnectLogged = true; console.log('[hook] change server: server menu open without its Disconnect anchor')
+  }
   const item = disconnect && cloneAs(disconnect, 'Change server', 'before')
   if (item) {
     item.removeAttribute('data-highlighted')
@@ -681,20 +784,32 @@ const X_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" v
 const svg = markup => new DOMParser().parseFromString(markup, 'image/svg+xml').documentElement
 // lucide "monitor"
 const MONITOR_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-monitor h-4 w-4 shrink-0"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>'
+// The cards of the Desktop Client tab, in order
+const DESKTOP_GROUPS = [
+  { id: 'startup', title: 'Startup and Tray' },
+  { id: 'share',   title: 'Screen Sharing' },
+  { id: 'updates', title: 'Updates', description: s => `Client Version ${s.version || 'unknown'}` },
+  { id: 'diagnostics', title: 'Diagnostics', description: () => DIAGNOSTICS_TEXT },
+]
+// One line; the file's own header and the README spell out what is replaced. Keep it true (a log
+// line that ever carried a user's name or message would have to change main's redact() too)
+const DIAGNOSTICS_TEXT = 'Saves a log for troubleshooting, with your server address, user name and home folder redacted; messages and notification texts are never recorded. Attach it to a bug report.'
 const DESKTOP_OPTIONS = [
-  { key: 'openAtLogin',    label: 'Open Sharkord when your computer starts up' },
+  { key: 'openAtLogin',    group: 'startup', label: 'Open Sharkord when your computer starts up' },
   // Only for launches at login: greyed out while Open at login is off (its value is kept)
-  { key: 'startMinimized', label: 'Start minimized', requires: 'openAtLogin',
+  { key: 'startMinimized', group: 'startup', label: 'Start minimized', requires: 'openAtLogin',
     description: 'When Sharkord opens at login, it starts in the system tray instead of showing its window.' },
-  { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
+  { key: 'minimizeToTray', group: 'startup', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
-  { key: 'nativeShare',    label: 'Native screen share',
+  { key: 'nativeShare',    group: 'share', label: 'Native screen share',
     description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate and sharper picture, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
       (process.platform === 'linux' ? 'AMD and Intel GPUs (Vulkan video or VA-API), Wayland. On by default.'
         : 'Screens and windows. On by default with AMD GPUs; NVIDIA and Intel GPUs are supported but not tested yet, turn it on to try.') + ' Takes effect on the next share.' },
-  { key: 'chromiumHwEncode', label: 'Hardware encoding for other shares',
+  { key: 'chromiumHwEncode', group: 'share', label:'Hardware encoding for other shares',
     description: 'Lets the browser encode shares that don\'t use the native share on the GPU. Turn it off if those shares look corrupted or never load for viewers. ' +
       (process.platform === 'linux' ? 'Off by default: some drivers encode incorrectly. ' : '') + 'Takes effect after restarting Sharkord.' },
+  { key: 'autoUpdate', group: 'updates', label:'Download updates automatically',
+    description: 'Checks for new versions when Sharkord starts and every few hours, and downloads them in the background.' },
 ]
 
 function el (tag, className, text) {
@@ -707,22 +822,25 @@ function el (tag, className, text) {
 // The open Desktop tab: { entry, panel, main, was, dirty } -- our entry and content, Sharkord's
 // hidden content area and the entry that was selected, and whether there are unsaved changes
 let _desktopOpen = null
+let _onUpdate = null   // the open tab's update row, refreshed from main's update-state messages
 const OUTLINE_BUTTON_CLASS = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50 h-9 px-4 py-2"
 
 function closeDesktopTab () {
   const o = _desktopOpen
   if (!o) return
   _desktopOpen = null
+  _onUpdate = null
   o.panel.remove()
   o.main.hidden = false
   o.entry.classList.remove(...ACTIVE_ENTRY)
   if (o.was?.isConnected) o.was.classList.add(...ACTIVE_ENTRY)   // Sharkord re-renders it anyway when another is picked
 }
 
-// Sharkord's "Discard unsaved changes?" dialog, rebuilt from its AlertDialog class strings and
-// words (its own is React state we can't open). true: Discard; false: Cancel. Like Sharkord's, only
-// its buttons answer it: Escape and a click on the backdrop do nothing
-function confirmDiscard () {
+// Sharkord's AlertDialog, rebuilt from its class strings (its own is React state we can't open):
+// its "Discard unsaved changes?" and our update's restart. true: ok; false: Cancel. Like Sharkord's,
+// only its buttons answer it: Escape and a click on the backdrop do nothing
+const confirmDiscard = () => confirmDialog('Discard unsaved changes?', 'You have unsaved changes. If you leave now, they will be lost.', 'Discard')
+function confirmDialog (title, text, ok, link) {
   return new Promise(resolve => {
     const root = el('div')
     root.setAttribute(DESKTOP, 'dialog')
@@ -731,11 +849,11 @@ function confirmDiscard () {
     box.setAttribute('role', 'alertdialog')
     box.setAttribute('aria-modal', 'true')
     const header = el('div', 'flex flex-col gap-2 text-center sm:text-left')
-    header.append(el('h2', 'text-lg font-semibold', 'Discard unsaved changes?'),
-      el('p', 'text-muted-foreground text-sm', 'You have unsaved changes. If you leave now, they will be lost.'))
+    header.append(el('h2', 'text-lg font-semibold', title), el('p', 'text-muted-foreground text-sm', text))
+    if (link) header.append(link)
     const footer = el('div', 'flex flex-col-reverse gap-2 sm:flex-row sm:justify-end')
     const cancel = el('button', OUTLINE_BUTTON_CLASS, 'Cancel')
-    const discard = el('button', BUTTON_CLASS, 'Discard')
+    const discard = el('button', BUTTON_CLASS, ok)
     cancel.type = discard.type = 'button'
     footer.append(cancel, discard)
     box.append(header, footer)
@@ -775,11 +893,16 @@ function afterSharkordTab (nav, main, open) {
   other.click()
 }
 
+let _noOthersLogged = false, _desktopTabLogged = false
 function addDesktopTab () {
   // Sharkord re-rendered its content area, or the settings closed: ours goes too
   if (_desktopOpen && (!_desktopOpen.main.isConnected || !_desktopOpen.panel.isConnected || !_desktopOpen.main.hidden)) closeDesktopTab()
   const others = document.querySelector('svg.lucide-sliders-horizontal')?.closest('[data-testid="settings-sidebar-entry"]')
   const nav = others?.closest('nav')
+  if (!others && !_noOthersLogged && document.querySelector('[data-testid="settings-sidebar-entry"]')) {
+    _noOthersLogged = true   // user or server settings: only the user's have Others
+    console.log('[hook] desktop tab: no anchor here (settings sidebar without Others)')
+  }
   if (!nav || nav.querySelector(`[${DESKTOP}]`)) return
   // Built fresh (an icon and a truncated label, as Sharkord's SidebarEntry renders) with the
   // entry's own class string, so it looks like Sharkord's whatever Others carries
@@ -789,6 +912,7 @@ function addDesktopTab () {
   entry.classList.remove(...ACTIVE_ENTRY)
   entry.append(svg(MONITOR_ICON), el('span', 'truncate', 'Desktop Client'))
   others.after(entry)
+  if (!_desktopTabLogged) { _desktopTabLogged = true; console.log('[hook] added: desktop tab') }
 
   entry.addEventListener('click', async () => {
     const main = nav.parentElement?.querySelector(':scope > main')
@@ -837,19 +961,34 @@ document.addEventListener('keydown', e => {
   })
 }, true)
 
-// Our content area: one card like Sharkord's, and its save bar while there are unsaved changes
+// "What's new in X": the release's page, in the browser (the main window's open handler)
+function whatsNewLink () {
+  const a = el('a', 'w-fit text-sm text-muted-foreground underline transition-colors hover:text-primary')
+  a.target = '_blank'; a.rel = 'noopener noreferrer'
+  return a
+}
+const showWhatsNew = (a, s) => { a.hidden = !s?.notesUrl; if (s?.notesUrl) { a.href = s.notesUrl; a.textContent = `What's new in ${s.version}` } }
+
+// Our content area: cards like Sharkord's (DESKTOP_GROUPS), and its save bar while there are unsaved changes
 function buildDesktopPanel (mainClass, initial) {
   let saved = initial, draft = { ...initial }
   const panel = el('main', mainClass)
   panel.setAttribute(DESKTOP, 'panel')
   const wrap = el('div', 'mx-auto max-w-4xl space-y-6 p-4 md:p-6')
-  const card = el('div', 'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm')
-  const header = el('div', '@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6')
-  header.append(el('div', 'leading-none font-semibold', 'Desktop Client'),
-    el('div', 'text-muted-foreground text-sm', 'Options of this desktop client, kept on this computer.'))
-  const content = el('div', 'px-6 space-y-4')
-  card.append(header, content)
-  wrap.append(card)
+  // One card per group, like Sharkord's settings pages; a group without rows gets none
+  const cards = {}
+  const cardFor = id => {
+    if (cards[id]) return cards[id]
+    const { title, description } = DESKTOP_GROUPS.find(g => g.id === id)
+    const card = el('div', 'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm')
+    const header = el('div', '@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6')
+    header.append(el('div', 'leading-none font-semibold', title))
+    if (description) header.append(el('div', 'text-muted-foreground text-sm', description(initial)))
+    const content = el('div', 'px-6 space-y-4')
+    card.append(header, content)
+    wrap.append(card)
+    return (cards[id] = content)
+  }
 
   const bar = el('div', 'pointer-events-none sticky bottom-4 z-20 px-4 md:px-6')
   const barInner = el('div', 'pointer-events-auto mx-auto flex max-w-4xl items-center justify-between gap-4 rounded-xl border bg-card px-4 py-3 shadow-lg')
@@ -885,7 +1024,7 @@ function buildDesktopPanel (mainClass, initial) {
   // An option with only a note (the native share where it can't run here) shows greyed out, with
   // the note saying why. Options the main process leaves out get no row (nativeShare in a build
   // without the helper).
-  for (const { key, label, description } of DESKTOP_OPTIONS.filter(({ key }) => key in initial || initial[key + 'Note'])) {
+  for (const { key, group: groupId, label, description } of DESKTOP_OPTIONS.filter(({ key }) => key in initial || initial[key + 'Note'])) {
     const group = el('div', 'flex flex-col gap-2')
     group.setAttribute(DESKTOP, 'row')
     const text = el('div', 'flex flex-col')
@@ -904,7 +1043,11 @@ function buildDesktopPanel (mainClass, initial) {
       }
       text.append(list)
     }
-    if (initial[key + 'Note']) text.append(el('span', 'text-sm text-muted-foreground', initial[key + 'Note']))
+    // The updater's note is empty until it has something to say, then follows its state
+    const note = initial[key + 'Note'] || key === 'autoUpdate' ? el('span', 'text-sm text-muted-foreground', initial[key + 'Note'] || '') : null
+    if (note) text.append(note)
+    const whatsNew = key === 'autoUpdate' ? whatsNewLink() : null
+    if (whatsNew) text.append(whatsNew)
     const sw = el('button', SWITCH_CLASS)
     sw.type = 'button'
     sw.setAttribute('role', 'switch')
@@ -912,12 +1055,98 @@ function buildDesktopPanel (mainClass, initial) {
     sw.addEventListener('click', () => { draft[key] = !draft[key]; render() })
     switches[key] = sw
     const control = el('div', 'flex flex-col gap-2')
-    control.append(sw)
+    // Updates: a button next to the switch (not a setting, so it never shows the save bar): Check for
+    // updates, or, with one downloaded, a filled "Restart to install" (the settings screen covers the
+    // header's arrow). The note follows the updater's state while the tab is open.
+    if (key === 'autoUpdate') {
+      control.className = 'flex items-center gap-3'
+      const act = el('button')
+      act.type = 'button'
+      const show = s => {
+        const ready = s?.status === 'ready'
+        act.className = (ready ? BUTTON_CLASS : OUTLINE_BUTTON_CLASS).replace('h-9 px-4 py-2', 'h-8 px-3')
+        act.textContent = ready ? `Restart to install ${s.version}`
+          : s?.status === 'downloading' ? `Downloading… ${s.percent || 0}%`
+          : s?.status === 'checking' ? 'Checking…' : 'Check for updates'
+        act.disabled = !(key in initial) || ['checking', 'downloading'].includes(s?.status)
+        if (note && s) note.textContent = s.note || ''
+        showWhatsNew(whatsNew, s)
+      }
+      act.addEventListener('click', () => {
+        if (_update?.status === 'ready') return ipcRenderer.send('update-install')
+        ipcRenderer.invoke('update-check').then(s => { if (s) { _update = s; show(s) } }).catch(() => {})
+      })
+      show(_update)
+      _onUpdate = show
+      control.append(act)
+    }
+    control.prepend(sw)   // the switch first, the updates button to its right
     group.append(text, control)
-    content.append(group)
+    cardFor(groupId).append(group)
+  }
+  // Diagnostics: a button, not a setting (never the save bar); the note says where the file went
+  {
+    const group = el('div', 'flex flex-col gap-2')
+    group.setAttribute(DESKTOP, 'row')
+    const text = el('div', 'flex flex-col')
+    const note = el('span', 'text-sm text-muted-foreground')
+    text.append(el('label', 'flex items-center gap-2 text-sm leading-none font-medium', 'Save a diagnostics file'), note)
+    const btn = el('button', OUTLINE_BUTTON_CLASS.replace('h-9 px-4 py-2', 'h-8 px-3'), 'Save diagnostics…')
+    btn.type = 'button'
+    btn.addEventListener('click', async () => {
+      btn.disabled = true
+      const file = await ipcRenderer.invoke('diagnostics-save').catch(() => false)
+      btn.disabled = false
+      note.textContent = file ? 'Saved to ' + file : file === false ? 'Could not save the file; see the log.' : ''
+    })
+    const control = el('div', 'flex items-center gap-3')
+    control.append(btn)
+    group.append(text, control)
+    cardFor('diagnostics').append(group)
   }
   render()
   return { panel, dirty: () => changed().length > 0 }
+}
+
+// ── Update arrow in Sharkord's header ─────────────────────────────────────
+//   Once an update is downloaded, a green circled arrow (lucide circle-arrow-down)
+//   appears before the ☰ server menu, cloned from that button so it keeps Sharkord's styling;
+//   a click asks, then restarts into the new version. Main keeps the state (update-state messages); the tray
+//   has the same entry for the login screen, which has no header.
+const UPDATE = 'data-client-update'
+const UPDATE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-arrow-down h-4 w-4 text-green-500"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="m8 12 4 4 4-4"/></svg>'
+let _update = null   // main's last update-state: { status, version, percent, needsPassword, note, notesUrl }
+
+ipcRenderer.on('update-state', (_e, s) => { _update = s; addUpdateArrow(); _onUpdate?.(s) })
+ipcRenderer.invoke('update-get').then(s => { if (s) { _update = s; addUpdateArrow() } }).catch(() => {})
+
+let _arrowTimer = null, _arrowLogged = false
+function addUpdateArrow () {
+  const menu = document.querySelector('[data-testid="server-menu-trigger"]')
+  const old = document.querySelector(`[${UPDATE}]`)
+  if (_update?.status === 'ready' && !menu && !_arrowTimer) _arrowTimer = setTimeout(() => {
+    if (!document.querySelector(`[${UPDATE}]`)) console.log('[hook] update arrow: no anchor after 30 s (the server menu; the login screen has none)')
+  }, 30000)
+  if (_update?.status !== 'ready' || !menu) return old?.remove()
+  if (old?.parentElement === menu.parentElement) return
+  old?.remove()
+  const arrow = menu.cloneNode(false)
+  // Radix's trigger attributes don't belong to it
+  for (const a of ['data-testid', 'id', 'aria-haspopup', 'aria-expanded', 'data-state']) arrow.removeAttribute(a)
+  arrow.setAttribute(UPDATE, '')
+  arrow.append(svg(UPDATE_ICON))
+  arrow.title = `Restart to update to ${_update.version}` + (_update.needsPassword ? ' (asks for your password)' : '')
+  // The arrow is easy to hit by accident: asked first (the tab's "Restart to install" isn't)
+  arrow.addEventListener('click', () => {
+    if (document.querySelector(`[${DESKTOP}=dialog]`)) return
+    const whatsNew = whatsNewLink()
+    showWhatsNew(whatsNew, _update)
+    confirmDialog(`Restart to update to ${_update.version}?`, 'Sharkord closes and reopens, which leaves any voice channel or screen share.' +
+      (_update.needsPassword ? ' Your password will be asked for.' : ''), 'Restart', whatsNew)
+      .then(ok => { if (ok) ipcRenderer.send('update-install') })
+  })
+  menu.before(arrow)
+  if (!_arrowLogged) { _arrowLogged = true; console.log('[hook] added: update arrow') }
 }
 
 let _clientControlsQueued = false
@@ -928,5 +1157,6 @@ new MutationObserver(() => {
     _clientControlsQueued = false
     addChangeServerControls()
     addDesktopTab()
+    addUpdateArrow()
   })
 }).observe(document, { childList: true, subtree: true })

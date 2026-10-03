@@ -30,6 +30,11 @@
     "asarUnpack": [
       "node_modules/@vencord/venmic/**"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "agrisci",
+      "repo": "sharkord-client"
+    },
     "win": {
       "target": [
         {
@@ -117,5 +122,8 @@
   "devDependencies": {
     "electron": "^44.4.5",
     "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }
