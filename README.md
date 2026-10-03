@@ -42,6 +42,7 @@ On first launch Sharkord asks for your server's address (e.g. `https://sharkord.
 | **Share audio** | Linux: single apps or the entire system. Windows: "Stream With Audio" shares the system's sound |
 | **Notifications** | Turn them on in Sharkord's **Settings → Notifications**. The taskbar flashes until you come back, and clicking a notification opens that channel or DM, even from the tray |
 | **Tray and startup** | **Settings → Desktop Client** (confirm with **Save Changes**), or the tray menu: **Open at login**, **Start minimized** (starts in the tray at login) and **Minimize to tray** (the X keeps Sharkord running; quit from the tray). Opening Sharkord again brings the running window to the front |
+| **Diagnostics** | **Settings → Desktop Client → Save diagnostics…** writes one text file for a bug report, with your server's address and user name left out (see *Reporting a problem*) |
 
 ### Native screen share: what's supported
 
@@ -68,14 +69,22 @@ please open an issue.
 
 ## Reporting a problem
 
-Please attach the log files: `logs/main.log` (and `main.old.log`, the previous run) in the
-settings folder, `~/.config/sharkord` on Linux or `%APPDATA%\sharkord` on Windows. `Ctrl+Shift+I`
-opens the developer tools, if you're asked for the console.
+Open **Settings → Desktop Client** and click **Save diagnostics…** in the Diagnostics card, then
+attach the saved `.txt` to your issue. It holds the versions of the client and its browser engine,
+your system and graphics hardware, the Desktop Client settings and the app's own log from this run
+and the previous one. Nothing in it identifies you: there are no usernames, messages or account
+data, and your server's address, home folder and user name are replaced with `<server>`, `<home>`
+and `<user>`. It is plain text, so you can read it before attaching it.
+
+If the app won't start, the raw logs are `logs/main.log` (and `main.old.log`, the previous run) in
+the settings folder, `~/.config/sharkord` on Linux or `%APPDATA%\sharkord` on Windows; they never
+contain your server's address or paths with your user name either. `Ctrl+Shift+I` opens the
+developer tools, if you're asked for the console.
 
 ## What's next
 
 [ROADMAP.md](ROADMAP.md) lists every planned improvement. At the top: the native screen share on
-NVIDIA and Intel for Windows, 4K at 120 fps, and a "Copy diagnostics" button for bug reports.
+NVIDIA and Intel for Windows, and 4K at 120 fps.
 
 ## Contributing
 
