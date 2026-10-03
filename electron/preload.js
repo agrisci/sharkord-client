@@ -6,8 +6,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   virtmicUnmute: () => ipcRenderer.invoke('virtmic-unmute'),
   virtmicStop:   () => ipcRenderer.invoke('virtmic-stop'),
   // Desktop notifications
-  notificationShown:   () => ipcRenderer.send('notification-shown'),
+  notificationShown:   toast => ipcRenderer.send('notification-shown', toast),
   notificationClicked: () => ipcRenderer.send('notification-clicked'),
+  notificationSkipped: () => ipcRenderer.send('notification-skipped'),
   // Native screen share (the nativeShare setting): the picked monitor, or null when the
   // share should stay Chromium's own; start hands the page a MessagePort (below)
   // Linux: pick asks the helper to pick the screen (instead of Chromium): 'ok', 'cancelled', or
@@ -178,10 +179,18 @@ function installNativeShare (workerSource, helperPicks) {
   // Sharkord's WebSocket (on joining, and again when an admin changes them). Read from each message
   // as Sharkord receives it, never changed. null until seen
   let serverSimulcast = null
+  // Also Sharkord's connection, for the log ([ws]): it opens a new socket for each reconnect
+  // attempt, so the number counts them. A close's reason is a moderator's text (kick, ban): its length only
   const WS = window.WebSocket
+  let sockets = 0
   window.WebSocket = class WebSocket extends WS {
     constructor (...args) {
       super(...args)
+      const n = ++sockets, t0 = Date.now()
+      console.log('[ws] connecting #' + n)
+      this.addEventListener('open', () => console.log(`[ws] open #${n} after ${Date.now() - t0} ms`))
+      this.addEventListener('close', e => console.log(`[ws] close #${n}: code ${e.code}, ${e.wasClean ? 'clean' : 'unclean'}, reason ${e.reason?.length || 0} chars | online ${navigator.onLine}`))
+      this.addEventListener('error', () => console.log(`[ws] error #${n}`))
       this.addEventListener('message', e => {
         const m = typeof e.data === 'string' && e.data.match(/"webRtcSimulcastEnabled":(true|false)/)
         if (m && serverSimulcast !== (m[1] === 'true')) { serverSimulcast = m[1] === 'true'; log('server simulcast:', serverSimulcast) }
@@ -579,9 +588,20 @@ if (process.platform === 'win32' || process.platform === 'linux')
 
 // Sharkord shows plain `new Notification(...)` without an onclick, so hook the
 // constructor: flash the taskbar when one is shown, bring the window back on click.
-function installNotificationHooks () {
+// Logged (console → main's log as [page]): the permission, Sharkord's four switches, each
+// notification with the page's state, its OS events and the click's outcome. Never its title or body
+// Windows: main shows it (viaMain): Electron makes Chromium's notification id
+// ("n#<origin>#<hash>") the toast's tag, which Windows caps at 64 characters, so with a longer
+// server address every toast failed, silently. Main's own Notification gets a UUID
+ipcRenderer.on('notification-click', (_e, id) => window.postMessage({ sharkordNotificationClick: id }, '*'))
+function installNotificationHooks (viaMain) {
   const N = window.Notification
-  if (!N) return
+  if (!N) return console.log('[hook] notifications: not supported')
+  const switches = () => {
+    try { return ['', '-for-mentions', '-for-dms', '-for-replies'].map(k => (k.slice(5) || 'all') + '=' + (localStorage.getItem('sharkord-browser-notifications' + k) ?? '-').slice(0, 8)).join(' ') }
+    catch { return 'unreadable' }
+  }
+  console.log('[hook] notifications: permission', N.permission, '| switches', switches())
 
   const items   = id => [...document.querySelectorAll(`[data-testid="${id}"]`)]
   const waitFor = async find => {
@@ -592,33 +612,108 @@ function installNotificationHooks () {
   // "<author> in #<channel>" or "<author> (DM)". A DM notified through "All messages"
   // gets the channel form, with the DM channel's name "DM - <id>:<id>". Open the
   // matching sidebar item; if nothing matches, the window is just shown.
+  // What it did, for the log: never the title
   const openSource = async title => {
     const dm = title.match(/^(.*) \(DM\)$/) || title.match(/^(.*) in #DM - \d+:\d+$/)
     const ch = !dm && title.match(/^.* in #(.*)$/)
-    if (!dm && !ch) return
+    if (!dm && !ch) return 'other'
     const matches = dm
       ? () => items('dm-item').filter(el => el.querySelector('span.truncate')?.textContent === dm[1])
       : () => items('channel-item').filter(el => el.querySelector('.lucide-hash') && el.querySelector('span')?.textContent === ch[1])
     // Same name twice: the one the message went to has an unread badge
     const find = () => { const m = matches(); return m.find(el => el.querySelector('[data-testid="unread-count"]')) || m[0] }
     // Channels and DMs share the sidebar: switch it if the other list is showing
-    if (!!dm === !!items('channel-item').length) document.querySelector('[data-testid="dm-toggle"]')?.click()
-    ;(await waitFor(find))?.click()
+    const switched = !!dm === !!items('channel-item').length
+    if (switched) document.querySelector('[data-testid="dm-toggle"]')?.click()
+    const el = await waitFor(find)
+    el?.click()
+    return `${dm ? 'dm' : 'channel'}, item ${el ? 'found' : 'not found'}, sidebar ${switched ? 'switched' : 'kept'}`
   }
 
+  const click = title => openSource(title).then(r => console.log('[notify] click:', r), e => console.log('[notify] click error:', e?.name))
+  const titles = new Map()   // main's notification id → its title, until clicked (viaMain)
+  let lastId = 0
+  window.addEventListener('message', e => {
+    if (e.source !== window || typeof e.data?.sharkordNotificationClick !== 'number') return
+    const title = titles.get(e.data.sharkordNotificationClick)
+    if (title !== undefined) click(title)
+  })
+
   window.Notification = class Notification extends N {
-    constructor (...a) {
-      super(...a)
-      window.electronAPI.notificationShown()
-      this.addEventListener('click', () => {
-        window.electronAPI.notificationClicked()
-        openSource(this.title).catch(() => {})
-      })
+    static get permission () { return N.permission }
+    static requestPermission (...a) {
+      return N.requestPermission(...a).then(r => { console.log('[notify] permission request →', r); return r })
     }
+    constructor (...a) {
+      // Not while Sharkord's window is focused (and shown: document.hidden false, from
+      // installVisibility): Sharkord would notify for any other channel, a browser tab's habit.
+      // Its sound and unread badge stay. A stand-in is returned, as Sharkord ignores the object
+      if (!document.hidden) {
+        console.log('[notify] skipped: the window is focused |', switches())
+        window.electronAPI.notificationSkipped()
+        return Object.assign(new EventTarget(), { close () {} })
+      }
+      if (viaMain) {
+        const [title, opts] = a, id = ++lastId
+        titles.set(id, String(title))
+        if (titles.size > 50) titles.delete(titles.keys().next().value)
+        console.log('[notify] shown: permission', N.permission, '| hidden', document.hidden, '| focus', document.hasFocus(), '|', switches(), '| by main')
+        window.electronAPI.notificationShown({ id, title: String(title), body: String(opts?.body ?? ''), silent: !!opts?.silent })
+        return Object.assign(new EventTarget(), { close () {} })
+      }
+      super(...a)
+      console.log('[notify] shown: permission', N.permission, '| hidden', document.hidden, '| focus', document.hasFocus(), '|', switches())
+      const silent = setTimeout(() => console.log('[notify] no show after 10 s'), 10000)   // dropped without an error
+      for (const ev of ['show', 'error', 'close']) this.addEventListener(ev, () => { clearTimeout(silent); console.log('[notify]', ev) })
+      window.electronAPI.notificationShown()
+      this.addEventListener('click', () => { window.electronAPI.notificationClicked(); click(this.title) })
+    }
+  }
+
+  // Sharkord's switches are its own localStorage writes, which fire no storage event in this document
+  const setItem = Storage.prototype.setItem
+  Storage.prototype.setItem = function (k, v) {
+    if (this === localStorage && String(k).startsWith('sharkord-browser-notifications') && this.getItem(k) !== String(v))
+      console.log('[hook] switch', String(k).slice(9), '→', ['true', 'false'].includes(String(v)) ? String(v) : 'other')
+    return setItem.call(this, k, v)
   }
 }
 
-contextBridge.executeInMainWorld({ func: installNotificationHooks })
+contextBridge.executeInMainWorld({ func: installNotificationHooks, args: [process.platform === 'win32'] })
+
+// Main says whether the window is shown and focused (window-visible): with backgroundThrottling off
+// Chromium keeps the page "visible" in the tray, and Sharkord only notifies for the open channel
+// while document.hidden is true. Shadowed in the page's world, with the event Sharkord would get
+ipcRenderer.on('window-visible', (_e, v) => window.postMessage({ sharkordVisible: !!v }, '*'))
+function installVisibility () {
+  // The log line waits until a state has held 1 s: switching windows back and forth leaves none
+  let hidden = false, logged = false, timer = null
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' })
+  window.addEventListener('message', e => {
+    if (e.source !== window || typeof e.data?.sharkordVisible !== 'boolean' || hidden === !e.data.sharkordVisible) return
+    hidden = !e.data.sharkordVisible
+    document.dispatchEvent(new Event('visibilitychange'))
+    clearTimeout(timer)
+    timer = setTimeout(() => { if (hidden !== logged) { logged = hidden; console.log('[window] page visibility:', hidden ? 'hidden' : 'visible') } }, 1000)
+  })
+}
+contextBridge.executeInMainWorld({ func: installVisibility })
+
+// The page's uncaught errors and the network going away, for the log. An error's first line, capped,
+// and the script's file name, never its URL (main replaces the server in these lines too); 50 per load
+function installPageLog () {
+  let errors = 0
+  const file = f => { try { return new URL(f).pathname.split('/').pop() } catch { return '' } }
+  const report = (what, msg, where = '') => {
+    if (++errors > 50) return errors === 51 && console.log('[page] error: more than 50 this load, the rest are not logged')
+    console.log('[page] error:', what, String(msg ?? '').split('\n')[0].slice(0, 300), where)
+  }
+  window.addEventListener('error', e => report('uncaught', e.error?.name ? e.error.name + ': ' + e.error.message : e.message, `(${file(e.filename)}:${e.lineno}:${e.colno})`))
+  window.addEventListener('unhandledrejection', e => report('unhandled rejection', e.reason?.name ? e.reason.name + ': ' + e.reason.message : e.reason))
+  for (const ev of ['online', 'offline']) window.addEventListener(ev, () => console.log('[ws]', ev))
+}
+contextBridge.executeInMainWorld({ func: installPageLog })
 
 // ── "Change server" inside Sharkord's UI ────────────────────────────────
 //   Added to the ☰ server menu (above Disconnect) and the login screen (under
@@ -628,6 +723,7 @@ contextBridge.executeInMainWorld({ func: installNotificationHooks })
 //   (Ctrl+Shift+O and the tray menu still work).
 const MARK = 'data-client-change-server'
 
+const _changeServerLogged = new Set()
 function cloneAs (anchor, label, place) {
   if (anchor.parentElement.querySelector(`[${MARK}]`)) return null
   const el = anchor.cloneNode(false)
@@ -636,12 +732,19 @@ function cloneAs (anchor, label, place) {
   el.textContent = label
   el.addEventListener('click', () => ipcRenderer.send('change-server'))
   anchor[place](el)
+  const where = place === 'before' ? 'server menu' : 'login screen'
+  if (!_changeServerLogged.has(where)) { _changeServerLogged.add(where); console.log('[hook] added: change server (' + where + ')') }   // once: re-added at each menu open
   return el
 }
 
+let _noDisconnectLogged = false
 function addChangeServerControls () {
   // ☰ server menu: styled like Disconnect minus its red
   const disconnect = document.querySelector('[data-testid="server-menu-disconnect"]')
+  // An anchor Sharkord renamed only shows as a missing item: said once, while the menu is open
+  if (!disconnect && !_noDisconnectLogged && document.querySelector('[data-testid="server-menu-trigger"][aria-expanded="true"]')) {
+    _noDisconnectLogged = true; console.log('[hook] change server: server menu open without its Disconnect anchor')
+  }
   const item = disconnect && cloneAs(disconnect, 'Change server', 'before')
   if (item) {
     item.removeAttribute('data-highlighted')
@@ -690,7 +793,7 @@ const DESKTOP_GROUPS = [
 ]
 // One line; the file's own header and the README spell out what is replaced. Keep it true (a log
 // line that ever carried a user's name or message would have to change main's redact() too)
-const DIAGNOSTICS_TEXT = 'Saves a log for troubleshooting, with your server address, user name and home folder redacted. Attach it to a bug report.'
+const DIAGNOSTICS_TEXT = 'Saves a log for troubleshooting, with your server address, user name and home folder redacted; messages and notification texts are never recorded. Attach it to a bug report.'
 const DESKTOP_OPTIONS = [
   { key: 'openAtLogin',    group: 'startup', label: 'Open Sharkord when your computer starts up' },
   // Only for launches at login: greyed out while Open at login is off (its value is kept)
@@ -790,11 +893,16 @@ function afterSharkordTab (nav, main, open) {
   other.click()
 }
 
+let _noOthersLogged = false, _desktopTabLogged = false
 function addDesktopTab () {
   // Sharkord re-rendered its content area, or the settings closed: ours goes too
   if (_desktopOpen && (!_desktopOpen.main.isConnected || !_desktopOpen.panel.isConnected || !_desktopOpen.main.hidden)) closeDesktopTab()
   const others = document.querySelector('svg.lucide-sliders-horizontal')?.closest('[data-testid="settings-sidebar-entry"]')
   const nav = others?.closest('nav')
+  if (!others && !_noOthersLogged && document.querySelector('[data-testid="settings-sidebar-entry"]')) {
+    _noOthersLogged = true   // user or server settings: only the user's have Others
+    console.log('[hook] desktop tab: no anchor here (settings sidebar without Others)')
+  }
   if (!nav || nav.querySelector(`[${DESKTOP}]`)) return
   // Built fresh (an icon and a truncated label, as Sharkord's SidebarEntry renders) with the
   // entry's own class string, so it looks like Sharkord's whatever Others carries
@@ -804,6 +912,7 @@ function addDesktopTab () {
   entry.classList.remove(...ACTIVE_ENTRY)
   entry.append(svg(MONITOR_ICON), el('span', 'truncate', 'Desktop Client'))
   others.after(entry)
+  if (!_desktopTabLogged) { _desktopTabLogged = true; console.log('[hook] added: desktop tab') }
 
   entry.addEventListener('click', async () => {
     const main = nav.parentElement?.querySelector(':scope > main')
@@ -1011,9 +1120,13 @@ let _update = null   // main's last update-state: { status, version, percent, ne
 ipcRenderer.on('update-state', (_e, s) => { _update = s; addUpdateArrow(); _onUpdate?.(s) })
 ipcRenderer.invoke('update-get').then(s => { if (s) { _update = s; addUpdateArrow() } }).catch(() => {})
 
+let _arrowTimer = null, _arrowLogged = false
 function addUpdateArrow () {
   const menu = document.querySelector('[data-testid="server-menu-trigger"]')
   const old = document.querySelector(`[${UPDATE}]`)
+  if (_update?.status === 'ready' && !menu && !_arrowTimer) _arrowTimer = setTimeout(() => {
+    if (!document.querySelector(`[${UPDATE}]`)) console.log('[hook] update arrow: no anchor after 30 s (the server menu; the login screen has none)')
+  }, 30000)
   if (_update?.status !== 'ready' || !menu) return old?.remove()
   if (old?.parentElement === menu.parentElement) return
   old?.remove()
@@ -1033,6 +1146,7 @@ function addUpdateArrow () {
       .then(ok => { if (ok) ipcRenderer.send('update-install') })
   })
   menu.before(arrow)
+  if (!_arrowLogged) { _arrowLogged = true; console.log('[hook] added: update arrow') }
 }
 
 let _clientControlsQueued = false

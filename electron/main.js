@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 const {
   app, BrowserWindow, Menu, Tray, nativeImage, ipcMain, net, shell, desktopCapturer, session,
-  screen, MessageChannelMain, dialog, powerMonitor,
+  screen, MessageChannelMain, dialog, powerMonitor, Notification,
 } = require('electron')
 const { spawn, execFileSync } = require('child_process')
 const path = require('path')
@@ -24,6 +24,8 @@ const log = (...a) => {
   console.log(line)
   writeLog(line + '\n')
 }
+// Errors from libraries come with a stack or a page of headers: the first line says what happened
+const firstLine = m => String(m ?? '').split('\n')[0].trim()
 // Also to userData/logs/main.log, for launches with no terminal (menu, tray, at login). Bounded:
 // main.log and the previous one (main.old.log), LOG_MAX each; only the primary instance writes
 // (a second launch would rotate the running app's log). Lines before openLog wait in memory.
@@ -58,8 +60,15 @@ function logLines (stream, tag) {
 
 // ── Settings ──────────────────────────────────────────────────────────────
 const settingsPath     = path.join(app.getPath('userData'), 'settings.json')
-// A BOM (Windows tools add one) would make JSON.parse throw and every setting read as unset
-const loadUserSettings = () => { try { return JSON.parse(fs.readFileSync(settingsPath,'utf8').replace(/^﻿/,'')) } catch { return {} } }
+// A BOM (Windows tools add one) would make JSON.parse throw and every setting read as unset. A
+// file that is there but can't be read looks like reset settings: said once per run
+const loadUserSettings = () => {
+  try { return JSON.parse(fs.readFileSync(settingsPath,'utf8').replace(/^﻿/,'')) }
+  catch (e) {
+    if (e.code !== 'ENOENT' && !loadUserSettings.warned) { loadUserSettings.warned = true; log('[settings] unreadable:', firstLine(e.message)) }
+    return {}
+  }
+}
 // Written to a temp file and renamed over, so a crash mid-write can't leave an empty file (and
 // every setting, the server URL included, gone)
 const saveUserSettings = s  => {
@@ -68,6 +77,10 @@ const saveUserSettings = s  => {
 }
 // Without a trailing slash, like the setup form saves it (older saves may have one)
 const savedServerUrl   = () => loadUserSettings().serverUrl?.replace(/\/+$/, '') || ''
+// The server's address, host and hostname → <server>: a server reached by IP shows up bare in a
+// fetch error. For the page's lines that may carry a URL, and the diagnostics export (redact)
+const serverNames = () => { const url = savedServerUrl(); let host = '', hostname = ''; try { ({ host, hostname } = new URL(url)) } catch {} return [url, host, hostname].filter(Boolean) }
+const scrubServer = text => serverNames().reduce((t, s) => t.split(s).join('<server>'), text)
 
 // ── Chromium flags ────────────────────────────────────────────────────────
 // Hardware video encoding for Chromium's own share (shares the native helper doesn't take), behind
@@ -220,9 +233,42 @@ ipcMain.handle('virtmic-stop',   () => venmicUnlink())
 // Page → "Change server" item added to Sharkord's server menu (preload.js)
 ipcMain.on('change-server', e => { if (e.sender === win?.webContents) changeServer() })
 
-// Page → Sharkord showed a notification / it was clicked (preload.js)
-ipcMain.on('notification-shown',   e => { if (e.sender === win?.webContents && !win.isFocused()) win.flashFrame(true) })
-ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) showWindow() })
+// Page → Sharkord showed a notification, skipped one (the window focused) or one was clicked
+// (preload.js). The page's own lines ([notify] shown, with its permission and switches) come
+// through console-message; the counts go into the diagnostics file
+const notifyCounts = { shown:0, skipped:0, clicked:0, failed:0 }
+// Windows toasts need an AppUserModelID (build.appId, on the installer's shortcut). Not packaged,
+// its own: Electron's first toast leaves a Start menu "Electron" shortcut with the ID, and Windows
+// then named the installed build's toasts Electron too
+const APP_USER_MODEL_ID = app.isPackaged ? 'com.sharkord.client' : 'com.sharkord.client.dev'
+// Shown by main (Windows), held while on screen so their click arrives. A toast leaves the
+// notification centre with its popup (as Discord's do): there is no COM activator, so a click
+// there after a quit would find the app gone
+const toasts = new Set()
+ipcMain.on('notification-shown', (e, toast) => {
+  if (e.sender !== win?.webContents) return
+  notifyCounts.shown++
+  const flash = !win.isFocused()
+  log('[notify] shown: window', winState(), '→ flash', flash)
+  if (flash) { win.flashFrame(true); setBadge(true) }
+  // Windows: Chromium's toast tag (its notification id, with the server's origin) can exceed
+  // Windows' 64 characters, so the page hands it here (preload.js)
+  if (process.platform !== 'win32' || typeof toast?.id !== 'number') return
+  const n = new Notification({ title: String(toast.title), body: String(toast.body), silent: !!toast.silent })
+  // 'show' comes once Windows has the toast, even one its switches then refuse ('failed', with why)
+  const done = () => toasts.delete(n)
+  toasts.add(n)
+  n.on('show',   () => log('[notify] show'))
+  n.on('failed', (_e, err) => { notifyCounts.failed++; log('[notify] error:', scrubServer(firstLine(String(err)))); done() })
+  n.on('close',  e => { log('[notify] close:', e?.reason ?? '-'); if (e?.reason === 'timedOut') n.close(); done() })
+  n.on('click',  () => {
+    done(); notifyCounts.clicked++; showWindow('notification')
+    if (win && !win.isDestroyed()) win.webContents.send('notification-click', toast.id)
+  })
+  n.show()
+})
+ipcMain.on('notification-skipped', e => { if (e.sender === win?.webContents) notifyCounts.skipped++ })
+ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) { notifyCounts.clicked++; showWindow('notification') } })
 
 // Page → "Desktop Client" tab added to Sharkord's user settings (preload.js)
 ipcMain.handle('desktop-settings-get', e => e.sender === win?.webContents ? desktopSettings() : null)
@@ -248,10 +294,14 @@ function finishPick (streams) {
 
 ipcMain.handle('picker-go-live', (_e, { id, audio, include, exclude }) => {
   const src = _pickerSources.find(s => s.id === id)
-  if (!src) return finishPick(null)
+  if (!src) { log('[screen-share] go live: unknown source'); return finishPick(null) }
 
   const streams = { video: src }
   _nativeTarget = nativeTargetFor(src)
+  // The kind of source and audio, never the names
+  log('[screen-share] go live:', src.id === 'native' ? 'native' : src.id.split(':')[0], '| audio',
+    process.platform === 'win32' ? (audio ? (supportsLoopbackWithoutChrome ? 'loopbackWithoutChrome' : 'loopback') : 'none')
+      : include === 'Entire System' ? 'system' : include && include !== 'None' ? 'apps' : 'none')
   if (process.platform === 'linux' && include && include !== 'None') {
     const pb = obtainVenmic()
     try {
@@ -267,7 +317,7 @@ ipcMain.handle('picker-go-live', (_e, { id, audio, include, exclude }) => {
   }
   finishPick(streams)
 })
-ipcMain.on('picker-cancelled', () => finishPick(null))
+ipcMain.on('picker-cancelled', () => { log('[screen-share] picker cancelled'); finishPick(null) })
 
 // Opens the picker on `sources`; `done` gets the streams, or null when it is cancelled or closed
 async function openPicker (sources, done) {
@@ -292,13 +342,14 @@ async function openPicker (sources, done) {
   })
   _pickerWin.on('closed', () => {
     const cb = _displayCallback; _displayCallback = null
-    if (cb) cb(null)
+    if (cb) { log('[screen-share] picker closed'); cb(null) }
     _pickerWin = null
   })
 }
 
 async function handleDisplayMediaRequest (_req, callback) {
   try {
+    log('[screen-share] request')
     venmicUnlink()   // a previous share's link must not leak into this one
     stopNativeShare(); _nativeTarget = null
     // On Wayland this call shows the portal dialog and returns only its pick
@@ -306,7 +357,8 @@ async function handleDisplayMediaRequest (_req, callback) {
     const sources = await desktopCapturer.getSources({
       types:['screen','window'], thumbnailSize:{ width, height:Math.round(width*9/16) },
     })
-    if (!sources.length) { callback(null); return }   // portal cancelled
+    if (!sources.length) { log('[screen-share]', isWayland ? 'portal cancelled' : 'no sources'); callback(null); return }
+    log('[screen-share] sources:', sources.length)
     await openPicker(sources, callback)
   } catch (e) { log('[screen-share] error:', e.message); _displayCallback = null; callback(null) }
 }
@@ -549,14 +601,29 @@ function createWindow () {
 
   loadServer()
 
-  // The page's native share log next to the helper's, so one log shows both ends of a share
-  win.webContents.on('console-message', e => { if (e.message?.startsWith('[native-share]')) log('[page]', e.message) })
+  // The page's own lines (preload.js: shares, notifications, Sharkord's connection, our hooks and
+  // its uncaught errors) next to main's, so one log shows both ends. Only ours, by tag: Sharkord's
+  // console could name anyone. The ones that may carry a URL ([ws], an error) lose the server
+  win.webContents.on('console-message', e => {
+    const m = e.message || ''
+    if (/^\[(native-share|share|notify|ws|hook|window)\] /.test(m)) log('[page]', m.startsWith('[ws]') ? scrubServer(m) : m)
+    else if (m.startsWith('[page] error:')) log(scrubServer(m))
+  })
   // Load failed anyway (e.g. server went down between check and load)
   win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     if (!isMainFrame || code === -3) return   // -3: aborted by a newer navigation
     log('[load] failed:', url.startsWith('file:') ? 'local page' : 'server page', desc)   // the URL names the server and the channel
     setImmediate(showUnreachable)
   })
+  win.webContents.on('did-finish-load', () => { log('[load] finished:', win.webContents.getURL().startsWith('file:') ? 'local page' : 'server page'); sendVisibility() })
+  win.webContents.on('render-process-gone', (_e, d) => log('[page] gone:', d.reason, 'exit code', d.exitCode))
+  win.webContents.on('preload-error', (_e, _p, err) => log('[page] preload error:', firstLine(err?.message)))
+  win.webContents.on('unresponsive', () => log('[window] unresponsive'))
+  win.webContents.on('responsive', () => log('[window] responsive again'))
+  // Sharkord decides whether to notify by document.hidden (see sendVisibility)
+  for (const ev of ['show', 'hide', 'minimize', 'restore', 'focus', 'blur']) win.on(ev, sendVisibility)
+  win.on('minimize', () => log('[window] minimized'))
+  win.on('restore', () => log('[window] restored'))
   // Sharkord retitles the window once it has loaded — a good moment to note its theme
   win.on('page-title-updated', () => { pageTheme() })
 
@@ -573,29 +640,48 @@ function createWindow () {
     }
     if (inp.type==='keyDown' && inp.control && inp.shift && inp.key.toLowerCase()==='o') changeServer()
   })
-  win.on('focus', () => win.flashFrame(false))   // stop the notification flash
+  win.on('focus', () => { win.flashFrame(false); setBadge(false) })   // stop the notification flash, clear the dot
   // Sharkord blocks unload while in a voice channel; a browser asks, Electron silently cancels
   // the close (tray Quit did nothing). Quit always wins; closing the window asks like a browser.
   win.webContents.on('will-prevent-unload', e => {
-    if (quitting || dialog.showMessageBoxSync(win, { type:'question', buttons:['Leave','Stay'], defaultId:0, cancelId:1,
-      message:'Leave the voice channel?', detail:'Closing Sharkord disconnects you from the call.' }) === 0) e.preventDefault()
+    const leave = quitting || dialog.showMessageBoxSync(win, { type:'question', buttons:['Leave','Stay'], defaultId:0, cancelId:1,
+      message:'Leave the voice channel?', detail:'Closing Sharkord disconnects you from the call.' }) === 0
+    log('[window] leave the voice channel?', quitting ? 'quitting' : leave ? 'Leave' : 'Stay')
+    if (leave) e.preventDefault()
   })
   // Minimize to tray: X hides the window (quitting from the tray still closes it)
   win.on('close', e => {
-    if (quitting || !tray || !loadUserSettings().minimizeToTray) return
+    const hide = !quitting && tray && loadUserSettings().minimizeToTray
+    log('[window] close:', quitting ? 'quitting' : hide ? 'hidden to the tray' : 'closing')
+    if (!hide) return
     e.preventDefault()
     win.hide()
   })
   // Launched at login with Start minimized on: start in the tray (only if there is one to get back)
   win.once('ready-to-show', () => {
-    if (!(startHidden && tray && loadUserSettings().startMinimized)) win.show()
+    const show = !(startHidden && tray && loadUserSettings().startMinimized)
+    log('[window] ready:', show ? 'shown' : 'started in the tray')
+    if (show) win.show()
     startHidden = false   // only the first window (not one re-created by Change server)
   })
 }
 let startHidden = process.argv.includes('--hidden')   // launched at login (AUTOSTART_ARGS)
 
-function showWindow () {
+// For the log and the diagnostics file. Wayland doesn't always report a minimized window, which
+// then counts as visible
+const winState = () => !win || win.isDestroyed() ? 'none'
+  : `${win.isMinimized() ? 'minimized' : win.isVisible() ? 'visible' : 'hidden'}, ${win.isFocused() ? 'focused' : 'unfocused'}`
+// With backgroundThrottling off (voice keeps running in the tray) Chromium never marks the page
+// hidden, so Sharkord's document.hidden stayed false in the tray and a message in the open channel
+// never notified. The page's hook (preload.js, installVisibility) sets it from the window instead,
+// and unfocused counts as hidden: a minimize by the compositor never reaches Electron on Wayland
+// (no event, isMinimized false), and Sharkord reads it only to decide whether to notify
+const winHidden = () => !win || win.isDestroyed() || !win.isVisible() || win.isMinimized() || !win.isFocused()
+const sendVisibility = () => { if (win && !win.isDestroyed()) win.webContents.send('window-visible', !winHidden()) }
+
+function showWindow (why = 'app') {
   if (!win || win.isDestroyed()) return
+  log(`[window] show (${why}): was`, winState())
   if (win.isMinimized()) win.restore()
   win.show()
   win.focus()
@@ -604,10 +690,11 @@ function showWindow () {
 // A Sharkord server answers /info with its id and name (Sharkord's own client
 // fetches it the same way). Returns 'ok' | 'not-sharkord' | 'unreachable'.
 async function checkServer (serverUrl) {
+  const t0 = Date.now()
   try {
     const res  = await net.fetch(`${serverUrl.replace(/\/+$/, '')}/info`, { signal:AbortSignal.timeout(10000) })
     const info = res.ok ? await res.json().catch(() => null) : null
-    if (typeof info?.serverId === 'string' && typeof info?.name === 'string') return 'ok'
+    if (typeof info?.serverId === 'string' && typeof info?.name === 'string') { log('[check] ok,', Date.now() - t0, 'ms'); return 'ok' }
     log('[check] not a Sharkord server:', res.status)   // never the URL: the log goes into bug reports
     return 'not-sharkord'
   } catch (e) { log('[check] unreachable:', e.message); return 'unreachable' }
@@ -619,11 +706,14 @@ async function loadServer () {
   const serverUrl = savedServerUrl()
   const status = await checkServer(serverUrl)
   if (win.isDestroyed()) return
-  status === 'ok' ? win.loadURL(serverUrl).catch(() => {}) : showUnreachable(status)
+  if (status !== 'ok') return showUnreachable(status)
+  log('[load] server page')
+  win.loadURL(serverUrl).catch(e => log('[load] error:', scrubServer(firstLine(e.message))))   // Chromium's message names the URL
 }
 
 function showUnreachable (reason = 'unreachable') {
   if (win.isDestroyed()) return
+  log('[load] unreachable page:', reason)
   win.loadFile(path.join(__dirname,'unreachable.html'),
     { query:{ url:savedServerUrl(), theme:savedTheme(), reason } })
 }
@@ -709,6 +799,7 @@ function openAtLogin () {
 }
 
 function setOpenAtLogin (on) {
+  log('[settings] autostart entry', on ? 'written' : 'removed', process.platform === 'linux' ? '(desktop file)' : '(login item)')
   if (process.platform !== 'linux') return app.setLoginItemSettings({ openAtLogin:on, args:AUTOSTART_ARGS })
   if (!on) return fs.rmSync(autostartFile, { force:true })
   // Inside an AppImage execPath is a temporary mount; unpackaged (npm start) needs the app path
@@ -732,7 +823,11 @@ const desktopSettings = () => ({
   // autoUpdate only where the updater runs (the row is greyed out otherwise); the note always
   ...(updater ? { autoUpdate:autoUpdateOn() } : {}), autoUpdateNote:updateNoteText(), version:app.getVersion(),
 })
-function setDesktopSettings (s) {
+// `from`: the tab or the tray, for the log (each change: the key, before and after; all booleans)
+function setDesktopSettings (s, from = 'tab') {
+  const before = desktopSettings()
+  for (const k of ['openAtLogin', 'startMinimized', 'minimizeToTray', 'nativeShare', 'chromiumHwEncode', 'autoUpdate'])
+    if (typeof s?.[k] === 'boolean' && s[k] !== before[k]) log('[settings]', `${k}: ${before[k]} → ${s[k]} (${from})`)
   try {
     if (typeof s?.openAtLogin === 'boolean') setOpenAtLogin(s.openAtLogin)
     if (typeof s?.startMinimized === 'boolean') saveUserSettings({ ...loadUserSettings(), startMinimized:s.startMinimized })
@@ -745,14 +840,49 @@ function setDesktopSettings (s) {
   return desktopSettings()
 }
 
-let tray = null
+let tray = null, trayIcon = null, trayBadge = null, badged = false
+// Without a tray, Minimize to tray and Start minimized do nothing (the window can't come back)
 function createTray () {
-  if (tray || !fs.existsSync(APP_ICON)) return
-  const icon = nativeImage.createFromPath(APP_ICON)
-  tray = new Tray(process.platform === 'win32' ? icon : icon.resize({ width:32, height:32 }))
+  if (tray) return
+  if (!fs.existsSync(APP_ICON)) return log('[tray] skipped: no icon')
+  try {
+    const icon = nativeImage.createFromPath(APP_ICON)
+    trayIcon = process.platform === 'win32' ? icon : icon.resize({ width:32, height:32 })
+    trayBadge = withDot(icon.resize({ width:32, height:32 }), 32, 0.22)
+    tray = new Tray(trayIcon)
+  } catch (e) { tray = null; return log('[tray] failed:', e.message) }
+  log('[tray] created')
   tray.setToolTip('Sharkord')
-  tray.on('click', showWindow)
+  tray.on('click', () => showWindow('tray click'))
   updateTrayMenu()
+}
+
+// A red dot (Sharkord's --destructive) in the bottom-right corner of a `size` square copy of `img`, or
+// alone on a transparent one; `frac` is its radius over the size. Drawn into the BGRA bitmap
+// (premultiplied: the blend below is right for it), the edge smoothed by coverage
+function withDot (img, size, frac) {
+  const bmp = img ? Buffer.from(img.toBitmap()) : Buffer.alloc(size * size * 4)
+  const r = size * frac, c = size - r - 0.5, dot = [11, 0, 231]
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const a = Math.max(0, Math.min(1, r + 0.5 - Math.hypot(x - c, y - c)))
+    if (!a) continue
+    const i = (y * size + x) * 4
+    for (let k = 0; k < 3; k++) bmp[i + k] = Math.round(dot[k] * a + bmp[i + k] * (1 - a))
+    bmp[i + 3] = Math.round(255 * a + bmp[i + 3] * (1 - a))
+  }
+  return nativeImage.createFromBitmap(bmp, { width:size, height:size })
+}
+// A notification came while the window wasn't focused: a dot on the tray icon (Wayland ignores the
+// taskbar flash) and, on Windows, on the taskbar button too (the tray icon often sits in the
+// overflow there), until the window is focused
+let taskbarDot = null
+function setBadge (on) {
+  if (badged === on) return
+  badged = on
+  log('[tray] badge', on ? 'on' : 'off')
+  if (tray) { tray.setImage(on ? trayBadge : trayIcon); tray.setToolTip(on ? 'Sharkord: new messages' : 'Sharkord') }
+  if (process.platform === 'win32' && win && !win.isDestroyed())
+    win.setOverlayIcon(on ? (taskbarDot ||= withDot(null, 16, 0.4)) : null, on ? 'New messages' : '')
 }
 
 // Rebuilt on every change: Linux trays don't update a checkbox in place
@@ -760,14 +890,14 @@ function updateTrayMenu () {
   if (!tray) return
   const s = desktopSettings()
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label:'Open Sharkord',  click:showWindow },
+    { label:'Open Sharkord',  click:() => showWindow('tray menu') },
     { label:'Change Server…', click:changeServer },
     { type:'separator' },
-    { label:'Open at login',    type:'checkbox', checked:s.openAtLogin,    click:i => setDesktopSettings({ openAtLogin:i.checked }) },
-    { label:'Start minimized',  type:'checkbox', checked:s.startMinimized, enabled:s.openAtLogin, click:i => setDesktopSettings({ startMinimized:i.checked }) },
-    { label:'Minimize to tray', type:'checkbox', checked:s.minimizeToTray, click:i => setDesktopSettings({ minimizeToTray:i.checked }) },
-    ...('nativeShare' in s ? [{ label:'Native screen share', type:'checkbox', checked:s.nativeShare, click:i => setDesktopSettings({ nativeShare:i.checked }) }] : []),
-    ...('autoUpdate' in s ? [{ label:'Download updates automatically', type:'checkbox', checked:s.autoUpdate, click:i => setDesktopSettings({ autoUpdate:i.checked }) }] : []),
+    { label:'Open at login',    type:'checkbox', checked:s.openAtLogin,    click:i => setDesktopSettings({ openAtLogin:i.checked }, 'tray') },
+    { label:'Start minimized',  type:'checkbox', checked:s.startMinimized, enabled:s.openAtLogin, click:i => setDesktopSettings({ startMinimized:i.checked }, 'tray') },
+    { label:'Minimize to tray', type:'checkbox', checked:s.minimizeToTray, click:i => setDesktopSettings({ minimizeToTray:i.checked }, 'tray') },
+    ...('nativeShare' in s ? [{ label:'Native screen share', type:'checkbox', checked:s.nativeShare, click:i => setDesktopSettings({ nativeShare:i.checked }, 'tray') }] : []),
+    ...('autoUpdate' in s ? [{ label:'Download updates automatically', type:'checkbox', checked:s.autoUpdate, click:i => setDesktopSettings({ autoUpdate:i.checked }, 'tray') }] : []),
     { type:'separator' },
     ...(!updater ? [] : update.status === 'ready'
       ? [{ label:`Restart to update to ${update.version}`, click:installUpdate }]
@@ -797,12 +927,10 @@ function loadUpdater () {
   if (process.platform === 'linux' && !process.env.APPIMAGE && !packageType()) { updateNote = 'Not started as an AppImage or installed from a package.'; log('[update] off:', updateNote); return }
   try { ({ autoUpdater: updater } = require('electron-updater')) }
   catch (e) { log('[update] electron-updater missing:', e.message); updateNote = 'This build can\'t update itself.'; return }
-  // Errors come with a page of response headers and a stack: the first line says what happened (the
-  // `command -v` probes for zypper/gksudo/kdesudo report empty ones: skipped)
-  const line = m => String(m ?? '').split('\n')[0].trim()
-  // A failed differential download (a server without range requests) falls back to the full one
-  updater.logger = { info:m => log('[update]', m), warn:m => log('[update] warning:', line(m)),
-    error:m => { if (line(m)) log(/^Cannot download differentially/.test(line(m)) ? '[update]' : '[update] error:', line(m)) } }
+  // The first line of an error (the `command -v` probes for zypper/gksudo/kdesudo report empty
+  // ones: skipped). A failed differential download (a server without range requests) falls back to the full one
+  updater.logger = { info:m => log('[update]', m), warn:m => log('[update] warning:', firstLine(m)),
+    error:m => { if (firstLine(m)) log(/^Cannot download differentially/.test(firstLine(m)) ? '[update]' : '[update] error:', firstLine(m)) } }
   updater.autoDownload = true
   updater.disableWebInstaller = true   // no web installer: silences its warning at each check
   // deb/rpm: the package manager asks for the password, never behind the user's back at quit
@@ -822,7 +950,7 @@ function loadUpdater () {
   // A failed install (the password dialog cancelled) keeps the downloaded update to try again
   updater.on('error', e => {
     setUpdate({ status:update.status === 'ready' ? 'ready' : 'error', error:updateErrorText(e) })
-    if (update.status === 'ready') showWindow()   // hidden for the package manager (installUpdate)
+    if (update.status === 'ready') showWindow('update error')   // hidden for the package manager (installUpdate)
   })
   // The new AppImage takes the new version's name: the autostart entry must point at it
   updater.on('appimage-filename-updated', p => {
@@ -830,6 +958,7 @@ function loadUpdater () {
     try { if (openAtLogin()) setOpenAtLogin(true) } catch (e) { log('[update] autostart entry:', e.message) }
   })
   log('[update] enabled:', app.getVersion(), process.platform === 'linux' ? (process.env.APPIMAGE ? 'AppImage' : packageType()) : 'nsis')
+  updateTrayMenu()   // the tray is made first (its state is in the [sys] lines): add the update item
   // The installer stays in electron-updater's cache (90-130 MB) after its install, until the next
   // download (NSIS, deb, rpm); the one of the version now running is dropped here, with its
   // update-info.json (left alone too by an AppImage install, which moves the file out). A newer
@@ -915,7 +1044,8 @@ function installUpdate () {
 
 // ── Diagnostics ───────────────────────────────────────────────────────────
 //   One text file for a bug report (Settings → Desktop Client → Save diagnostics…): versions,
-//   system, flags, GPU, the helper's probe, the updater, the settings and both log files. Nothing
+//   system, flags, GPU, the helper's probe, the updater, the window's and the page's state (notification
+//   permission and switches, visibility, online), the settings and both log files. Nothing
 //   that names the user: the log never gets the server or page URLs, window titles, app names or
 //   paths under home (log() scrubs those), and the export replaces the server and the user name
 //   again as a safety net. The files on disk stay as they are.
@@ -932,21 +1062,41 @@ function sysLines () {
     `CPU ${os.cpus()[0]?.model.trim() || '?'} x${os.cpus().length} | RAM ${Math.round(os.totalmem() / 2 ** 30)} GB` +
       ` | displays ${screen.getAllDisplays().map(d => `${d.size.width}x${d.size.height}@${d.scaleFactor}x`).join(' ') || '-'}` +
       (process.platform === 'linux' ? ` | session ${isWayland ? 'wayland' : process.env.XDG_SESSION_TYPE || 'x11'}, desktop ${process.env.XDG_CURRENT_DESKTOP || '?'}` : '') +
-      ` | helper ${!helper ? 'missing' : helper.startsWith(process.resourcesPath || '\0') ? 'installed' : 'dev build'}`,
+      ` | helper ${!helper ? 'missing' : helper.startsWith(process.resourcesPath || '\0') ? 'installed' : 'dev build'} | tray ${tray ? 'yes' : 'no'}`,
   ]
 }
-// The server (its address, its host) and the user name as a word, on top of the paths log() already
-// replaces: a server reached by IP shows up bare in a fetch error. The hostname is left alone,
-// nothing logs it, and one like `fedora` would mangle unrelated lines
+// The server and the user name as a word, on top of the paths log() already replaces. The
+// hostname is left alone, nothing logs it, and one like `fedora` would mangle unrelated lines
 function redact (text) {
-  const url = savedServerUrl()
-  let host = '', hostname = '', user = ''
-  try { ({ host, hostname } = new URL(url)) } catch {}
+  let user = ''
   try { user = os.userInfo().username } catch {}
-  for (const s of [url, host, hostname]) if (s) text = text.split(s).join('<server>')
-  text = scrubPaths(text)
+  text = scrubPaths(scrubServer(text))
   if (user.length >= 3) text = text.replace(new RegExp('\\b' + escapeRe(user) + '\\b', 'gi'), '<user>')
   return text
+}
+// Windows' own switches, which refuse a toast: all notifications (Settings → System →
+// Notifications) and Sharkord's. Not set means on. Do not disturb isn't readable
+function windowsToasts () {
+  const reg = (key, value) => {
+    try {
+      const out = execFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe'),
+        ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\' + key, '/v', value], { encoding: 'utf8', windowsHide: true, timeout: 2000 })
+      return /0x0\s*$/m.test(out) ? 'off' : 'on'
+    } catch { return 'on' }   // reg.exe fails on a missing value
+  }
+  return `all ${reg('PushNotifications', 'ToastEnabled')}, Sharkord ${reg('Notifications\\Settings\\' + APP_USER_MODEL_ID, 'Enabled')}`
+}
+
+// The page's side of a notifications report: permission, visibility, Sharkord's switches. Raced
+// against a timeout, so a hung page can't hang the save
+async function pageState () {
+  if (!win || win.isDestroyed()) return 'no window'
+  const js = `(() => { const g = k => String(localStorage.getItem('sharkord-browser-notifications' + k)).slice(0, 8)
+    return JSON.stringify({ page: location.protocol === 'file:' ? 'local' : 'server', permission: window.Notification?.permission ?? 'none',
+      hidden: document.hidden, focus: document.hasFocus(), online: navigator.onLine,
+      notifyAll: g(''), notifyMentions: g('-for-mentions'), notifyDms: g('-for-dms'), notifyReplies: g('-for-replies') }) })()`
+  return Promise.race([win.webContents.executeJavaScript(js, true), new Promise(r => setTimeout(() => r('(no answer in 2 s)'), 2000))])
+    .catch(e => `(error: ${firstLine(e.message)})`)
 }
 const readLog = name => { try { return fs.readFileSync(path.join(logDir, name), 'utf8') } catch (e) { return `(not available: ${e.code || e.message})\n` } }
 // The chosen path or null when cancelled, false when it failed (logged); one dialog at a time.
@@ -968,8 +1118,8 @@ async function saveDiagnostics () {
     const text = redact([
       `Sharkord desktop client diagnostics, ${new Date().toISOString()}`,
       'Private details are replaced in this file: the server address with <server>, the settings folder with',
-      '<userData>, the home folder with <home> and the user name with <user>. No account data, messages or',
-      'user names are included.',
+      '<userData>, the home folder with <home> and the user name with <user>. No account data, messages,',
+      'notification titles or user names are included.',
       '', '== System ==', ...sysLines(), `env: ${env || '-'}`,
       '', '== Chromium flags ==',
       `hardware encoding for Chromium's share: ${chromiumHwEncode() ? 'on' : 'off'} (${chromiumHwEncodeSource()})`,
@@ -981,6 +1131,12 @@ async function saveDiagnostics () {
       '', '== Native share ==',
       `helper: ${nativeShareExe() ? path.basename(nativeShareExe()) : 'missing'}`, `on: ${nativeShareOn()}`, `probe: ${JSON.stringify(_nativeProbe) || 'not answered'}`,
       '', '== Updates ==', JSON.stringify(updateState()),
+      '', '== State ==',
+      `window: ${winState()} | tray: ${!!tray} | open at login: ${openAtLogin()} | start minimized: ${!!settings.startMinimized}` +
+        ` | minimize to tray: ${!!settings.minimizeToTray} | notifications supported: ${Notification.isSupported()}`,
+      `notifications this run: shown ${notifyCounts.shown}, skipped ${notifyCounts.skipped} (window focused), clicked ${notifyCounts.clicked}, failed ${notifyCounts.failed} | badge ${badged ? 'on' : 'off'}`,
+      ...process.platform === 'win32' ? [`windows notifications: ${windowsToasts()}`] : [],
+      `page: ${await pageState()}`,
       '', '== Settings ==', JSON.stringify(settings, null, 2),
       '', '== main.log ==', readLog('main.log'),
       '== main.old.log (previous run) ==', readLog('main.old.log'),
@@ -1004,13 +1160,20 @@ for (let t = 0; !primaryInstance && relaunched && t < 20; t++) {
   primaryInstance = app.requestSingleInstanceLock()
 }
 openLog(primaryInstance)
-if (!primaryInstance) app.quit()
-app.on('second-instance', showWindow)
+if (!primaryInstance) { log('[app] another instance is running: quitting'); app.quit() }   // console only: the file is the other's
+app.on('second-instance', () => { log('[app] second launch: showing the window'); showWindow('second instance') })
+// With a listener Electron no longer shows its own error box: shown the same, after the log line.
+// A stray rejection (a fetch, the updater) is logged and the app goes on
+process.on('uncaughtException', e => { log('[app] uncaught exception:', e?.stack || e); dialog.showErrorBox('A JavaScript error occurred in the main process', String(e?.stack || e)) })
+process.on('unhandledRejection', r => log('[app] unhandled rejection:', firstLine(r?.stack || r)))
+// The helper is spawned, not one of these; Chromium's own processes, crashed or killed
+app.on('child-process-gone', (_e, d) => { if (d.reason !== 'clean-exit') log('[app] child process gone:', d.type, d.type === 'Utility' ? d.name : '', d.reason, 'exit code', d.exitCode) })
+app.on('certificate-error', (_e, _wc, _url, error) => log('[load] certificate error:', error))   // the code, never the URL
 
 app.whenReady().then(() => {
   if (!primaryInstance) return
-  // Windows toasts need an AppUserModelID (matches build.appId on the installer's shortcut)
-  if (process.platform === 'win32') app.setAppUserModelId('com.sharkord.client')
+  if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
+  createTray()   // before the [sys] lines, which say whether there is one
   sysLines().forEach(l => log('[sys]', l))
   if (TEST_DIAGNOSTICS) setTimeout(saveDiagnostics, 8000)   // after the GPU lines and the probe
   // Delayed: the GPU process isn't initialised yet at whenReady
@@ -1025,7 +1188,6 @@ app.whenReady().then(() => {
   session.defaultSession.setDisplayMediaRequestHandler(handleDisplayMediaRequest)
   Menu.setApplicationMenu(null)   // no menu bar; shortcuts live in before-input-event
   loadUpdater()
-  createTray()
   probeNativeShare()
   watchSuspend()
   openApp()
@@ -1034,12 +1196,18 @@ app.whenReady().then(() => {
   setTimeout(() => checkForUpdates(), 15000)
   setInterval(() => checkForUpdates(), UPDATE_CHECK_EVERY)
   powerMonitor.on('resume', () => setTimeout(() => checkForUpdates(), 30000))
+  for (const ev of ['suspend', 'resume', 'lock-screen', 'unlock-screen']) powerMonitor.on(ev, () => log('[power]', ev))
 })
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 let quitting = false
-app.on('before-quit', () => { quitting = true; tray?.destroy(); tray = null })
+app.on('before-quit', () => {
+  if (!quitting) log('[app] quitting')
+  quitting = true; tray?.destroy(); tray = null
+  for (const n of toasts) n.close()   // not left in the notification centre (above)
+})
 app.on('window-all-closed', () => {
+  log('[app] all windows closed')
   venmicUnlink()
   stopNativeShare()
   if (process.platform !== 'darwin') app.quit()
