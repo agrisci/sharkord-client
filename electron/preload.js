@@ -686,7 +686,11 @@ const DESKTOP_GROUPS = [
   { id: 'startup', title: 'Startup and Tray' },
   { id: 'share',   title: 'Screen Sharing' },
   { id: 'updates', title: 'Updates', description: s => `Client Version ${s.version || 'unknown'}` },
+  { id: 'diagnostics', title: 'Diagnostics', description: () => DIAGNOSTICS_TEXT },
 ]
+// One line; the file's own header and the README spell out what is replaced. Keep it true (a log
+// line that ever carried a user's name or message would have to change main's redact() too)
+const DIAGNOSTICS_TEXT = 'Saves a log for troubleshooting, with your server address, user name and home folder redacted. Attach it to a bug report.'
 const DESKTOP_OPTIONS = [
   { key: 'openAtLogin',    group: 'startup', label: 'Open Sharkord when your computer starts up' },
   // Only for launches at login: greyed out while Open at login is off (its value is kept)
@@ -970,6 +974,26 @@ function buildDesktopPanel (mainClass, initial) {
     control.prepend(sw)   // the switch first, the updates button to its right
     group.append(text, control)
     cardFor(groupId).append(group)
+  }
+  // Diagnostics: a button, not a setting (never the save bar); the note says where the file went
+  {
+    const group = el('div', 'flex flex-col gap-2')
+    group.setAttribute(DESKTOP, 'row')
+    const text = el('div', 'flex flex-col')
+    const note = el('span', 'text-sm text-muted-foreground')
+    text.append(el('label', 'flex items-center gap-2 text-sm leading-none font-medium', 'Save a diagnostics file'), note)
+    const btn = el('button', OUTLINE_BUTTON_CLASS.replace('h-9 px-4 py-2', 'h-8 px-3'), 'Save diagnostics…')
+    btn.type = 'button'
+    btn.addEventListener('click', async () => {
+      btn.disabled = true
+      const file = await ipcRenderer.invoke('diagnostics-save').catch(() => false)
+      btn.disabled = false
+      note.textContent = file ? 'Saved to ' + file : file === false ? 'Could not save the file; see the log.' : ''
+    })
+    const control = el('div', 'flex items-center gap-3')
+    control.append(btn)
+    group.append(text, control)
+    cardFor('diagnostics').append(group)
   }
   render()
   return { panel, dirty: () => changed().length > 0 }

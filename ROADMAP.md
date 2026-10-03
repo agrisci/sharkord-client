@@ -8,7 +8,7 @@ about never leaving a share broken and being able to debug machines we have neve
 P3 = ideas
 **Status:** ✅ Done · 🚧 In progress · 🧪 Needs testing · 📋 Planned · 💡 Idea · ⛔ Won't do
 **#** is a stable ID for referring to an item in commits and issues, not its rank; new items take
-the next free number (currently 111).
+the next free number (currently 112).
 
 ## Open test: Linux after the Windows FFmpeg port (#103)
 
@@ -205,7 +205,8 @@ shares* on (off by default):
 | # | Pri | Item | Status | Notes |
 |---|-----|------|--------|-------|
 | 33 | P0 | Always-on log files | ✅ | `log()` also writes `userData/logs/main.log` on every launch (menu, tray, login), with the previous run in `main.old.log`: two files of at most 5 MB, rotated at startup and when full (checked with a `GST_DEBUG=9` flood). The helper's stderr goes in as `[helper]` lines; the startup probe streams it too (`execFile` killed it past 1 MB). |
-| 34 | P0 | "Copy diagnostics" button | 📋 | Settings → Desktop Client: GPU and encoder list (#9), Electron/Chromium version, OS, last share stats, recent log. Turns "it's black for me" into a fixable report. |
+| 34 | P0 | "Save diagnostics…" button | ✅ | Settings → Desktop Client: one text file (versions, OS, CPU, RAM, displays, Chromium flags, GPU status, the helper's probe, the updater, settings, both log files; share stats are the `[page]` lines in the log) with the server address, home folder and user name redacted. The log itself never gets the server or page URLs, window titles, the apps picked for share audio or paths under home (`log()` scrubs them), so it can be attached as it is. Turns "it's black for me" into a fixable report. |
+| 111 | P0 | Log every feature, so the diagnostics file answers the report | 📋 | Next. Today only startup, shares and updates leave a trace; a notifications or settings-tab problem on a machine we don't have is undebuggable from the file (#34). Add private-safe `[notify]`, `[settings]`, `[tray]` and page-hook lines: the hook's install result once per load, the page's notification permission, one line per notification shown and clicked (time and focus state only, never its title or body), each setting change, each tray action, and the page's own uncaught errors (first line, length-capped, through `log()`'s scrubbing). The rule of #34 stays: nothing that names the user. |
 | 35 | P1 | Quieter share logging | 📋 | One summary line every ~10 s by default, per-2 s detail behind a debug switch; drop the worker's debug counters (`ckNoNk`, `nkNoCk`). |
 | 36 | P2 | Hardware test matrix | 💡 | A checklist for volunteers (GPU vendor × codec × resolution × OS) plus the diagnostics output, collected in an issue. |
 

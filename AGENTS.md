@@ -17,8 +17,8 @@ side is ~2500 lines and the native helper ~3300 (`native/`, `scripts/stage-nativ
 
 | Path                         | What it is                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, updates (electron-updater), lifecycle |
-| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls, a **Desktop Client** tab in the user settings and the update arrow in the header |
+| `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, updates (electron-updater), diagnostics (the redacted report file), lifecycle |
+| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls, a **Desktop Client** tab in the user settings (the options and a Diagnostics card with **Save diagnostics…**) and the update arrow in the header |
 | `electron/picker.html`       | Screen share picker (source grid + audio step), styled like Sharkord                          |
 | `electron/picker-preload.js` | `pickerAPI` bridge for the picker window                                                      |
 | `electron/first-launch.html` | Server URL prompt (first run and Change server)                                               |
@@ -28,6 +28,7 @@ side is ~2500 lines and the native helper ~3300 (`native/`, `scripts/stage-nativ
 | `native/`                    | Native screen share helper (Rust + our static FFmpeg, `src/ffmpeg.rs`: encoder and paced encode loop): captures a monitor (Windows: DXGI desktop duplication → AMF, NVENC or Quick Sync, `src/windows.rs`) or a portal pick (Linux Wayland: PipeWire → Vulkan video or VA-API, `src/linux/`), frames on stdout (see *Native screen share*) |
 | `scripts/stage-native.js`    | Builds the helper and stages it into `build/native/` (shipped as `resources/native/`): on Windows one static exe, on Linux with the bundled Mesa Vulkan drivers (`mesa/`); licences in `LICENSES/` |
 | `scripts/deps/`              | The helper's FFmpeg, static LGPL with our patches (`ffmpeg-*.patch` Linux, `ffmpeg-windows-*.patch` Windows): `ffmpeg.sh` (Linux), `ffmpeg-windows.sh` (Windows, MSVC from MSYS2's bash); Linux also `mesa.sh` (RADV/ANV with H.264 encode, the helper's fallback), `ubuntu-packages.sh` (their build dependencies, CI), `container.sh` (the same in Ubuntu 22.04 via podman) |
+| `.github/ISSUE_TEMPLATE/`   | The bug report template: asks for the diagnostics file                                       |
 | `.github/workflows/build.yml` | CI: builds on Linux + Windows runners for PRs into `dev`/`main` and pushes to `dev` (artifacts); run manually on `main` with a version bump to release |
 | `upstream/`                  | Gitignored local clones for reference only (`sharkord-src`, `Sunshine`, ...) — never edit or import |
 
@@ -58,7 +59,7 @@ belongs to rather than adding files.
     `desktop-settings-get`, `desktop-settings-set`, `notification-shown` / `notification-clicked`
     (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
     `native-share-start` / `native-share-stop` (`send`), `update-get`, `update-check`,
-    `update-install` (`send`) — only accepted from the main window's webContents.
+    `update-install` (`send`), `diagnostics-save` — only accepted from the main window's webContents.
   - Main → page: `native-share-port` (a `MessagePort` tagged with the share's `id`, forwarded
     into the page world with `window.postMessage`): helper frames and events one way,
     `keyframe`/`bitrate`/`stop` the other; `update-state` (the updater's `{ status, version,
@@ -116,6 +117,20 @@ belongs to rather than adding files.
   the periodic check; `SHARKORD_TEST_UPDATE=install|quit`
   restarts into a downloaded update at once, or quits (the install-on-quit path). Logged as
   `[update]`. The tab's Updates card shows the client's version (`version` in `desktop-settings-get`).
+- **Diagnostics**: the tab's Diagnostics card has **Save diagnostics…** (`diagnostics-save` →
+  `saveDiagnostics`): a save dialog, then one text file (default `sharkord-diagnostics-<date>-<time>.txt`
+  in Downloads) with a header naming the replacements, the `[sys]` lines, `SHARKORD_*` env, the
+  Chromium flags (read back from `app.commandLine`), GPU status, the helper's probe, the updater's
+  state, the settings without `serverUrl`, and `main.log` then `main.old.log` as they are on disk.
+  `redact()` is the safety net on top of what the log never gets (below): the server URL, its host
+  and hostname → `<server>`, the paths again, and the user name as a whole word (3+ chars, any
+  case) → `<user>`. The hostname is left alone (nothing logs it; `fedora` as a hostname would
+  mangle unrelated lines). Returns the path, `null` cancelled, `false` failed (the card's note says
+  so). Only in the tab, not the tray (it looked out of place there); the README keeps the log
+  path as the manual way. `SHARKORD_TEST_DIAGNOSTICS=<file>` writes the file there 8 s after
+  startup without the dialog, to check its content. The card's one-line description promises a
+  redacted log; the file's header and the README say what is replaced: keep them true when adding
+  log lines.
 
 ## Screen share flow
 
@@ -395,7 +410,15 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
   the console and appends to `userData/logs/main.log` (the previous run in `main.old.log`; each
   capped at 5 MB, rotated, so never more than two files). Only the primary instance writes;
   lines logged before the single-instance lock wait in memory. The helper's stderr (probe and
-  shares) is logged line by line as `[helper]`.
+  shares) is logged line by line as `[helper]`. Two `[sys]` lines at startup (`sysLines()`, also
+  in the diagnostics file): version and packaging, Electron/Chromium/Node, OS, locale, CPU, RAM,
+  display sizes, session type and desktop, whether the helper is there.
+  **The log never identifies the user**, as it goes into bug reports as it is: `log()` replaces
+  the settings and home folders in every line (`<userData>`, `<home>`; any separators, any case
+  on Windows), and no line carries the server or a page URL (`[check]`, `[load]` log only the
+  error), window titles (a window share's `started.monitor` becomes `<window>` before it is
+  logged or sent to the page), the apps picked for share audio (a count), hostnames or
+  usernames. Log what helps (versions, hardware, states, errors), never what names someone.
 - New dependencies need a real reason; the runtime dependencies are `@vencord/venmic`
   (optional, Linux-only; listed in `asarUnpack` because it's a native module) and
   `electron-updater` (updates; electron-builder's own, and it knows NSIS, AppImage, deb and rpm).
@@ -465,7 +488,7 @@ There are no automated tests. After a change, check what it touches:
 - **Change server**: ☰ server menu item, login-screen button, `Ctrl+Shift+O`, tray →
   **Change Server…**; Cancel returns to the current server.
 - **Desktop settings**: user Settings → **Desktop Client** (after Others; not in server settings). Picking it
-  shows our cards (Startup and Tray, Screen Sharing, Updates) in place of Sharkord's, with only Desktop Client highlighted; changes show Sharkord's
+  shows our cards (Startup and Tray, Screen Sharing, Updates, Diagnostics) in place of Sharkord's, with only Desktop Client highlighted; changes show Sharkord's
   "You have unsaved changes / Save Changes" bar and apply only on Save. Leaving with unsaved changes
   (another entry, the back button, Escape) asks first; Desktop Client doesn't open while Sharkord's own
   tab has unsaved changes. On a narrow window the drawer closes after picking it.
@@ -497,9 +520,21 @@ There are no automated tests. After a change, check what it touches:
   DM list. On Windows (installed build) the toast is labelled Sharkord.
 - **Unreachable page**: stop the server → Retry and Change server both work.
 - **Log files**: launch from the menu (no terminal): `logs/main.log` in the settings folder has the
-  `[flags]`, probe and `[gpu]` lines; a restart moves it to `main.old.log`; a second launch while
+  `[sys]`, `[flags]`, probe and `[gpu]` lines; a restart moves it to `main.old.log`; a second launch while
   running leaves both untouched; a flood of helper output never leaves more than the two files,
-  each <= 5 MB.
+  each <= 5 MB. Nothing in it names the user: `[log]` names the run's date and no path, the server down gives
+  `[check] unreachable:` and `[load] failed: server page` without the URL, and an error with a
+  path (rename `settings.json` to a directory, change a setting) reads `<userData>/settings.json`;
+  on Linux a per-app share audio link logs `[venmic] link 2 app(s)`.
+- **Diagnostics**: Settings → Desktop Client → the Diagnostics card describes the file; **Save
+  diagnostics…** opens a save dialog in Downloads with `sharkord-diagnostics-<date>-<time>.txt`; Cancel
+  leaves the note empty, Save shows `Saved to …`; the save bar never appears, the switches stay,
+  and leaving the tab asks nothing; a double click opens one dialog. The file has the header, the
+  sections in order (System, Chromium flags, GPU, Native share, Updates, Settings, main.log,
+  main.old.log) and both logs; `grep` it for the server's host, `$HOME`, the settings folder and
+  the user name: no hits, only `<server>`, `<home>`, `<userData>`, `<user>`; the logs on disk
+  are unchanged. With `logs/` deleted while running the sections say `(not available: ENOENT)`
+  and the save still works. On Windows a JSON path in the probe reads `<home>` (the `\\` form).
 - **Theme**: switch Sharkord to light, restart with the server down — local pages and the
   picker should be light too.
 - **Screen share picker**: on X11 (source grid) and Wayland (portal, then audio step); cancel
@@ -530,7 +565,8 @@ There are no automated tests. After a change, check what it touches:
   each incoming video (once, and again if it changes); Chromium only names it while the page
   captures (the mic in a voice channel). Every 10 s `[native-share] watching …` gives what the viewer
   got: fps, dropped, freezes, jitter buffer, keys, pli, lost, nack, kbps. A window share goes
-  native too (`input` shows `"window":true`, `started` its title and size); resizing it changes
+  native too (`input` shows `"window":true`, `started` its size with `"monitor":"<window>"`, never
+  the title); resizing it changes
   the viewer's picture size within ~0.5 s (`capture: window resized`), minimizing keeps the last
   picture, stopping while minimized ends the helper by itself (`exited (0)`), closing it ends the
   share. VP8, or the setting off, must behave exactly as before.

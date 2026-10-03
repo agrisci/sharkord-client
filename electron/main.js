@@ -10,10 +10,19 @@ const path = require('path')
 const fs   = require('fs')
 const os   = require('os')
 
+// Paths under the home folder name the user (errors and the updater carry them): replaced in every
+// line, so the log can go into a bug report as it is (saveDiagnostics). Any separators (Chromium
+// prints C:/Users/..., JSON C:\\Users\\...), any case on Windows, and only the whole folder name
+// (/home/bob, not /home/bobby); userData first, it is inside home; a home of `/` would eat every
+// slash, hence the length check
+const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const pathRe   = p => new RegExp(escapeRe(p).replace(/\\\\|\//g, '[\\\\/]+') + '(?![\\w.-])', process.platform === 'win32' ? 'gi' : 'g')
+const PATHS    = [[app.getPath('userData'), '<userData>'], [os.homedir(), '<home>']].filter(([p]) => p.length > 3).map(([p, to]) => [pathRe(p), to])
+const scrubPaths = text => PATHS.reduce((t, [re, to]) => t.replace(re, to), text)
 const log = (...a) => {
-  const line = [new Date().toISOString().slice(11,23), '|', ...a]
-  console.log(...line)
-  writeLog(require('util').format(...line).slice(0, 65536) + '\n')
+  const line = scrubPaths(require('util').format(new Date().toISOString().slice(11,23), '|', ...a)).slice(0, 65536)
+  console.log(line)
+  writeLog(line + '\n')
 }
 // Also to userData/logs/main.log, for launches with no terminal (menu, tray, at login). Bounded:
 // main.log and the previous one (main.old.log), LOG_MAX each; only the primary instance writes
@@ -37,7 +46,7 @@ function openLog (primary) {
   if (!primary) return
   try { fs.mkdirSync(logDir, { recursive: true }); rotateLog(); logState = 'on' } catch { return }
   pending.forEach(writeLog)
-  log('[log]', logFile)
+  log('[log] run of', new Date().toISOString().slice(0, 10), '| logs/main.log in the settings folder')   // lines carry only the time
 }
 // A child's stderr into the log, a line at a time (the helper's, its libraries' and drivers' messages)
 function logLines (stream, tag) {
@@ -218,6 +227,7 @@ ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) sho
 // Page → "Desktop Client" tab added to Sharkord's user settings (preload.js)
 ipcMain.handle('desktop-settings-get', e => e.sender === win?.webContents ? desktopSettings() : null)
 ipcMain.handle('desktop-settings-set', (e, s) => e.sender === win?.webContents ? setDesktopSettings(s) : null)
+ipcMain.handle('diagnostics-save', e => e.sender === win?.webContents ? saveDiagnostics() : null)
 
 // Page → the update arrow in Sharkord's header and the Desktop Client tab's button (preload.js)
 ipcMain.handle('update-get',   e => e.sender === win?.webContents ? updateState() : null)
@@ -249,7 +259,8 @@ ipcMain.handle('picker-go-live', (_e, { id, audio, include, exclude }) => {
         ? pb?.link(buildLinkData({ exclude: Array.isArray(exclude) ? exclude : [] }))
         : pb?.link(buildLinkData({ include }))
       _venmicLinked = !!ok
-      log('[venmic] link', include === 'Entire System' ? 'system' : JSON.stringify(include), '→', !!ok)
+      // A count, not the apps: their names (and window titles, with granular nodes) are the user's
+      log('[venmic] link', include === 'Entire System' ? 'system' : include.length + ' app(s)', '→', !!ok)
     } catch (e) { log('[venmic] link error:', e.message) }
   } else if (process.platform === 'win32' && audio) {
     streams.audio = supportsLoopbackWithoutChrome ? 'loopbackWithoutChrome' : 'loopback'
@@ -430,6 +441,8 @@ function spawnHelper () {
       else if (kind === 2) {
         try {
           const ev = JSON.parse(payload.toString())
+          // A window share's `monitor` is its title (windows.rs): never in the log, nor the page's
+          if (ev.type === 'started' && _nativeTarget?.window) ev.monitor = '<window>'
           if (ev.type !== 'stats') log('[native-share]', JSON.stringify(ev))
           if (['selected', 'cancelled', 'error'].includes(ev.type)) settle(ev.type)
           port.postMessage({ ...ev, type: 'event', event: ev.type })
@@ -541,7 +554,7 @@ function createWindow () {
   // Load failed anyway (e.g. server went down between check and load)
   win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
     if (!isMainFrame || code === -3) return   // -3: aborted by a newer navigation
-    log('[load] failed:', url, desc)
+    log('[load] failed:', url.startsWith('file:') ? 'local page' : 'server page', desc)   // the URL names the server and the channel
     setImmediate(showUnreachable)
   })
   // Sharkord retitles the window once it has loaded — a good moment to note its theme
@@ -595,9 +608,9 @@ async function checkServer (serverUrl) {
     const res  = await net.fetch(`${serverUrl.replace(/\/+$/, '')}/info`, { signal:AbortSignal.timeout(10000) })
     const info = res.ok ? await res.json().catch(() => null) : null
     if (typeof info?.serverId === 'string' && typeof info?.name === 'string') return 'ok'
-    log('[check] not a Sharkord server:', serverUrl, res.status)
+    log('[check] not a Sharkord server:', res.status)   // never the URL: the log goes into bug reports
     return 'not-sharkord'
-  } catch (e) { log('[check] unreachable:', serverUrl, e.message); return 'unreachable' }
+  } catch (e) { log('[check] unreachable:', e.message); return 'unreachable' }
 }
 
 // Check the server before loading it: navigating the window to an
@@ -900,6 +913,85 @@ function installUpdate () {
   updater.quitAndInstall(true, false)
 }
 
+// ── Diagnostics ───────────────────────────────────────────────────────────
+//   One text file for a bug report (Settings → Desktop Client → Save diagnostics…): versions,
+//   system, flags, GPU, the helper's probe, the updater, the settings and both log files. Nothing
+//   that names the user: the log never gets the server or page URLs, window titles, app names or
+//   paths under home (log() scrubs those), and the export replaces the server and the user name
+//   again as a safety net. The files on disk stay as they are.
+const packaging = () => !app.isPackaged ? 'unpackaged' : process.env.APPIMAGE ? 'AppImage' : packageType() || 'installed'
+// What a bug report needs first, once per launch as [sys] and again in the file. Nothing that names
+// the user or the machine (no hostname, user name, argv, environment or display labels)
+function sysLines () {
+  const distro = () => { try { return /^PRETTY_NAME="?([^"\n]*)/m.exec(fs.readFileSync('/etc/os-release', 'utf8'))?.[1] } catch { return '' } }
+  const helper = nativeShareExe()
+  return [
+    `Sharkord ${app.getVersion()} (${packaging()}) | Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, Node ${process.versions.node}` +
+      ` | ${process.platform} ${process.arch}, ${(process.platform === 'linux' && distro()) || os.version()}, ${os.release()} | locale ${app.getLocale()}` +
+      (startHidden ? ' | launched --hidden' : ''),
+    `CPU ${os.cpus()[0]?.model.trim() || '?'} x${os.cpus().length} | RAM ${Math.round(os.totalmem() / 2 ** 30)} GB` +
+      ` | displays ${screen.getAllDisplays().map(d => `${d.size.width}x${d.size.height}@${d.scaleFactor}x`).join(' ') || '-'}` +
+      (process.platform === 'linux' ? ` | session ${isWayland ? 'wayland' : process.env.XDG_SESSION_TYPE || 'x11'}, desktop ${process.env.XDG_CURRENT_DESKTOP || '?'}` : '') +
+      ` | helper ${!helper ? 'missing' : helper.startsWith(process.resourcesPath || '\0') ? 'installed' : 'dev build'}`,
+  ]
+}
+// The server (its address, its host) and the user name as a word, on top of the paths log() already
+// replaces: a server reached by IP shows up bare in a fetch error. The hostname is left alone,
+// nothing logs it, and one like `fedora` would mangle unrelated lines
+function redact (text) {
+  const url = savedServerUrl()
+  let host = '', hostname = '', user = ''
+  try { ({ host, hostname } = new URL(url)) } catch {}
+  try { user = os.userInfo().username } catch {}
+  for (const s of [url, host, hostname]) if (s) text = text.split(s).join('<server>')
+  text = scrubPaths(text)
+  if (user.length >= 3) text = text.replace(new RegExp('\\b' + escapeRe(user) + '\\b', 'gi'), '<user>')
+  return text
+}
+const readLog = name => { try { return fs.readFileSync(path.join(logDir, name), 'utf8') } catch (e) { return `(not available: ${e.code || e.message})\n` } }
+// The chosen path or null when cancelled, false when it failed (logged); one dialog at a time.
+// SHARKORD_TEST_DIAGNOSTICS=<file> writes there 8 s after startup, with no dialog, for testing
+const TEST_DIAGNOSTICS = process.env.SHARKORD_TEST_DIAGNOSTICS
+async function saveDiagnostics () {
+  if (saveDiagnostics.busy || !win || win.isDestroyed()) return null
+  saveDiagnostics.busy = true
+  try {
+    let dir; try { dir = app.getPath('downloads') } catch { dir = os.homedir() }   // no XDG downloads dir: Electron throws
+    const { canceled, filePath } = TEST_DIAGNOSTICS ? { filePath:TEST_DIAGNOSTICS } : await dialog.showSaveDialog(win, {
+      title:'Save diagnostics', defaultPath:path.join(dir, `sharkord-diagnostics-${new Date().toISOString().slice(0, 16).replace('T', '-').replace(':', '')}.txt`),
+      filters:[{ name:'Text', extensions:['txt'] }],
+    })
+    if (canceled || !filePath) return null
+    const gpu = await app.getGPUInfo('basic').catch(e => ({ error:e.message }))
+    const { serverUrl, ...settings } = loadUserSettings()
+    const env = Object.keys(process.env).filter(k => k.startsWith('SHARKORD_')).map(k => `${k}=${process.env[k]}`).join(' ')
+    const text = redact([
+      `Sharkord desktop client diagnostics, ${new Date().toISOString()}`,
+      'Private details are replaced in this file: the server address with <server>, the settings folder with',
+      '<userData>, the home folder with <home> and the user name with <user>. No account data, messages or',
+      'user names are included.',
+      '', '== System ==', ...sysLines(), `env: ${env || '-'}`,
+      '', '== Chromium flags ==',
+      `hardware encoding for Chromium's share: ${chromiumHwEncode() ? 'on' : 'off'} (${chromiumHwEncodeSource()})`,
+      `enable-features: ${app.commandLine.getSwitchValue('enable-features') || '-'}`,
+      `disable-features: ${app.commandLine.getSwitchValue('disable-features') || '-'}`,
+      '', '== GPU ==',
+      `feature status: ${JSON.stringify(app.getGPUFeatureStatus())}`,
+      `devices: ${JSON.stringify(gpu.gpuDevice || gpu)}`,
+      '', '== Native share ==',
+      `helper: ${nativeShareExe() ? path.basename(nativeShareExe()) : 'missing'}`, `on: ${nativeShareOn()}`, `probe: ${JSON.stringify(_nativeProbe) || 'not answered'}`,
+      '', '== Updates ==', JSON.stringify(updateState()),
+      '', '== Settings ==', JSON.stringify(settings, null, 2),
+      '', '== main.log ==', readLog('main.log'),
+      '== main.old.log (previous run) ==', readLog('main.old.log'),
+    ].join('\n'))
+    fs.writeFileSync(filePath, text)
+    log('[diagnostics] saved,', Buffer.byteLength(text), 'bytes')   // not where: the path is the user's choice
+    return filePath
+  } catch (e) { log('[diagnostics] save failed:', e.message); return false }
+  finally { saveDiagnostics.busy = false }
+}
+
 // ── App startup ───────────────────────────────────────────────────────────
 // One instance only: a second launch (or autostart) brings the existing window back. Relaunched
 // after an update (APPIMAGE_SILENT_INSTALL from electron-updater, SHARKORD_RELAUNCHED from
@@ -919,6 +1011,8 @@ app.whenReady().then(() => {
   if (!primaryInstance) return
   // Windows toasts need an AppUserModelID (matches build.appId on the installer's shortcut)
   if (process.platform === 'win32') app.setAppUserModelId('com.sharkord.client')
+  sysLines().forEach(l => log('[sys]', l))
+  if (TEST_DIAGNOSTICS) setTimeout(saveDiagnostics, 8000)   // after the GPU lines and the probe
   // Delayed: the GPU process isn't initialised yet at whenReady
   setTimeout(() => {
     // Per-codec encode profiles aren't exposed here — see chrome://gpu for those
