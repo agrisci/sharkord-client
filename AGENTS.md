@@ -85,8 +85,8 @@ belongs to rather than adding files.
   navigating to an unreachable URL and then to a local page can leave the window unable to paint.
 - **Updates**: `electron-updater` against this repo's GitHub Releases: a check 15 s
   after launch, every 4 h and 30 s after a resume from suspend (`checkForUpdates`; off with
-  `autoUpdate` false, a manual check from the tab's button or the tray still works; an automatic
-  check waits 10 min while a native share runs), the download in the background, then a green
+  `autoUpdate` false, a manual check from the tab's button or the tray still works; while a native
+  share runs an automatic check is postponed 10 min, one at a time), the download in the background, then a green
   `circle-arrow-down` cloned from the ☰ server-menu button (`server-menu-trigger`) in Sharkord's
   header, a *Restart to update to vX* tray item and the tab's state line, until the user restarts
   into it (`quitAndInstall(true, true)`: silent, relaunch). The feed comes from
