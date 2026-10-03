@@ -69,6 +69,12 @@ list since the previous tag, so keep commit subjects readable) and merges the re
 into `dev`. For a pre-release, set a version like `0.2.0-beta.1` in `package.json` and release it
 with `none`; versions with a `-` are marked as pre-releases.
 
+The Release also carries `latest.yml`, `latest-linux.yml` and the `*.blockmap` files electron-builder
+writes next to the installers: installed clients read them to update themselves (electron-updater,
+see AGENTS.md), so a Release without them is one nobody updates to. A pre-release version writes a
+`beta.yml`-style channel file instead, which stable installs ignore; a client running a pre-release
+follows both.
+
 ## Project structure
 
 ```

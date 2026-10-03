@@ -219,6 +219,11 @@ ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) sho
 ipcMain.handle('desktop-settings-get', e => e.sender === win?.webContents ? desktopSettings() : null)
 ipcMain.handle('desktop-settings-set', (e, s) => e.sender === win?.webContents ? setDesktopSettings(s) : null)
 
+// Page → the update arrow in Sharkord's header and the Desktop Client tab's button (preload.js)
+ipcMain.handle('update-get',   e => e.sender === win?.webContents ? updateState() : null)
+ipcMain.handle('update-check', e => { if (e.sender !== win?.webContents) return null; checkForUpdates(true); return updateState() })
+ipcMain.on('update-install',   e => { if (e.sender === win?.webContents) installUpdate() })
+
 // ── Screen picker ─────────────────────────────────────────────────────────
 //   On Wayland the portal has already chosen the source, so the picker opens
 //   straight on the audio step (skipPicker) instead of a one-item grid.
@@ -708,6 +713,8 @@ const desktopSettings = () => ({
   ...(nativeShareSupported() ? { nativeShare:nativeShareOn() } : {}),
   ...(nativeShareNote() ? { nativeShareNote:nativeShareNote() } : {}),
   ...(nativeShareCodecs() ? { nativeShareCodecs:nativeShareCodecs() } : {}),
+  // autoUpdate only where the updater runs (the row is greyed out otherwise); the note always
+  ...(updater ? { autoUpdate:autoUpdateOn() } : {}), autoUpdateNote:updateNoteText(), version:app.getVersion(),
 })
 function setDesktopSettings (s) {
   try {
@@ -716,6 +723,7 @@ function setDesktopSettings (s) {
     if (typeof s?.minimizeToTray === 'boolean') saveUserSettings({ ...loadUserSettings(), minimizeToTray:s.minimizeToTray })
     if (typeof s?.nativeShare === 'boolean') saveUserSettings({ ...loadUserSettings(), nativeShare:s.nativeShare })
     if (typeof s?.chromiumHwEncode === 'boolean') saveUserSettings({ ...loadUserSettings(), chromiumHwEncode:s.chromiumHwEncode })
+    if (typeof s?.autoUpdate === 'boolean') { saveUserSettings({ ...loadUserSettings(), autoUpdate:s.autoUpdate }); checkForUpdates() }
   } catch (e) { log('[desktop] settings error:', e.message) }
   updateTrayMenu()
   return desktopSettings()
@@ -743,14 +751,135 @@ function updateTrayMenu () {
     { label:'Start minimized',  type:'checkbox', checked:s.startMinimized, enabled:s.openAtLogin, click:i => setDesktopSettings({ startMinimized:i.checked }) },
     { label:'Minimize to tray', type:'checkbox', checked:s.minimizeToTray, click:i => setDesktopSettings({ minimizeToTray:i.checked }) },
     ...('nativeShare' in s ? [{ label:'Native screen share', type:'checkbox', checked:s.nativeShare, click:i => setDesktopSettings({ nativeShare:i.checked }) }] : []),
+    ...('autoUpdate' in s ? [{ label:'Install updates automatically', type:'checkbox', checked:s.autoUpdate, click:i => setDesktopSettings({ autoUpdate:i.checked }) }] : []),
     { type:'separator' },
+    ...(!updater ? [] : update.status === 'ready'
+      ? [{ label:`Restart to update to ${update.version}`, click:installUpdate }]
+      : [{ label:update.status === 'downloading' ? `Downloading update… ${update.percent || 0}%` : update.status === 'checking' ? 'Checking for updates…' : 'Check for updates…',
+           enabled:!['checking', 'downloading'].includes(update.status), click:() => checkForUpdates(true) }]),
     { label:'Quit', click:() => app.quit() },
   ]))
 }
 
+// ── Updates ───────────────────────────────────────────────────────────────
+//   electron-updater against this repo's GitHub Releases (resources/app-update.yml and the
+//   latest*.yml next to the installers, both written by electron-builder): a check after launch
+//   and every few hours, the download in the background, then a green arrow in Sharkord's header
+//   (preload.js), the tray and the Desktop Client tab until the user restarts into it. Windows and
+//   the AppImage also install on quit; deb and rpm install through pkexec (a password dialog), so
+//   only when asked. No dialogs: the arrow is the whole prompt.
+const UPDATE_CHECK_EVERY = 4 * 60 * 60 * 1000
+const UPDATE_FEED = process.env.SHARKORD_UPDATE_FEED   // a directory with latest*.yml + installers, for testing
+// electron-builder marks deb and rpm installs; the updater picks dpkg/dnf over the AppImage one by it
+const packageType = () => { try { return fs.readFileSync(path.join(process.resourcesPath, 'package-type'), 'utf8').trim() } catch { return '' } }
+let updater = null, updateNote = '', update = { status:'idle' }
+const autoUpdateOn = () => loadUserSettings().autoUpdate !== false
+
+function loadUpdater () {
+  if (!app.isPackaged) { updateNote = 'Updates need an installed build.'; log('[update] off:', updateNote); return }
+  // An AppImage run from its extracted files has nothing to replace
+  if (process.platform === 'linux' && !process.env.APPIMAGE && !packageType()) { updateNote = 'Not started as an AppImage or installed from a package.'; log('[update] off:', updateNote); return }
+  try { ({ autoUpdater: updater } = require('electron-updater')) }
+  catch (e) { log('[update] electron-updater missing:', e.message); updateNote = 'This build can\'t update itself.'; return }
+  // (its `command -v` probes for zypper/gksudo/kdesudo report empty errors: skipped)
+  updater.logger = { info:m => log('[update]', m), warn:m => log('[update] warning:', m), error:m => { if (String(m ?? '').trim()) log('[update] error:', m) } }
+  updater.autoDownload = true
+  // deb/rpm: the package manager asks for the password, never behind the user's back at quit
+  updater.autoInstallOnAppQuit = process.platform === 'win32' || !!process.env.APPIMAGE
+  update.needsPassword = process.platform === 'linux' && !process.env.APPIMAGE
+  if (UPDATE_FEED) { updater.setFeedURL({ provider:'generic', url:UPDATE_FEED }); log('[update] feed:', UPDATE_FEED) }
+  updater.on('checking-for-update',  () => setUpdate({ status:'checking' }))
+  updater.on('update-available',     i  => setUpdate({ status:'downloading', version:i.version, percent:0 }))
+  updater.on('download-progress',    p  => { if (Math.round(p.percent) !== update.percent) setUpdate({ percent:Math.round(p.percent) }) })
+  updater.on('update-downloaded',    i  => {
+    setUpdate({ status:'ready', version:i.version })
+    // SHARKORD_TEST_UPDATE=install restarts into it at once, =quit quits (the install-on-quit path)
+    if (process.env.SHARKORD_TEST_UPDATE === 'install') installUpdate()
+    if (process.env.SHARKORD_TEST_UPDATE === 'quit') app.quit()
+  })
+  updater.on('update-not-available', () => setUpdate({ status:'none', checkedAt:Date.now() }))
+  // A failed install (the password dialog cancelled) keeps the downloaded update to try again
+  updater.on('error', e => {
+    setUpdate({ status:update.status === 'ready' ? 'ready' : 'error', error:updateErrorText(e) })
+    if (update.status === 'ready') showWindow()   // hidden for the package manager (installUpdate)
+  })
+  // The new AppImage takes the new version's name: the autostart entry must point at it
+  updater.on('appimage-filename-updated', p => {
+    process.env.APPIMAGE = p
+    try { if (openAtLogin()) setOpenAtLogin(true) } catch (e) { log('[update] autostart entry:', e.message) }
+  })
+  log('[update] enabled:', app.getVersion(), process.platform === 'linux' ? (process.env.APPIMAGE ? 'AppImage' : packageType()) : 'nsis')
+}
+
+// electron-updater's errors carry a page of response headers; the tab gets one plain sentence (the
+// log has the rest). No manifest in the latest release: what every install sees until the first
+// release made with the updater.
+function updateErrorText (e) {
+  const code = e?.code || '', msg = e?.message || String(e)
+  if (/CHANNEL_FILE_NOT_FOUND|LATEST_VERSION_NOT_FOUND/.test(code) || /Cannot find .*\.yml/.test(msg)) return 'The latest release has no update information yet.'
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|ERR_INTERNET_DISCONNECTED|net::/.test(code + msg)) return 'GitHub couldn\'t be reached.'
+  if (/exited with code|pkexec|dpkg|dnf|zypper/.test(msg)) return 'The install didn\'t finish (see the log).'
+  return 'Something went wrong (see the log).'
+}
+
+// The one line the Desktop Client tab and the tray show
+function updateNoteText () {
+  if (!updater) return updateNote
+  const v = app.getVersion()
+  switch (update.status) {
+    case 'checking':    return 'Checking for updates…'
+    case 'downloading': return `Downloading Sharkord ${update.version}… ${update.percent || 0}%`
+    case 'ready':       return update.error ? `Installing Sharkord ${update.version} failed. ${update.error} Try again.`
+      : `Sharkord ${update.version} is ready: restart to install it.` + (update.needsPassword ? ' Your password will be asked for.' : '')
+    case 'none':        return `Sharkord ${v} is up to date (checked at ${new Date(update.checkedAt).toTimeString().slice(0, 5)}).`
+    case 'error':       return `Couldn't check for updates. ${update.error}`
+    default:            return `Sharkord ${v}.`
+  }
+}
+const updateState = () => ({ ...update, note:updateNoteText() })
+function setUpdate (changes) {
+  update = { ...update, ...changes }
+  updateTrayMenu()
+  if (win && !win.isDestroyed()) win.webContents.send('update-state', updateState())
+}
+
+function checkForUpdates (manual = false) {
+  if (!updater || (!manual && !autoUpdateOn())) return
+  if (['checking', 'downloading', 'ready'].includes(update.status)) return
+  updater.checkForUpdates().catch(e => log('[update] check failed:', e.message))   // also reported as an error event
+}
+
+function installUpdate () {
+  if (update.status !== 'ready') return
+  log('[update] installing', update.version, update.needsPassword ? '(through the package manager)' : '')
+  update.error = null
+  if (!update.needsPassword) return updater.quitAndInstall(true, true)   // silent, and start the new version
+  // deb/rpm: pkexec and the package manager run synchronously in this process (electron-updater's
+  // quit handler needs that), so the window couldn't repaint for ~10 s; hidden, only the password
+  // dialog shows and the new version's window comes back
+  if (win && !win.isDestroyed()) win.hide()
+  // The new version is started by us, not electron-updater's app.relaunch(): Electron relaunches
+  // through a helper that sets no-new-privileges, and pkexec can't elevate from such a process, so
+  // the *next* update would fail with "pkexec must be setuid root". Only after a successful install
+  // (before-quit-for-update); without --hidden, the user asked for this restart
+  require('electron').autoUpdater.once('before-quit-for-update', () => {
+    spawn(process.execPath, process.argv.slice(1).filter(a => a !== '--hidden'),
+      { detached:true, stdio:'ignore', env:{ ...process.env, SHARKORD_RELAUNCHED:'1' } }).unref()
+  })
+  updater.quitAndInstall(true, false)
+}
+
 // ── App startup ───────────────────────────────────────────────────────────
-// One instance only: a second launch (or autostart) brings the existing window back
-const primaryInstance = app.requestSingleInstanceLock()
+// One instance only: a second launch (or autostart) brings the existing window back. Relaunched
+// after an update (APPIMAGE_SILENT_INSTALL from electron-updater, SHARKORD_RELAUNCHED from
+// installUpdate: the new version starts while the old one is still quitting) the lock is retried
+// for a few seconds instead of losing the app.
+const relaunched = !!(process.env.APPIMAGE_SILENT_INSTALL || process.env.SHARKORD_RELAUNCHED)
+let primaryInstance = app.requestSingleInstanceLock()
+for (let t = 0; !primaryInstance && relaunched && t < 20; t++) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250)
+  primaryInstance = app.requestSingleInstanceLock()
+}
 openLog(primaryInstance)
 if (!primaryInstance) app.quit()
 app.on('second-instance', showWindow)
@@ -770,10 +899,14 @@ app.whenReady().then(() => {
 
   session.defaultSession.setDisplayMediaRequestHandler(handleDisplayMediaRequest)
   Menu.setApplicationMenu(null)   // no menu bar; shortcuts live in before-input-event
+  loadUpdater()
   createTray()
   probeNativeShare()
   watchSuspend()
   openApp()
+  // After the page is up; then every few hours for a long-running app
+  setTimeout(() => checkForUpdates(), 15000)
+  setInterval(() => checkForUpdates(), UPDATE_CHECK_EVERY)
 })
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────

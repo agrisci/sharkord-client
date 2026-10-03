@@ -30,6 +30,13 @@ page.
 
 On first launch Sharkord asks for your server's address (e.g. `https://sharkord.example.com`).
 
+**Updates install themselves.** The client checks for a new version when it starts and every few
+hours, downloads it in the background and shows a green arrow next to the ☰ server menu; click it
+to restart into the new version. Windows and the AppImage also install it when you quit (keep the
+AppImage somewhere you can write to: it replaces its own file). A deb or rpm install updates through
+your package manager, so it asks for your password. Turn it off in Settings → **Desktop Client** →
+*Install updates automatically*.
+
 ## How to use it
 
 | Feature | How |

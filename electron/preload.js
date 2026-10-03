@@ -695,6 +695,8 @@ const DESKTOP_OPTIONS = [
   { key: 'chromiumHwEncode', label: 'Hardware encoding for other shares',
     description: 'Lets the browser encode shares that don\'t use the native share on the GPU. Turn it off if those shares look corrupted or never load for viewers. ' +
       (process.platform === 'linux' ? 'Off by default: some drivers encode incorrectly. ' : '') + 'Takes effect after restarting Sharkord.' },
+  { key: 'autoUpdate', label: 'Install updates automatically',
+    description: 'Checks for new versions when Sharkord starts and every few hours, and downloads them in the background. A green arrow next to the ☰ server menu restarts into the new version.' },
 ]
 
 function el (tag, className, text) {
@@ -707,12 +709,14 @@ function el (tag, className, text) {
 // The open Desktop tab: { entry, panel, main, was, dirty } -- our entry and content, Sharkord's
 // hidden content area and the entry that was selected, and whether there are unsaved changes
 let _desktopOpen = null
+let _onUpdate = null   // the open tab's update row, refreshed from main's update-state messages
 const OUTLINE_BUTTON_CLASS = "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50 h-9 px-4 py-2"
 
 function closeDesktopTab () {
   const o = _desktopOpen
   if (!o) return
   _desktopOpen = null
+  _onUpdate = null
   o.panel.remove()
   o.main.hidden = false
   o.entry.classList.remove(...ACTIVE_ENTRY)
@@ -846,7 +850,7 @@ function buildDesktopPanel (mainClass, initial) {
   const card = el('div', 'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm')
   const header = el('div', '@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6')
   header.append(el('div', 'leading-none font-semibold', 'Desktop Client'),
-    el('div', 'text-muted-foreground text-sm', 'Options of this desktop client, kept on this computer.'))
+    el('div', 'text-muted-foreground text-sm', `Options of this desktop client (version ${initial.version || 'unknown'}), kept on this computer.`))
   const content = el('div', 'px-6 space-y-4')
   card.append(header, content)
   wrap.append(card)
@@ -904,7 +908,8 @@ function buildDesktopPanel (mainClass, initial) {
       }
       text.append(list)
     }
-    if (initial[key + 'Note']) text.append(el('span', 'text-sm text-muted-foreground', initial[key + 'Note']))
+    const note = initial[key + 'Note'] ? el('span', 'text-sm text-muted-foreground', initial[key + 'Note']) : null
+    if (note) text.append(note)
     const sw = el('button', SWITCH_CLASS)
     sw.type = 'button'
     sw.setAttribute('role', 'switch')
@@ -912,12 +917,64 @@ function buildDesktopPanel (mainClass, initial) {
     sw.addEventListener('click', () => { draft[key] = !draft[key]; render() })
     switches[key] = sw
     const control = el('div', 'flex flex-col gap-2')
+    // Updates: a button next to the switch (not a setting, so it never shows the save bar): Check for
+    // updates, or, with one downloaded, a filled "Restart to install" (the settings screen covers the
+    // header's arrow). The note follows the updater's state while the tab is open.
+    if (key === 'autoUpdate') {
+      control.className = 'flex items-center gap-3'
+      const act = el('button')
+      act.type = 'button'
+      const show = s => {
+        const ready = s?.status === 'ready'
+        act.className = (ready ? BUTTON_CLASS : OUTLINE_BUTTON_CLASS).replace('h-9 px-4 py-2', 'h-8 px-3')
+        act.textContent = ready ? `Restart to install ${s.version}`
+          : s?.status === 'downloading' ? `Downloading… ${s.percent || 0}%`
+          : s?.status === 'checking' ? 'Checking…' : 'Check for updates'
+        act.disabled = !(key in initial) || ['checking', 'downloading'].includes(s?.status)
+        if (note && s?.note) note.textContent = s.note
+      }
+      act.addEventListener('click', () => {
+        if (_update?.status === 'ready') return ipcRenderer.send('update-install')
+        ipcRenderer.invoke('update-check').then(s => { if (s) { _update = s; show(s) } }).catch(() => {})
+      })
+      show(_update)
+      _onUpdate = show
+      control.append(act)
+    }
     control.append(sw)
     group.append(text, control)
     content.append(group)
   }
   render()
   return { panel, dirty: () => changed().length > 0 }
+}
+
+// ── Update arrow in Sharkord's header ─────────────────────────────────────
+//   Once an update is downloaded, a green circled arrow (lucide circle-arrow-down)
+//   appears before the ☰ server menu, cloned from that button so it keeps Sharkord's styling;
+//   a click restarts into the new version. Main keeps the state (update-state messages); the tray
+//   has the same entry for the login screen, which has no header.
+const UPDATE = 'data-client-update'
+const UPDATE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-arrow-down h-4 w-4 text-green-500"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="m8 12 4 4 4-4"/></svg>'
+let _update = null   // main's last update-state: { status, version, percent, needsPassword, note }
+
+ipcRenderer.on('update-state', (_e, s) => { _update = s; addUpdateArrow(); _onUpdate?.(s) })
+ipcRenderer.invoke('update-get').then(s => { if (s) { _update = s; addUpdateArrow() } }).catch(() => {})
+
+function addUpdateArrow () {
+  const menu = document.querySelector('[data-testid="server-menu-trigger"]')
+  const old = document.querySelector(`[${UPDATE}]`)
+  if (_update?.status !== 'ready' || !menu) return old?.remove()
+  if (old?.parentElement === menu.parentElement) return
+  old?.remove()
+  const arrow = menu.cloneNode(false)
+  // Radix's trigger attributes don't belong to it
+  for (const a of ['data-testid', 'id', 'aria-haspopup', 'aria-expanded', 'data-state']) arrow.removeAttribute(a)
+  arrow.setAttribute(UPDATE, '')
+  arrow.append(svg(UPDATE_ICON))
+  arrow.title = `Update ready! Restart to install Sharkord ${_update.version}` + (_update.needsPassword ? ' (asks for your password)' : '')
+  arrow.addEventListener('click', () => ipcRenderer.send('update-install'))
+  menu.before(arrow)
 }
 
 let _clientControlsQueued = false
@@ -928,5 +985,6 @@ new MutationObserver(() => {
     _clientControlsQueued = false
     addChangeServerControls()
     addDesktopTab()
+    addUpdateArrow()
   })
 }).observe(document, { childList: true, subtree: true })

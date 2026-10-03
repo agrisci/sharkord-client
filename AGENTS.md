@@ -17,8 +17,8 @@ side is ~2500 lines and the native helper ~3300 (`native/`, `scripts/stage-nativ
 
 | Path                         | What it is                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
-| `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, lifecycle |
-| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls and a **Desktop Client** tab in the user settings |
+| `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, updates (electron-updater), lifecycle |
+| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls, a **Desktop Client** tab in the user settings and the update arrow in the header |
 | `electron/picker.html`       | Screen share picker (source grid + audio step), styled like Sharkord                          |
 | `electron/picker-preload.js` | `pickerAPI` bridge for the picker window                                                      |
 | `electron/first-launch.html` | Server URL prompt (first run and Change server)                                               |
@@ -48,18 +48,21 @@ belongs to rather than adding files.
   what the probe found the GPU hardware encodes, H.264 / AV1 with a check or a cross),
   `chromiumHwEncode` (hardware encoding for shares on Chromium's own path, i.e. the Chromium flags
   below; default on on Windows, off on Linux; read once at launch, `SHARKORD_CHROMIUM_DEFAULTS=1`
-  forces it off). *Open at login* is not
+  forces it off), `autoUpdate` (default on; see *Updates* below; `autoUpdateNote` is the state line
+  the tab shows, or why the updater can't run here, in which case the key is left out and the switch
+  greyed out). *Open at login* is not
   stored: the OS login item / `~/.config/autostart/sharkord.desktop` is the source of truth.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
   - Page → main: `virtmic-active`, `virtmic-unmute`, `virtmic-stop`, `change-server` (`send`),
     `desktop-settings-get`, `desktop-settings-set`, `notification-shown` / `notification-clicked`
     (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
-    `native-share-start` / `native-share-stop` (`send`) — only accepted from the main window's
-    webContents.
+    `native-share-start` / `native-share-stop` (`send`), `update-get`, `update-check`,
+    `update-install` (`send`) — only accepted from the main window's webContents.
   - Main → page: `native-share-port` (a `MessagePort` tagged with the share's `id`, forwarded
     into the page world with `window.postMessage`): helper frames and events one way,
-    `keyframe`/`bitrate`/`stop` the other.
+    `keyframe`/`bitrate`/`stop` the other; `update-state` (the updater's `{ status, version,
+    percent, needsPassword, note }` on every change).
   - Picker → main: `virtmic-list`, `audio-settings-get`, `audio-settings-set`,
     `picker-go-live`, `picker-cancelled` (`send`).
   - Main → picker: `init` (sources, `skipPicker`, `platform`, `theme`).
@@ -75,10 +78,37 @@ belongs to rather than adding files.
   login, Start minimized, Minimize to tray, Quit) is the non-DOM fallback. With *Minimize to tray*
   on, `close` hides the window unless `quitting`. Autostart launches with `--hidden`, which only
   marks a login launch: it starts in the tray when *Start minimized* is on (independent of
-  *Minimize to tray*, like Discord's and Vesktop's). A single-instance lock makes a second launch show the window.
+  *Minimize to tray*, like Vesktop's). A single-instance lock makes a second launch show the window.
 - **Server check**: `checkServer` fetches `<url>/info` and expects `serverId` and `name`
   strings → `'ok' | 'not-sharkord' | 'unreachable'`. `loadServer` checks before loading —
   navigating to an unreachable URL and then to a local page can leave the window unable to paint.
+- **Updates**: `electron-updater` against this repo's GitHub Releases: a check 15 s
+  after launch and every 4 h (`checkForUpdates`; off with `autoUpdate` false, a manual check from the
+  tab's button or the tray still works), the download in the background, then a green
+  `circle-arrow-down` cloned from the ☰ server-menu button (`server-menu-trigger`) in Sharkord's
+  header, a *Restart to update to vX* tray item and the tab's state line, until the user restarts
+  into it (`quitAndInstall(true, true)`: silent, relaunch). The feed comes from
+  `resources/app-update.yml` (electron-builder writes it from `build.publish`) and the
+  `latest.yml` / `latest-linux.yml` + `*.blockmap` CI uploads next to the installers (the
+  release's `files` lists AppImage, deb and rpm; a prerelease version publishes its own channel,
+  `beta.yml`, that stable installs ignore). Per install: NSIS runs the installer with `--updated /S`;
+  the AppImage is replaced in place (renamed to the new version's name when the old one had a
+  version, so `appimage-filename-updated` rewrites the autostart entry); deb and rpm go through
+  `pkexec dpkg -i` / `dnf install`, a password dialog (`needsPassword`), so `autoInstallOnAppQuit` is
+  on only for Windows and the AppImage; they run synchronously in the main process (measured ~12 s
+  for the rpm), so `installUpdate` hides the window first and the error handler shows it again if
+  the dialog is cancelled (the note then says the install failed). After a deb/rpm install the new
+  version is started by our own detached `spawn` (`SHARKORD_RELAUNCHED=1`), not electron-updater's
+  `app.relaunch()`: Electron relaunches through a helper that sets no-new-privileges, under which
+  pkexec can't elevate ("pkexec must be setuid root"), so the *next* update would have failed.
+  Relaunched that way, or by electron-updater's AppImage install (`APPIMAGE_SILENT_INSTALL`), the
+  single-instance lock is retried for 5 s while the old process quits. Not packaged, or an AppImage run from its extracted files:
+  the updater is off with the reason in `autoUpdateNote`. Unsigned Windows builds: the updater skips
+  the Authenticode check without a `publisherName` and trusts `latest.yml`'s SHA-512.
+  `SHARKORD_UPDATE_FEED=<url>` (installed builds) replaces GitHub with a directory of
+  `latest*.yml` + installers, to test the whole flow offline; `SHARKORD_TEST_UPDATE=install|quit`
+  restarts into a downloaded update at once, or quits (the install-on-quit path). Logged as
+  `[update]`. The tab's card header shows the client's version (`version` in `desktop-settings-get`).
 
 ## Screen share flow
 
@@ -359,8 +389,9 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
   capped at 5 MB, rotated, so never more than two files). Only the primary instance writes;
   lines logged before the single-instance lock wait in memory. The helper's stderr (probe and
   shares) is logged line by line as `[helper]`.
-- New dependencies need a real reason; the only runtime dependency is `@vencord/venmic`
-  (optional, Linux-only; listed in `asarUnpack` because it's a native module).
+- New dependencies need a real reason; the runtime dependencies are `@vencord/venmic`
+  (optional, Linux-only; listed in `asarUnpack` because it's a native module) and
+  `electron-updater` (updates; electron-builder's own, and it knows NSIS, AppImage, deb and rpm).
 
 ## Commands
 
@@ -439,6 +470,19 @@ There are no automated tests. After a change, check what it touches:
   `[flags]` lines show it (`on|off (setting|default|env)`) and the features, and with it on a
   Chromium-path share's encoder is the GPU's (not `OpenH264`); a `--disable-features=...` on the
   command line removes a feature from the list.
+- **Updates** (installed builds; `npm start` shows the switch greyed out with "Updates need an
+  installed build"; the card header names the running version): build the current version, bump `package.json` and build again into another
+  directory, serve that one (`python3 -m http.server`) and start the older build with
+  `SHARKORD_UPDATE_FEED=http://localhost:8000`. The log shows `[update]` checking, downloading and
+  "ready"; the tab's note follows (`Check for updates`, a filled `Restart to install X` once downloaded; neither shows the save bar), the tray gets
+  *Restart to update to vX*, and a green arrow appears before ☰ in the header (not on the login
+  screen). Clicking any of them restarts into the new version: on Windows and the AppImage without a
+  prompt (and quitting instead installs it too; the AppImage is renamed and, with *Open at login* on,
+  the autostart entry points at the new file); a deb or rpm asks for the password with the window hidden (cancelling it
+  brings the window back with the update still ready), and never installs on quit. Then update
+  **again** from the relaunched app (a third build on the feed): the password dialog must appear and
+  the install go through (`NoNewPrivs: 0` in `/proc/<pid>/status` of the relaunched main process). With the switch off nothing is checked after a
+  restart; the tray's *Check for updates…* still works.
 - **Notifications**: enable them in Sharkord → Settings → Notifications; a message from another
   account while the channel isn't open (or the window is hidden) shows a native notification,
   flashes the taskbar until focused (X11; Wayland ignores it), and clicking it brings the window
