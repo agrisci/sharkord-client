@@ -233,15 +233,19 @@ ipcMain.handle('virtmic-stop',   () => venmicUnlink())
 // Page → "Change server" item added to Sharkord's server menu (preload.js)
 ipcMain.on('change-server', e => { if (e.sender === win?.webContents) changeServer() })
 
-// Page → Sharkord showed a notification / it was clicked (preload.js). The page's own line
-// ([notify] shown, with its permission and switches) comes through console-message
+// Page → Sharkord showed a notification, skipped one (the window focused) or one was clicked
+// (preload.js). The page's own lines ([notify] shown, with its permission and switches) come
+// through console-message; the counts go into the diagnostics file
+const notifyCounts = { shown:0, skipped:0, clicked:0 }
 ipcMain.on('notification-shown', e => {
   if (e.sender !== win?.webContents) return
+  notifyCounts.shown++
   const flash = !win.isFocused()
   log('[notify] shown: window', winState(), '→ flash', flash)
-  if (flash) win.flashFrame(true)
+  if (flash) { win.flashFrame(true); setBadge(true) }
 })
-ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) showWindow('notification') })
+ipcMain.on('notification-skipped', e => { if (e.sender === win?.webContents) notifyCounts.skipped++ })
+ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) { notifyCounts.clicked++; showWindow('notification') } })
 
 // Page → "Desktop Client" tab added to Sharkord's user settings (preload.js)
 ipcMain.handle('desktop-settings-get', e => e.sender === win?.webContents ? desktopSettings() : null)
@@ -613,7 +617,7 @@ function createWindow () {
     }
     if (inp.type==='keyDown' && inp.control && inp.shift && inp.key.toLowerCase()==='o') changeServer()
   })
-  win.on('focus', () => win.flashFrame(false))   // stop the notification flash
+  win.on('focus', () => { win.flashFrame(false); setBadge(false) })   // stop the notification flash, clear the dot
   // Sharkord blocks unload while in a voice channel; a browser asks, Electron silently cancels
   // the close (tray Quit did nothing). Quit always wins; closing the window asks like a browser.
   win.webContents.on('will-prevent-unload', e => {
@@ -813,19 +817,49 @@ function setDesktopSettings (s, from = 'tab') {
   return desktopSettings()
 }
 
-let tray = null
+let tray = null, trayIcon = null, trayBadge = null, badged = false
 // Without a tray, Minimize to tray and Start minimized do nothing (the window can't come back)
 function createTray () {
   if (tray) return
   if (!fs.existsSync(APP_ICON)) return log('[tray] skipped: no icon')
   try {
     const icon = nativeImage.createFromPath(APP_ICON)
-    tray = new Tray(process.platform === 'win32' ? icon : icon.resize({ width:32, height:32 }))
+    trayIcon = process.platform === 'win32' ? icon : icon.resize({ width:32, height:32 })
+    trayBadge = withDot(icon.resize({ width:32, height:32 }), 32, 0.22)
+    tray = new Tray(trayIcon)
   } catch (e) { tray = null; return log('[tray] failed:', e.message) }
   log('[tray] created')
   tray.setToolTip('Sharkord')
   tray.on('click', () => showWindow('tray click'))
   updateTrayMenu()
+}
+
+// A red dot (Sharkord's --destructive) in the bottom-right corner of a `size` square copy of `img`, or
+// alone on a transparent one; `frac` is its radius over the size. Drawn into the BGRA bitmap
+// (premultiplied: the blend below is right for it), the edge smoothed by coverage
+function withDot (img, size, frac) {
+  const bmp = img ? Buffer.from(img.toBitmap()) : Buffer.alloc(size * size * 4)
+  const r = size * frac, c = size - r - 0.5, dot = [11, 0, 231]
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const a = Math.max(0, Math.min(1, r + 0.5 - Math.hypot(x - c, y - c)))
+    if (!a) continue
+    const i = (y * size + x) * 4
+    for (let k = 0; k < 3; k++) bmp[i + k] = Math.round(dot[k] * a + bmp[i + k] * (1 - a))
+    bmp[i + 3] = Math.round(255 * a + bmp[i + 3] * (1 - a))
+  }
+  return nativeImage.createFromBitmap(bmp, { width:size, height:size })
+}
+// A notification came while the window wasn't focused: a dot on the tray icon (Wayland ignores the
+// taskbar flash) and, on Windows, on the taskbar button too (the tray icon often sits in the
+// overflow there), until the window is focused
+let taskbarDot = null
+function setBadge (on) {
+  if (badged === on) return
+  badged = on
+  log('[tray] badge', on ? 'on' : 'off')
+  if (tray) { tray.setImage(on ? trayBadge : trayIcon); tray.setToolTip(on ? 'Sharkord: new messages' : 'Sharkord') }
+  if (process.platform === 'win32' && win && !win.isDestroyed())
+    win.setOverlayIcon(on ? (taskbarDot ||= withDot(null, 16, 0.4)) : null, on ? 'New messages' : '')
 }
 
 // Rebuilt on every change: Linux trays don't update a checkbox in place
@@ -1064,6 +1098,7 @@ async function saveDiagnostics () {
       '', '== State ==',
       `window: ${winState()} | tray: ${!!tray} | open at login: ${openAtLogin()} | start minimized: ${!!settings.startMinimized}` +
         ` | minimize to tray: ${!!settings.minimizeToTray} | notifications supported: ${Notification.isSupported()}`,
+      `notifications this run: shown ${notifyCounts.shown}, skipped ${notifyCounts.skipped} (window focused), clicked ${notifyCounts.clicked} | badge ${badged ? 'on' : 'off'}`,
       `page: ${await pageState()}`,
       '', '== Settings ==', JSON.stringify(settings, null, 2),
       '', '== main.log ==', readLog('main.log'),

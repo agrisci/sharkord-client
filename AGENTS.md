@@ -56,8 +56,8 @@ belongs to rather than adding files.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
   - Page → main: `virtmic-active`, `virtmic-unmute`, `virtmic-stop`, `change-server` (`send`),
-    `desktop-settings-get`, `desktop-settings-set`, `notification-shown` / `notification-clicked`
-    (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
+    `desktop-settings-get`, `desktop-settings-set`, `notification-shown` / `notification-clicked` /
+    `notification-skipped` (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
     `native-share-start` / `native-share-stop` (`send`), `update-get`, `update-check`,
     `update-install` (`send`), `diagnostics-save` — only accepted from the main window's webContents.
   - Main → page: `native-share-port` (a `MessagePort` tagged with the share's `id`, forwarded
@@ -83,6 +83,7 @@ belongs to rather than adding files.
   event, `isMinimized()` false), focus does. Sharkord reads it only for notifications (and its voice
   debug log). While the window is focused the hook skips the notification Sharkord makes for
   another channel (`[notify] skipped: the window is focused`); its sound and unread badge stay.
+  `[window] page visibility:` is logged once a state has held 1 s (switching windows leaves none).
   Logged on both ends: `[hook] notifications:` (permission and Sharkord's switches, from its
   localStorage keys `sharkord-browser-notifications*`) once per load, `[hook] switch …` on a
   change, `[notify] shown:` from the page (permission, hidden, focus, switches) and from main
@@ -95,7 +96,10 @@ belongs to rather than adding files.
 - **Tray / no menu bar**: there is no application menu (`Menu.setApplicationMenu(null)`);
   shortcuts are handled in `before-input-event`. The tray menu (Open, Change Server…, Open at
   login, Start minimized, Minimize to tray, Quit) is the non-DOM fallback. With *Minimize to tray*
-  on, `close` hides the window unless `quitting`. Autostart launches with `--hidden`, which only
+  on, `close` hides the window unless `quitting`. A notification shown while the window isn't
+  focused puts a red dot on the tray icon (`setBadge`, drawn by `withDot` into the icon's bitmap;
+  Wayland ignores the taskbar flash) and on Windows on the taskbar button (`setOverlayIcon`; the tray
+  icon often sits in the overflow), cleared when the window is focused (`[tray] badge on|off`). Autostart launches with `--hidden`, which only
   marks a login launch: it starts in the tray when *Start minimized* is on (independent of
   *Minimize to tray*, like Vesktop's). A single-instance lock makes a second launch show the window.
 - **Server check**: `checkServer` fetches `<url>/info` and expects `serverId` and `name`
@@ -141,7 +145,8 @@ belongs to rather than adding files.
   state, a State section (the window's state and tray, the startup options, Electron's
   `Notification.isSupported()`, and `pageState()`: the page's notification permission,
   `document.hidden`, focus, `navigator.onLine` and Sharkord's four notification switches, read with
-  `executeJavaScript` within 2 s), the settings without `serverUrl`, and `main.log` then
+  `executeJavaScript` within 2 s; and the notifications shown, skipped and clicked this run, with
+  the badge), the settings without `serverUrl`, and `main.log` then
   `main.old.log` as they are on disk.
   `redact()` is the safety net on top of what the log never gets (below): the server URL, its host
   and hostname → `<server>`, the paths again, and the user name as a whole word (3+ chars, any
@@ -552,7 +557,9 @@ There are no automated tests. After a change, check what it touches:
   [notify] shown: … hidden true`, `[notify] shown: window hidden, unfocused → flash true`, `[page]
   [notify] show`); the same minimized (on Wayland: no `[window] minimized` line, the blur is what
   hides it) and with another app focused; with Sharkord focused, none, on that channel or another
-  (`[notify] skipped: the window is focused` for another). Clicking it logs `[notify] click: channel, item found, …` and
+  (`[notify] skipped: the window is focused` for another). A notification puts a red dot on the
+  tray icon (`[tray] badge on`; on Windows on the taskbar button too), gone once the window is
+  focused (`[tray] badge off`). Clicking it logs `[notify] click: channel, item found, …` and
   `[window] show (notification)`; no line names the channel, the author or the message.
 - **Unreachable page**: stop the server → Retry and Change server both work. While connected, the
   log has `[page] [ws] connecting #1` / `open #1`; the network off gives `[ws] offline`, a `close #1:
@@ -574,7 +581,7 @@ There are no automated tests. After a change, check what it touches:
   and leaving the tab asks nothing; a double click opens one dialog. The file has the header, the
   sections in order (System, Chromium flags, GPU, Native share, Updates, State, Settings, main.log,
   main.old.log) and both logs; State's `page:` line has the notification permission, `hidden` and
-  the four switches; `grep` it for the server's host, `$HOME`, the settings folder and
+  the four switches, and `notifications this run:` the counts; `grep` it for the server's host, `$HOME`, the settings folder and
   the user name: no hits, only `<server>`, `<home>`, `<userData>`, `<user>`; the logs on disk
   are unchanged. With `logs/` deleted while running the sections say `(not available: ENOENT)`
   and the save still works. On Windows a JSON path in the probe reads `<home>` (the `\\` form).

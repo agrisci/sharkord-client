@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Desktop notifications
   notificationShown:   () => ipcRenderer.send('notification-shown'),
   notificationClicked: () => ipcRenderer.send('notification-clicked'),
+  notificationSkipped: () => ipcRenderer.send('notification-skipped'),
   // Native screen share (the nativeShare setting): the picked monitor, or null when the
   // share should stay Chromium's own; start hands the page a MessagePort (below)
   // Linux: pick asks the helper to pick the screen (instead of Chromium): 'ok', 'cancelled', or
@@ -636,6 +637,7 @@ function installNotificationHooks () {
       // Its sound and unread badge stay. A stand-in is returned, as Sharkord ignores the object
       if (!document.hidden) {
         console.log('[notify] skipped: the window is focused |', switches())
+        window.electronAPI.notificationSkipped()
         return Object.assign(new EventTarget(), { close () {} })
       }
       super(...a)
@@ -665,14 +667,16 @@ contextBridge.executeInMainWorld({ func: installNotificationHooks })
 // while document.hidden is true. Shadowed in the page's world, with the event Sharkord would get
 ipcRenderer.on('window-visible', (_e, v) => window.postMessage({ sharkordVisible: !!v }, '*'))
 function installVisibility () {
-  let hidden = false
+  // The log line waits until a state has held 1 s: switching windows back and forth leaves none
+  let hidden = false, logged = false, timer = null
   Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' })
   window.addEventListener('message', e => {
     if (e.source !== window || typeof e.data?.sharkordVisible !== 'boolean' || hidden === !e.data.sharkordVisible) return
     hidden = !e.data.sharkordVisible
-    console.log('[window] page visibility:', hidden ? 'hidden' : 'visible')
     document.dispatchEvent(new Event('visibilitychange'))
+    clearTimeout(timer)
+    timer = setTimeout(() => { if (hidden !== logged) { logged = hidden; console.log('[window] page visibility:', hidden ? 'hidden' : 'visible') } }, 1000)
   })
 }
 contextBridge.executeInMainWorld({ func: installVisibility })
