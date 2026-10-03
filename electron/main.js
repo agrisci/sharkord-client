@@ -754,7 +754,7 @@ function updateTrayMenu () {
     { label:'Start minimized',  type:'checkbox', checked:s.startMinimized, enabled:s.openAtLogin, click:i => setDesktopSettings({ startMinimized:i.checked }) },
     { label:'Minimize to tray', type:'checkbox', checked:s.minimizeToTray, click:i => setDesktopSettings({ minimizeToTray:i.checked }) },
     ...('nativeShare' in s ? [{ label:'Native screen share', type:'checkbox', checked:s.nativeShare, click:i => setDesktopSettings({ nativeShare:i.checked }) }] : []),
-    ...('autoUpdate' in s ? [{ label:'Install updates automatically', type:'checkbox', checked:s.autoUpdate, click:i => setDesktopSettings({ autoUpdate:i.checked }) }] : []),
+    ...('autoUpdate' in s ? [{ label:'Download updates automatically', type:'checkbox', checked:s.autoUpdate, click:i => setDesktopSettings({ autoUpdate:i.checked }) }] : []),
     { type:'separator' },
     ...(!updater ? [] : update.status === 'ready'
       ? [{ label:`Restart to update to ${update.version}`, click:installUpdate }]
@@ -770,12 +770,12 @@ function updateTrayMenu () {
 //   and every few hours, the download in the background, then a green arrow in Sharkord's header
 //   (preload.js), the tray and the Desktop Client tab until the user restarts into it. Windows and
 //   the AppImage also install on quit; deb and rpm install through pkexec (a password dialog), so
-//   only when asked. No dialogs: the arrow is the whole prompt.
+//   only when asked. No pop-ups: the arrow is the whole prompt (it asks before restarting).
 const UPDATE_CHECK_EVERY = Number(process.env.SHARKORD_UPDATE_INTERVAL) || 4 * 60 * 60 * 1000   // ms; the env var for testing
 const UPDATE_FEED = process.env.SHARKORD_UPDATE_FEED   // a directory with latest*.yml + installers, for testing
 // electron-builder marks deb and rpm installs; the updater picks dpkg/dnf over the AppImage one by it
 const packageType = () => { try { return fs.readFileSync(path.join(process.resourcesPath, 'package-type'), 'utf8').trim() } catch { return '' } }
-let updater = null, updateNote = '', update = { status:'idle' }
+let updater = null, updateNote = '', update = { status:'idle' }, updatePostponed = null   // one retry pending at most
 const autoUpdateOn = () => loadUserSettings().autoUpdate !== false
 
 function loadUpdater () {
@@ -787,8 +787,11 @@ function loadUpdater () {
   // Errors come with a page of response headers and a stack: the first line says what happened (the
   // `command -v` probes for zypper/gksudo/kdesudo report empty ones: skipped)
   const line = m => String(m ?? '').split('\n')[0].trim()
-  updater.logger = { info:m => log('[update]', m), warn:m => log('[update] warning:', line(m)), error:m => { if (line(m)) log('[update] error:', line(m)) } }
+  // A failed differential download (a server without range requests) falls back to the full one
+  updater.logger = { info:m => log('[update]', m), warn:m => log('[update] warning:', line(m)),
+    error:m => { if (line(m)) log(/^Cannot download differentially/.test(line(m)) ? '[update]' : '[update] error:', line(m)) } }
   updater.autoDownload = true
+  updater.disableWebInstaller = true   // no web installer: silences its warning at each check
   // deb/rpm: the package manager asks for the password, never behind the user's back at quit
   updater.autoInstallOnAppQuit = process.platform === 'win32' || !!process.env.APPIMAGE
   update.needsPassword = process.platform === 'linux' && !process.env.APPIMAGE
@@ -814,17 +817,24 @@ function loadUpdater () {
     try { if (openAtLogin()) setOpenAtLogin(true) } catch (e) { log('[update] autostart entry:', e.message) }
   })
   log('[update] enabled:', app.getVersion(), process.platform === 'linux' ? (process.env.APPIMAGE ? 'AppImage' : packageType()) : 'nsis')
-  // A deb/rpm installer stays in electron-updater's cache (90-130 MB) after its install, until the
-  // next download; the one of the version now running is dropped here, with its update-info.json
-  // (left alone too by an AppImage install, which moves the file out). A newer installer is kept: a
-  // download that outlived a restart
-  try {
-    const pending = path.join(app.getPath('cache'), 'sharkord-updater', 'pending')   // updaterCacheDirName in app-update.yml
-    const files = fs.readdirSync(pending), installed = files.filter(f => f.includes(`-${app.getVersion()}-`))
-    const newer = files.filter(f => !installed.includes(f) && f !== 'update-info.json')
-    if (!newer.length) for (const f of [...installed, 'update-info.json']) fs.rmSync(path.join(pending, f), { force:true })
-    if (installed.length) log('[update] removed the installed update from the cache:', installed.join(', '))
-  } catch {}
+  // The installer stays in electron-updater's cache (90-130 MB) after its install, until the next
+  // download (NSIS, deb, rpm); the one of the version now running is dropped here, with its
+  // update-info.json (left alone too by an AppImage install, which moves the file out). A newer
+  // installer is kept: a download that outlived a restart (current.blockmap, the differential
+  // download's base, isn't one). Not at once: the NSIS installer that started this version is still
+  // running from that file for a moment (EPERM)
+  setTimeout(() => {
+    // electron-updater's cache root: %LOCALAPPDATA% on Windows (Electron's 'cache' is the roaming
+    // %APPDATA% there), the same as Electron's on Linux
+    const cache = process.platform === 'win32' ? (process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')) : app.getPath('cache')
+    const pending = path.join(cache, 'sharkord-updater', 'pending')   // updaterCacheDirName in app-update.yml
+    let files; try { files = fs.readdirSync(pending) } catch { return }
+    const installed = files.filter(f => f.includes(`-${app.getVersion()}-`))
+    if (!installed.length || files.some(f => !installed.includes(f) && /\.(exe|AppImage|deb|rpm)$/.test(f))) return
+    for (const f of [...installed, 'update-info.json']) try { fs.rmSync(path.join(pending, f), { force:true }) } catch (e) { log('[update] cache:', e.message) }
+    const gone = installed.filter(f => !fs.existsSync(path.join(pending, f)))
+    if (gone.length) log('[update] removed the installed update from the cache:', gone.join(', '))
+  }, 30 * 1000)
 }
 
 // electron-updater's errors carry a page of response headers; the tab gets one plain sentence (the
@@ -832,27 +842,27 @@ function loadUpdater () {
 // release made with the updater.
 function updateErrorText (e) {
   const code = e?.code || '', msg = e?.message || String(e)
-  if (/CHANNEL_FILE_NOT_FOUND|LATEST_VERSION_NOT_FOUND/.test(code) || /Cannot find .*\.yml/.test(msg)) return 'The latest release has no update information yet.'
-  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|ERR_INTERNET_DISCONNECTED|net::/.test(code + msg)) return 'GitHub couldn\'t be reached.'
-  if (/exited with code|pkexec|dpkg|dnf|zypper/.test(msg)) return 'The install didn\'t finish (see the log).'
-  return 'Something went wrong (see the log).'
+  if (/CHANNEL_FILE_NOT_FOUND|LATEST_VERSION_NOT_FOUND/.test(code) || /Cannot find .*\.yml/.test(msg)) return 'No updates available yet.'
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|ERR_INTERNET_DISCONNECTED|net::/.test(code + msg)) return 'Update check failed: offline.'
+  return 'Update check failed (see the log).'
 }
 
 // The one line the Desktop Client tab and the tray show
 function updateNoteText () {
   if (!updater) return updateNote
-  const v = app.getVersion()
   switch (update.status) {
     case 'checking':    return 'Checking for updates…'
-    case 'downloading': return `Downloading Sharkord ${update.version}… ${update.percent || 0}%`
-    case 'ready':       return update.error ? `Installing Sharkord ${update.version} failed. ${update.error} Try again.`
-      : `Sharkord ${update.version} is ready: restart to install it.` + (update.needsPassword ? ' Your password will be asked for.' : '')
-    case 'none':        return `Sharkord ${v} is up to date (checked at ${new Date(update.checkedAt).toTimeString().slice(0, 5)}).`
-    case 'error':       return `Couldn't check for updates. ${update.error}`
-    default:            return `Sharkord ${v}.`
+    case 'downloading': return `Downloading ${update.version}… ${update.percent || 0}%`
+    case 'ready':       return update.error ? `Installing ${update.version} failed (see the log).`
+      : `${update.version} is ready. Restart to install.` + (update.needsPassword ? ' Needs your password.' : '')
+    case 'none':        return `Up to date (checked ${new Date(update.checkedAt).toTimeString().slice(0, 5)}).`
+    case 'error':       return update.error
+    default:            return ''
   }
 }
-const updateState = () => ({ ...update, note:updateNoteText() })
+// "What's new": the release's page (its notes are the changelog CI writes), also for a test feed's versions
+const RELEASES_URL = 'https://github.com/agrisci/sharkord-client/releases/tag/v'
+const updateState = () => ({ ...update, note:updateNoteText(), notesUrl:['downloading', 'ready'].includes(update.status) ? RELEASES_URL + update.version : null })
 function setUpdate (changes) {
   update = { ...update, ...changes }
   updateTrayMenu()
@@ -863,8 +873,11 @@ function checkForUpdates (manual = false) {
   if (!updater || (!manual && !autoUpdateOn())) return
   if (['checking', 'downloading', 'ready'].includes(update.status)) return
   // A 100 MB download would compete with a running native share: looked at again in 10 min
-  if (!manual && _nativeShare) { log('[update] check postponed: a native share is running'); setTimeout(() => checkForUpdates(), 10 * 60 * 1000); return }
-  updater.checkForUpdates().catch(e => log('[update] check failed:', e.message))   // also reported as an error event
+  if (!manual && _nativeShare) {
+    if (!updatePostponed) { log('[update] check postponed: a native share is running'); updatePostponed = setTimeout(() => { updatePostponed = null; checkForUpdates() }, 10 * 60 * 1000) }
+    return
+  }
+  updater.checkForUpdates().catch(() => {})   // also an error event, logged there
 }
 
 function installUpdate () {

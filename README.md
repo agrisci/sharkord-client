@@ -5,16 +5,16 @@ loads the real Sharkord web app, unchanged, and adds what a browser can't do.
 
 ## Why use it
 
-- **Hardware-encoded screen sharing up to 4K at 60 fps**, in H.264 and AV1: smooth, sharp and
-  light on your CPU.
+- **Screen sharing up to 4K at 60 fps**, in H.264 and AV1, encoded by the graphics card, not the CPU.
 - **Screen share with sound**: pick single apps or the whole system on Linux (your own voice is
   never sent back), system audio on Windows.
 - **Switch servers on the fly**, without reinstalling or editing files.
 - **System notifications** for messages and DMs; click one to jump straight to that channel or DM.
 - **Start at login**: Sharkord opens with your computer, straight into the tray if you like.
 - **Minimize to tray**: closing the window keeps you connected; the tray icon brings it back.
-- **Nothing to break**: everything works exactly as in the browser, because it *is* Sharkord's own
-  web app.
+- **Automatic updates**: new versions download in the background; click the green arrow next to
+  the ☰ menu to install.
+- **Works like the browser**: it runs Sharkord's own web app.
 
 ## Download and install
 
@@ -26,16 +26,9 @@ page.
 | **Windows 10 / 11** | `Sharkord-<version>-x64.exe` | Run it. The installer isn't code-signed yet, so Windows SmartScreen may warn the first time: **More info → Run anyway** |
 | **Fedora, openSUSE** | `Sharkord-<version>-x86_64.rpm` | Open it with your software center, or `sudo dnf install ./Sharkord-<version>-x86_64.rpm` |
 | **Ubuntu 22.04+, Debian 12+, Linux Mint** | `Sharkord-<version>-amd64.deb` | Open it with your software center, or `sudo apt install ./Sharkord-<version>-amd64.deb` |
-| **Any other Linux** | `Sharkord-<version>-x86_64.AppImage` | Make it executable and run it. Rename it to `Sharkord.AppImage` if you make a shortcut to it: updates then keep the file name (a versioned name changes with each update) |
+| **Any other Linux** | `Sharkord-<version>-x86_64.AppImage` | Make it executable and run it, from a folder you can write to (updates replace the file). Rename it to `Sharkord.AppImage` if you make a shortcut to it: updates then keep the file name |
 
 On first launch Sharkord asks for your server's address (e.g. `https://sharkord.example.com`).
-
-**Updates install themselves.** The client checks for a new version when it starts and every few
-hours, downloads it in the background and shows a green arrow next to the ☰ server menu; click it
-to restart into the new version. Windows and the AppImage also install it when you quit (keep the
-AppImage somewhere you can write to: it replaces its own file). A deb or rpm install updates through
-your package manager, so it asks for your password. Turn it off in Settings → **Desktop Client** →
-*Install updates automatically*.
 
 ## How to use it
 

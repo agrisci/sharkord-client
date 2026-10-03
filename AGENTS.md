@@ -62,7 +62,8 @@ belongs to rather than adding files.
   - Main → page: `native-share-port` (a `MessagePort` tagged with the share's `id`, forwarded
     into the page world with `window.postMessage`): helper frames and events one way,
     `keyframe`/`bitrate`/`stop` the other; `update-state` (the updater's `{ status, version,
-    percent, needsPassword, note }` on every change).
+    percent, needsPassword, note, notesUrl }` on every change; `notesUrl`, the release's page while
+    one downloads or is ready, is the *What's new* link in the tab and the arrow's dialog).
   - Picker → main: `virtmic-list`, `audio-settings-get`, `audio-settings-set`,
     `picker-go-live`, `picker-cancelled` (`send`).
   - Main → picker: `init` (sources, `skipPicker`, `platform`, `theme`).
@@ -108,13 +109,13 @@ belongs to rather than adding files.
   single-instance lock is retried for 5 s while the old process quits. Not packaged, or an AppImage run from its extracted files:
   the updater is off with the reason in `autoUpdateNote`. Unsigned Windows builds: the updater skips
   the Authenticode check without a `publisherName` and trusts `latest.yml`'s SHA-512.
-  At startup the installer of the running version is removed from electron-updater's cache
-  (`<cache>/sharkord-updater/pending`); a newer pending download is kept.
+  30 s after startup (the NSIS installer is still running from it) the installer of the running version is removed from electron-updater's cache
+  (`sharkord-updater/pending` in `%LOCALAPPDATA%` or `~/.cache`); a newer pending download is kept.
   `SHARKORD_UPDATE_FEED=<url>` (installed builds) replaces GitHub with a directory of
   `latest*.yml` + installers, to test the whole flow offline, `SHARKORD_UPDATE_INTERVAL=<ms>` shortens
   the periodic check; `SHARKORD_TEST_UPDATE=install|quit`
   restarts into a downloaded update at once, or quits (the install-on-quit path). Logged as
-  `[update]`. The tab's card header shows the client's version (`version` in `desktop-settings-get`).
+  `[update]`. The tab's Updates card shows the client's version (`version` in `desktop-settings-get`).
 
 ## Screen share flow
 
@@ -464,7 +465,7 @@ There are no automated tests. After a change, check what it touches:
 - **Change server**: ☰ server menu item, login-screen button, `Ctrl+Shift+O`, tray →
   **Change Server…**; Cancel returns to the current server.
 - **Desktop settings**: user Settings → **Desktop Client** (after Others; not in server settings). Picking it
-  shows our card in place of Sharkord's, with only Desktop Client highlighted; changes show Sharkord's
+  shows our cards (Startup and Tray, Screen Sharing, Updates) in place of Sharkord's, with only Desktop Client highlighted; changes show Sharkord's
   "You have unsaved changes / Save Changes" bar and apply only on Save. Leaving with unsaved changes
   (another entry, the back button, Escape) asks first; Desktop Client doesn't open while Sharkord's own
   tab has unsaved changes. On a narrow window the drawer closes after picking it.
@@ -477,13 +478,13 @@ There are no automated tests. After a change, check what it touches:
   Chromium-path share's encoder is the GPU's (not `OpenH264`); a `--disable-features=...` on the
   command line removes a feature from the list.
 - **Updates** (installed builds; `npm start` shows the switch greyed out with "Updates need an
-  installed build"; the card header names the running version): build the current version, bump `package.json` and build again into another
+  installed build"; the Updates card names the running version): build the current version, bump `package.json` and build again into another
   directory, serve that one (`python3 -m http.server`) and start the older build with
   `SHARKORD_UPDATE_FEED=http://localhost:8000`. The log shows `[update]` checking, downloading and
-  "ready"; the tab's note follows (`Check for updates`, a filled `Restart to install X` once downloaded; neither shows the save bar), the tray gets
+  "ready"; the tab's note follows (empty until the first check; the button `Check for updates`, a filled `Restart to install X` once downloaded; neither shows the save bar), the tray gets
   *Restart to update to vX*, and a green arrow appears before ☰ in the header (not on the login
-  screen). Clicking any of them restarts into the new version: on Windows and the AppImage without a
-  prompt (and quitting instead installs it too; the AppImage is renamed and, with *Open at login* on,
+  screen). Clicking any of them restarts into the new version (the arrow asks first, in a dialog like
+  Sharkord's; Cancel keeps it): on Windows and the AppImage without a further prompt (and quitting instead installs it too; the AppImage is renamed and, with *Open at login* on,
   the autostart entry points at the new file); a deb or rpm asks for the password with the window hidden (cancelling it
   brings the window back with the update still ready), and never installs on quit. Then update
   **again** from the relaunched app (a third build on the feed): the password dialog must appear and

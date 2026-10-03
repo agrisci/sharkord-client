@@ -681,22 +681,28 @@ const X_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" v
 const svg = markup => new DOMParser().parseFromString(markup, 'image/svg+xml').documentElement
 // lucide "monitor"
 const MONITOR_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-monitor h-4 w-4 shrink-0"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>'
+// The cards of the Desktop Client tab, in order
+const DESKTOP_GROUPS = [
+  { id: 'startup', title: 'Startup and Tray' },
+  { id: 'share',   title: 'Screen Sharing' },
+  { id: 'updates', title: 'Updates', description: s => `Client Version ${s.version || 'unknown'}` },
+]
 const DESKTOP_OPTIONS = [
-  { key: 'openAtLogin',    label: 'Open Sharkord when your computer starts up' },
+  { key: 'openAtLogin',    group: 'startup', label: 'Open Sharkord when your computer starts up' },
   // Only for launches at login: greyed out while Open at login is off (its value is kept)
-  { key: 'startMinimized', label: 'Start minimized', requires: 'openAtLogin',
+  { key: 'startMinimized', group: 'startup', label: 'Start minimized', requires: 'openAtLogin',
     description: 'When Sharkord opens at login, it starts in the system tray instead of showing its window.' },
-  { key: 'minimizeToTray', label: 'Minimize Sharkord to system tray',
+  { key: 'minimizeToTray', group: 'startup', label: 'Minimize Sharkord to system tray',
     description: 'Clicking X hides Sharkord to the tray instead of closing it.' },
-  { key: 'nativeShare',    label: 'Native screen share',
+  { key: 'nativeShare',    group: 'share', label: 'Native screen share',
     description: 'Captures and encodes shares with the GPU outside the browser, for a steady frame rate and sharper picture, when H.264 or AV1 is picked in the Devices tab (with Simulcast off, where the server offers it). ' +
       (process.platform === 'linux' ? 'AMD and Intel GPUs (Vulkan video or VA-API), Wayland. On by default.'
         : 'Screens and windows. On by default with AMD GPUs; NVIDIA and Intel GPUs are supported but not tested yet, turn it on to try.') + ' Takes effect on the next share.' },
-  { key: 'chromiumHwEncode', label: 'Hardware encoding for other shares',
+  { key: 'chromiumHwEncode', group: 'share', label:'Hardware encoding for other shares',
     description: 'Lets the browser encode shares that don\'t use the native share on the GPU. Turn it off if those shares look corrupted or never load for viewers. ' +
       (process.platform === 'linux' ? 'Off by default: some drivers encode incorrectly. ' : '') + 'Takes effect after restarting Sharkord.' },
-  { key: 'autoUpdate', label: 'Install updates automatically',
-    description: 'Checks for new versions when Sharkord starts and every few hours, and downloads them in the background. A green arrow next to the ☰ server menu restarts into the new version.' },
+  { key: 'autoUpdate', group: 'updates', label:'Download updates automatically',
+    description: 'Checks for new versions when Sharkord starts and every few hours, and downloads them in the background.' },
 ]
 
 function el (tag, className, text) {
@@ -723,10 +729,11 @@ function closeDesktopTab () {
   if (o.was?.isConnected) o.was.classList.add(...ACTIVE_ENTRY)   // Sharkord re-renders it anyway when another is picked
 }
 
-// Sharkord's "Discard unsaved changes?" dialog, rebuilt from its AlertDialog class strings and
-// words (its own is React state we can't open). true: Discard; false: Cancel. Like Sharkord's, only
-// its buttons answer it: Escape and a click on the backdrop do nothing
-function confirmDiscard () {
+// Sharkord's AlertDialog, rebuilt from its class strings (its own is React state we can't open):
+// its "Discard unsaved changes?" and our update's restart. true: ok; false: Cancel. Like Sharkord's,
+// only its buttons answer it: Escape and a click on the backdrop do nothing
+const confirmDiscard = () => confirmDialog('Discard unsaved changes?', 'You have unsaved changes. If you leave now, they will be lost.', 'Discard')
+function confirmDialog (title, text, ok, link) {
   return new Promise(resolve => {
     const root = el('div')
     root.setAttribute(DESKTOP, 'dialog')
@@ -735,11 +742,11 @@ function confirmDiscard () {
     box.setAttribute('role', 'alertdialog')
     box.setAttribute('aria-modal', 'true')
     const header = el('div', 'flex flex-col gap-2 text-center sm:text-left')
-    header.append(el('h2', 'text-lg font-semibold', 'Discard unsaved changes?'),
-      el('p', 'text-muted-foreground text-sm', 'You have unsaved changes. If you leave now, they will be lost.'))
+    header.append(el('h2', 'text-lg font-semibold', title), el('p', 'text-muted-foreground text-sm', text))
+    if (link) header.append(link)
     const footer = el('div', 'flex flex-col-reverse gap-2 sm:flex-row sm:justify-end')
     const cancel = el('button', OUTLINE_BUTTON_CLASS, 'Cancel')
-    const discard = el('button', BUTTON_CLASS, 'Discard')
+    const discard = el('button', BUTTON_CLASS, ok)
     cancel.type = discard.type = 'button'
     footer.append(cancel, discard)
     box.append(header, footer)
@@ -841,19 +848,34 @@ document.addEventListener('keydown', e => {
   })
 }, true)
 
-// Our content area: one card like Sharkord's, and its save bar while there are unsaved changes
+// "What's new in X": the release's page, in the browser (the main window's open handler)
+function whatsNewLink () {
+  const a = el('a', 'w-fit text-sm text-muted-foreground underline transition-colors hover:text-primary')
+  a.target = '_blank'; a.rel = 'noopener noreferrer'
+  return a
+}
+const showWhatsNew = (a, s) => { a.hidden = !s?.notesUrl; if (s?.notesUrl) { a.href = s.notesUrl; a.textContent = `What's new in ${s.version}` } }
+
+// Our content area: cards like Sharkord's (DESKTOP_GROUPS), and its save bar while there are unsaved changes
 function buildDesktopPanel (mainClass, initial) {
   let saved = initial, draft = { ...initial }
   const panel = el('main', mainClass)
   panel.setAttribute(DESKTOP, 'panel')
   const wrap = el('div', 'mx-auto max-w-4xl space-y-6 p-4 md:p-6')
-  const card = el('div', 'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm')
-  const header = el('div', '@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6')
-  header.append(el('div', 'leading-none font-semibold', 'Desktop Client'),
-    el('div', 'text-muted-foreground text-sm', `Options of this desktop client (version ${initial.version || 'unknown'}), kept on this computer.`))
-  const content = el('div', 'px-6 space-y-4')
-  card.append(header, content)
-  wrap.append(card)
+  // One card per group, like Sharkord's settings pages; a group without rows gets none
+  const cards = {}
+  const cardFor = id => {
+    if (cards[id]) return cards[id]
+    const { title, description } = DESKTOP_GROUPS.find(g => g.id === id)
+    const card = el('div', 'bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm')
+    const header = el('div', '@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6')
+    header.append(el('div', 'leading-none font-semibold', title))
+    if (description) header.append(el('div', 'text-muted-foreground text-sm', description(initial)))
+    const content = el('div', 'px-6 space-y-4')
+    card.append(header, content)
+    wrap.append(card)
+    return (cards[id] = content)
+  }
 
   const bar = el('div', 'pointer-events-none sticky bottom-4 z-20 px-4 md:px-6')
   const barInner = el('div', 'pointer-events-auto mx-auto flex max-w-4xl items-center justify-between gap-4 rounded-xl border bg-card px-4 py-3 shadow-lg')
@@ -889,7 +911,7 @@ function buildDesktopPanel (mainClass, initial) {
   // An option with only a note (the native share where it can't run here) shows greyed out, with
   // the note saying why. Options the main process leaves out get no row (nativeShare in a build
   // without the helper).
-  for (const { key, label, description } of DESKTOP_OPTIONS.filter(({ key }) => key in initial || initial[key + 'Note'])) {
+  for (const { key, group: groupId, label, description } of DESKTOP_OPTIONS.filter(({ key }) => key in initial || initial[key + 'Note'])) {
     const group = el('div', 'flex flex-col gap-2')
     group.setAttribute(DESKTOP, 'row')
     const text = el('div', 'flex flex-col')
@@ -908,8 +930,11 @@ function buildDesktopPanel (mainClass, initial) {
       }
       text.append(list)
     }
-    const note = initial[key + 'Note'] ? el('span', 'text-sm text-muted-foreground', initial[key + 'Note']) : null
+    // The updater's note is empty until it has something to say, then follows its state
+    const note = initial[key + 'Note'] || key === 'autoUpdate' ? el('span', 'text-sm text-muted-foreground', initial[key + 'Note'] || '') : null
     if (note) text.append(note)
+    const whatsNew = key === 'autoUpdate' ? whatsNewLink() : null
+    if (whatsNew) text.append(whatsNew)
     const sw = el('button', SWITCH_CLASS)
     sw.type = 'button'
     sw.setAttribute('role', 'switch')
@@ -931,7 +956,8 @@ function buildDesktopPanel (mainClass, initial) {
           : s?.status === 'downloading' ? `Downloading… ${s.percent || 0}%`
           : s?.status === 'checking' ? 'Checking…' : 'Check for updates'
         act.disabled = !(key in initial) || ['checking', 'downloading'].includes(s?.status)
-        if (note && s?.note) note.textContent = s.note
+        if (note && s) note.textContent = s.note || ''
+        showWhatsNew(whatsNew, s)
       }
       act.addEventListener('click', () => {
         if (_update?.status === 'ready') return ipcRenderer.send('update-install')
@@ -941,9 +967,9 @@ function buildDesktopPanel (mainClass, initial) {
       _onUpdate = show
       control.append(act)
     }
-    control.append(sw)
+    control.prepend(sw)   // the switch first, the updates button to its right
     group.append(text, control)
-    content.append(group)
+    cardFor(groupId).append(group)
   }
   render()
   return { panel, dirty: () => changed().length > 0 }
@@ -952,11 +978,11 @@ function buildDesktopPanel (mainClass, initial) {
 // ── Update arrow in Sharkord's header ─────────────────────────────────────
 //   Once an update is downloaded, a green circled arrow (lucide circle-arrow-down)
 //   appears before the ☰ server menu, cloned from that button so it keeps Sharkord's styling;
-//   a click restarts into the new version. Main keeps the state (update-state messages); the tray
+//   a click asks, then restarts into the new version. Main keeps the state (update-state messages); the tray
 //   has the same entry for the login screen, which has no header.
 const UPDATE = 'data-client-update'
 const UPDATE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-circle-arrow-down h-4 w-4 text-green-500"><circle cx="12" cy="12" r="10"/><path d="M12 8v8"/><path d="m8 12 4 4 4-4"/></svg>'
-let _update = null   // main's last update-state: { status, version, percent, needsPassword, note }
+let _update = null   // main's last update-state: { status, version, percent, needsPassword, note, notesUrl }
 
 ipcRenderer.on('update-state', (_e, s) => { _update = s; addUpdateArrow(); _onUpdate?.(s) })
 ipcRenderer.invoke('update-get').then(s => { if (s) { _update = s; addUpdateArrow() } }).catch(() => {})
@@ -972,8 +998,16 @@ function addUpdateArrow () {
   for (const a of ['data-testid', 'id', 'aria-haspopup', 'aria-expanded', 'data-state']) arrow.removeAttribute(a)
   arrow.setAttribute(UPDATE, '')
   arrow.append(svg(UPDATE_ICON))
-  arrow.title = `Update ready! Restart to install Sharkord ${_update.version}` + (_update.needsPassword ? ' (asks for your password)' : '')
-  arrow.addEventListener('click', () => ipcRenderer.send('update-install'))
+  arrow.title = `Restart to update to ${_update.version}` + (_update.needsPassword ? ' (asks for your password)' : '')
+  // The arrow is easy to hit by accident: asked first (the tab's "Restart to install" isn't)
+  arrow.addEventListener('click', () => {
+    if (document.querySelector(`[${DESKTOP}=dialog]`)) return
+    const whatsNew = whatsNewLink()
+    showWhatsNew(whatsNew, _update)
+    confirmDialog(`Restart to update to ${_update.version}?`, 'Sharkord closes and reopens, which leaves any voice channel or screen share.' +
+      (_update.needsPassword ? ' Your password will be asked for.' : ''), 'Restart', whatsNew)
+      .then(ok => { if (ok) ipcRenderer.send('update-install') })
+  })
   menu.before(arrow)
 }
 
