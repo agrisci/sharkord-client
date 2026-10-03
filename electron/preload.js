@@ -653,9 +653,9 @@ function installNotificationHooks () {
 
 contextBridge.executeInMainWorld({ func: installNotificationHooks })
 
-// Main says whether the window is shown (window-visible): with backgroundThrottling off Chromium
-// keeps the page "visible" in the tray, and Sharkord only notifies for the open channel while
-// document.hidden is true. Shadowed in the page's world, with the event Sharkord would get
+// Main says whether the window is shown and focused (window-visible): with backgroundThrottling off
+// Chromium keeps the page "visible" in the tray, and Sharkord only notifies for the open channel
+// while document.hidden is true. Shadowed in the page's world, with the event Sharkord would get
 ipcRenderer.on('window-visible', (_e, v) => window.postMessage({ sharkordVisible: !!v }, '*'))
 function installVisibility () {
   let hidden = false

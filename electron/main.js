@@ -594,7 +594,7 @@ function createWindow () {
   win.webContents.on('unresponsive', () => log('[window] unresponsive'))
   win.webContents.on('responsive', () => log('[window] responsive again'))
   // Sharkord decides whether to notify by document.hidden (see sendVisibility)
-  for (const ev of ['show', 'hide', 'minimize', 'restore']) win.on(ev, sendVisibility)
+  for (const ev of ['show', 'hide', 'minimize', 'restore', 'focus', 'blur']) win.on(ev, sendVisibility)
   win.on('minimize', () => log('[window] minimized'))
   win.on('restore', () => log('[window] restored'))
   // Sharkord retitles the window once it has loaded — a good moment to note its theme
@@ -646,8 +646,10 @@ const winState = () => !win || win.isDestroyed() ? 'none'
   : `${win.isMinimized() ? 'minimized' : win.isVisible() ? 'visible' : 'hidden'}, ${win.isFocused() ? 'focused' : 'unfocused'}`
 // With backgroundThrottling off (voice keeps running in the tray) Chromium never marks the page
 // hidden, so Sharkord's document.hidden stayed false in the tray and a message in the open channel
-// never notified. The page's hook (preload.js, installVisibility) sets it from the window instead
-const winHidden = () => !win || win.isDestroyed() || !win.isVisible() || win.isMinimized()
+// never notified. The page's hook (preload.js, installVisibility) sets it from the window instead,
+// and unfocused counts as hidden: a minimize by the compositor never reaches Electron on Wayland
+// (no event, isMinimized false), and Sharkord reads it only to decide whether to notify
+const winHidden = () => !win || win.isDestroyed() || !win.isVisible() || win.isMinimized() || !win.isFocused()
 const sendVisibility = () => { if (win && !win.isDestroyed()) win.webContents.send('window-visible', !winHidden()) }
 
 function showWindow (why = 'app') {

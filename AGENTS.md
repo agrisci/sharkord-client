@@ -65,7 +65,7 @@ belongs to rather than adding files.
     `keyframe`/`bitrate`/`stop` the other; `update-state` (the updater's `{ status, version,
     percent, needsPassword, note, notesUrl }` on every change; `notesUrl`, the release's page while
     one downloads or is ready, is the *What's new* link in the tab and the arrow's dialog);
-    `window-visible` (a boolean on every show, hide, minimize, restore and page load, forwarded into
+    `window-visible` (a boolean on every show, hide, minimize, restore, focus, blur and page load, forwarded into
     the page world with `window.postMessage`).
   - Picker → main: `virtmic-list`, `audio-settings-get`, `audio-settings-set`,
     `picker-go-live`, `picker-cancelled` (`send`).
@@ -77,8 +77,10 @@ belongs to rather than adding files.
   isn't open or `document.hidden` is true. With `backgroundThrottling` off (voice keeps running in
   the tray) Chromium never marks the page hidden, so in the tray the open channel never notified:
   main sends `window-visible` and the page's `installVisibility` shadows `document.hidden` /
-  `visibilityState` with it and fires `visibilitychange` (Wayland doesn't always report a minimized
-  window, which then counts as visible). Logged on both ends: `[hook] notifications:` (permission
+  `visibilityState` with it and fires `visibilitychange`. Hidden means hidden, minimized **or
+  unfocused**: a minimize by the compositor never reaches Electron on Wayland (no event,
+  `isMinimized()` false), focus does; so, like Discord, the open channel also notifies while
+  another app has focus. Sharkord reads it only for that (and its voice debug log). Logged on both ends: `[hook] notifications:` (permission
   and Sharkord's switches, from its localStorage keys `sharkord-browser-notifications*`) once per
   load, `[hook] switch …` on a change, `[notify] shown:` from the page (permission, hidden, focus,
   switches) and from main (window state, flash), the OS's `show`/`error`/`close`, and `[notify]
@@ -545,7 +547,8 @@ There are no automated tests. After a change, check what it touches:
   leave a text channel open, close the window (`[window] close: hidden to the tray`, `[page]
   [window] page visibility: hidden`) and send a message into that channel: it notifies (`[page]
   [notify] shown: … hidden true`, `[notify] shown: window hidden, unfocused → flash true`, `[page]
-  [notify] show`); the same minimized. Clicking it logs `[notify] click: channel, item found, …` and
+  [notify] show`); the same minimized (on Wayland: no `[window] minimized` line, the blur is what
+  hides it) and with another app focused; with Sharkord focused on that channel, none. Clicking it logs `[notify] click: channel, item found, …` and
   `[window] show (notification)`; no line names the channel, the author or the message.
 - **Unreachable page**: stop the server → Retry and Change server both work. While connected, the
   log has `[page] [ws] connecting #1` / `open #1`; the network off gives `[ws] offline`, a `close #1:
