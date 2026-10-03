@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   virtmicUnmute: () => ipcRenderer.invoke('virtmic-unmute'),
   virtmicStop:   () => ipcRenderer.invoke('virtmic-stop'),
   // Desktop notifications
-  notificationShown:   () => ipcRenderer.send('notification-shown'),
+  notificationShown:   toast => ipcRenderer.send('notification-shown', toast),
   notificationClicked: () => ipcRenderer.send('notification-clicked'),
   notificationSkipped: () => ipcRenderer.send('notification-skipped'),
   // Native screen share (the nativeShare setting): the picked monitor, or null when the
@@ -590,7 +590,11 @@ if (process.platform === 'win32' || process.platform === 'linux')
 // constructor: flash the taskbar when one is shown, bring the window back on click.
 // Logged (console → main's log as [page]): the permission, Sharkord's four switches, each
 // notification with the page's state, its OS events and the click's outcome. Never its title or body
-function installNotificationHooks () {
+// Windows: main shows it (viaMain): Electron makes Chromium's notification id
+// ("n#<origin>#<hash>") the toast's tag, which Windows caps at 64 characters, so with a longer
+// server address every toast failed, silently. Main's own Notification gets a UUID
+ipcRenderer.on('notification-click', (_e, id) => window.postMessage({ sharkordNotificationClick: id }, '*'))
+function installNotificationHooks (viaMain) {
   const N = window.Notification
   if (!N) return console.log('[hook] notifications: not supported')
   const switches = () => {
@@ -626,6 +630,15 @@ function installNotificationHooks () {
     return `${dm ? 'dm' : 'channel'}, item ${el ? 'found' : 'not found'}, sidebar ${switched ? 'switched' : 'kept'}`
   }
 
+  const click = title => openSource(title).then(r => console.log('[notify] click:', r), e => console.log('[notify] click error:', e?.name))
+  const titles = new Map()   // main's notification id → its title, until clicked (viaMain)
+  let lastId = 0
+  window.addEventListener('message', e => {
+    if (e.source !== window || typeof e.data?.sharkordNotificationClick !== 'number') return
+    const title = titles.get(e.data.sharkordNotificationClick)
+    if (title !== undefined) click(title)
+  })
+
   window.Notification = class Notification extends N {
     static get permission () { return N.permission }
     static requestPermission (...a) {
@@ -640,14 +653,20 @@ function installNotificationHooks () {
         window.electronAPI.notificationSkipped()
         return Object.assign(new EventTarget(), { close () {} })
       }
+      if (viaMain) {
+        const [title, opts] = a, id = ++lastId
+        titles.set(id, String(title))
+        if (titles.size > 50) titles.delete(titles.keys().next().value)
+        console.log('[notify] shown: permission', N.permission, '| hidden', document.hidden, '| focus', document.hasFocus(), '|', switches(), '| by main')
+        window.electronAPI.notificationShown({ id, title: String(title), body: String(opts?.body ?? ''), silent: !!opts?.silent })
+        return Object.assign(new EventTarget(), { close () {} })
+      }
       super(...a)
       console.log('[notify] shown: permission', N.permission, '| hidden', document.hidden, '| focus', document.hasFocus(), '|', switches())
-      for (const ev of ['show', 'error', 'close']) this.addEventListener(ev, () => console.log('[notify]', ev))
+      const silent = setTimeout(() => console.log('[notify] no show after 10 s'), 10000)   // dropped without an error
+      for (const ev of ['show', 'error', 'close']) this.addEventListener(ev, () => { clearTimeout(silent); console.log('[notify]', ev) })
       window.electronAPI.notificationShown()
-      this.addEventListener('click', () => {
-        window.electronAPI.notificationClicked()
-        openSource(this.title).then(r => console.log('[notify] click:', r), e => console.log('[notify] click error:', e?.name))
-      })
+      this.addEventListener('click', () => { window.electronAPI.notificationClicked(); click(this.title) })
     }
   }
 
@@ -660,7 +679,7 @@ function installNotificationHooks () {
   }
 }
 
-contextBridge.executeInMainWorld({ func: installNotificationHooks })
+contextBridge.executeInMainWorld({ func: installNotificationHooks, args: [process.platform === 'win32'] })
 
 // Main says whether the window is shown and focused (window-visible): with backgroundThrottling off
 // Chromium keeps the page "visible" in the tray, and Sharkord only notifies for the open channel

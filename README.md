@@ -71,7 +71,8 @@ please open an issue.
 
 **No notifications?** Check that they are on in Sharkord's **Settings → Notifications**, that your
 system isn't in Do Not Disturb, and that your desktop's notification settings allow Sharkord. The app
-can't see those last two, so its log shows such a notification as shown. While Sharkord's window is
+can't see Do Not Disturb, so its log shows such a notification as shown; on Windows the log and the
+diagnostics file do show when Windows' settings block Sharkord's. While Sharkord's window is
 focused none are shown on purpose: a red dot on the tray icon (and on Windows the taskbar button)
 marks one that came while you were away, until you come back.
 

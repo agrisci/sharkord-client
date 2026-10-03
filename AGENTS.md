@@ -56,8 +56,8 @@ belongs to rather than adding files.
   Always spread the existing settings when saving.
 - **IPC** (`ipcMain.handle` / `ipcRenderer.invoke` unless noted):
   - Page → main: `virtmic-active`, `virtmic-unmute`, `virtmic-stop`, `change-server` (`send`),
-    `desktop-settings-get`, `desktop-settings-set`, `notification-shown` / `notification-clicked` /
-    `notification-skipped` (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
+    `desktop-settings-get`, `desktop-settings-set`, `notification-shown` (on Windows with the
+    notification for main to show) / `notification-clicked` / `notification-skipped` (`send`), `native-share-pick` (Linux) and `native-share-target` (both with the share's codec),
     `native-share-start` / `native-share-stop` (`send`), `update-get`, `update-check`,
     `update-install` (`send`), `diagnostics-save` — only accepted from the main window's webContents.
   - Main → page: `native-share-port` (a `MessagePort` tagged with the share's `id`, forwarded
@@ -66,7 +66,8 @@ belongs to rather than adding files.
     percent, needsPassword, note, notesUrl }` on every change; `notesUrl`, the release's page while
     one downloads or is ready, is the *What's new* link in the tab and the arrow's dialog);
     `window-visible` (a boolean on every show, hide, minimize, restore, focus, blur and page load, forwarded into
-    the page world with `window.postMessage`).
+    the page world with `window.postMessage`); `notification-click` (Windows: the id of a toast main
+    showed, forwarded the same way, so the page opens its channel).
   - Picker → main: `virtmic-list`, `audio-settings-get`, `audio-settings-set`,
     `picker-go-live`, `picker-cancelled` (`send`).
   - Main → picker: `init` (sources, `skipPicker`, `platform`, `theme`).
@@ -84,10 +85,22 @@ belongs to rather than adding files.
   debug log). While the window is focused the hook skips the notification Sharkord makes for
   another channel (`[notify] skipped: the window is focused`); its sound and unread badge stay.
   `[window] page visibility:` is logged once a state has held 1 s (switching windows leaves none).
-  Logged on both ends: `[hook] notifications:` (permission and Sharkord's switches, from its
+  **On Windows main shows the toast** (Electron's `Notification`): Electron makes Chromium's
+  notification id (`n#<origin>#<hash>`) the toast's tag, which Windows caps at 64 characters, so
+  with a server address over ~29 characters every toast was refused, silently (the page gets no
+  `error`). The page hook hands the title and body to main instead (`| by main`), whose toast gets
+  a UUID; its click comes back as `notification-click`. A toast leaves the notification centre when
+  its popup times out, and any on screen is closed at quit: there is no COM activator, so a click
+  there after a quit would find the app gone. Electron's `show` only means Windows took it; a
+  refusal (Windows' switches for all notifications or Sharkord's) is `[notify] error:` with
+  Windows' reason. Not packaged, the AppUserModelID is `com.sharkord.client.dev`: Electron's first
+  toast leaves a Start menu `Electron.lnk` with the ID, after which Windows labelled the installed
+  build's toasts Electron (and the login item, named after the ID, was the dev build's). Linux keeps Chromium's, where `[notify] no show after 10 s` marks one dropped
+  without an event. Logged on both ends: `[hook] notifications:` (permission and Sharkord's switches, from its
   localStorage keys `sharkord-browser-notifications*`) once per load, `[hook] switch …` on a
   change, `[notify] shown:` from the page (permission, hidden, focus, switches) and from main
-  (window state, flash), the OS's `show`/`error`/`close`, and `[notify] click:` (dm or channel,
+  (window state, flash), the OS's `show`/`error`/`close` (Windows: from main, `close:` with the
+  reason), and `[notify] click:` (dm or channel,
   item found, sidebar switched), never the title or body.
 - **Unreachable page** buttons are links to `sharkord://retry` and `sharkord://change-server`,
   intercepted by the main window's `will-navigate`.
@@ -145,8 +158,9 @@ belongs to rather than adding files.
   state, a State section (the window's state and tray, the startup options, Electron's
   `Notification.isSupported()`, and `pageState()`: the page's notification permission,
   `document.hidden`, focus, `navigator.onLine` and Sharkord's four notification switches, read with
-  `executeJavaScript` within 2 s; and the notifications shown, skipped and clicked this run, with
-  the badge), the settings without `serverUrl`, and `main.log` then
+  `executeJavaScript` within 2 s; the notifications shown, skipped, clicked and failed this run, with
+  the badge; on Windows its switches for all notifications and Sharkord's, `windowsToasts()` from the
+  registry), the settings without `serverUrl`, and `main.log` then
   `main.old.log` as they are on disk.
   `redact()` is the safety net on top of what the log never gets (below): the server URL, its host
   and hostname → `<server>`, the paths again, and the user name as a whole word (3+ chars, any
@@ -555,12 +569,16 @@ There are no automated tests. After a change, check what it touches:
   leave a text channel open, close the window (`[window] close: hidden to the tray`, `[page]
   [window] page visibility: hidden`) and send a message into that channel: it notifies (`[page]
   [notify] shown: … hidden true`, `[notify] shown: window hidden, unfocused → flash true`, `[page]
-  [notify] show`); the same minimized (on Wayland: no `[window] minimized` line, the blur is what
+  [notify] show`; on Windows `… | by main` and `[notify] show` from main, then `[notify] close:
+  timedOut` and the toast is gone from the notification centre); the same minimized (on Wayland: no `[window] minimized` line, the blur is what
   hides it) and with another app focused; with Sharkord focused, none, on that channel or another
   (`[notify] skipped: the window is focused` for another). A notification puts a red dot on the
   tray icon (`[tray] badge on`; on Windows on the taskbar button too), gone once the window is
   focused (`[tray] badge off`). Clicking it logs `[notify] click: channel, item found, …` and
-  `[window] show (notification)`; no line names the channel, the author or the message.
+  `[window] show (notification)`; no line names the channel, the author or the message. On Windows
+  with Sharkord switched off in Settings → System → Notifications: no toast, `[notify] error: …
+  Settings prevent the notification from being delivered`, and the diagnostics file's State says
+  `failed 1` and `windows notifications: all on, Sharkord off`.
 - **Unreachable page**: stop the server → Retry and Change server both work. While connected, the
   log has `[page] [ws] connecting #1` / `open #1`; the network off gives `[ws] offline`, a `close #1:
   code 1006, unclean` and `connecting #2`... (one per reconnect attempt), back on `[ws] online`.
@@ -581,7 +599,7 @@ There are no automated tests. After a change, check what it touches:
   and leaving the tab asks nothing; a double click opens one dialog. The file has the header, the
   sections in order (System, Chromium flags, GPU, Native share, Updates, State, Settings, main.log,
   main.old.log) and both logs; State's `page:` line has the notification permission, `hidden` and
-  the four switches, and `notifications this run:` the counts; `grep` it for the server's host, `$HOME`, the settings folder and
+  the four switches, `notifications this run:` the counts, and on Windows `windows notifications:`; `grep` it for the server's host, `$HOME`, the settings folder and
   the user name: no hits, only `<server>`, `<home>`, `<userData>`, `<user>`; the logs on disk
   are unchanged. With `logs/` deleted while running the sections say `(not available: ENOENT)`
   and the save still works. On Windows a JSON path in the probe reads `<home>` (the `\\` form).

@@ -236,13 +236,36 @@ ipcMain.on('change-server', e => { if (e.sender === win?.webContents) changeServ
 // Page → Sharkord showed a notification, skipped one (the window focused) or one was clicked
 // (preload.js). The page's own lines ([notify] shown, with its permission and switches) come
 // through console-message; the counts go into the diagnostics file
-const notifyCounts = { shown:0, skipped:0, clicked:0 }
-ipcMain.on('notification-shown', e => {
+const notifyCounts = { shown:0, skipped:0, clicked:0, failed:0 }
+// Windows toasts need an AppUserModelID (build.appId, on the installer's shortcut). Not packaged,
+// its own: Electron's first toast leaves a Start menu "Electron" shortcut with the ID, and Windows
+// then named the installed build's toasts Electron too
+const APP_USER_MODEL_ID = app.isPackaged ? 'com.sharkord.client' : 'com.sharkord.client.dev'
+// Shown by main (Windows), held while on screen so their click arrives. A toast leaves the
+// notification centre with its popup (as Discord's do): there is no COM activator, so a click
+// there after a quit would find the app gone
+const toasts = new Set()
+ipcMain.on('notification-shown', (e, toast) => {
   if (e.sender !== win?.webContents) return
   notifyCounts.shown++
   const flash = !win.isFocused()
   log('[notify] shown: window', winState(), '→ flash', flash)
   if (flash) { win.flashFrame(true); setBadge(true) }
+  // Windows: Chromium's toast tag (its notification id, with the server's origin) can exceed
+  // Windows' 64 characters, so the page hands it here (preload.js)
+  if (process.platform !== 'win32' || typeof toast?.id !== 'number') return
+  const n = new Notification({ title: String(toast.title), body: String(toast.body), silent: !!toast.silent })
+  // 'show' comes once Windows has the toast, even one its switches then refuse ('failed', with why)
+  const done = () => toasts.delete(n)
+  toasts.add(n)
+  n.on('show',   () => log('[notify] show'))
+  n.on('failed', (_e, err) => { notifyCounts.failed++; log('[notify] error:', scrubServer(firstLine(String(err)))); done() })
+  n.on('close',  e => { log('[notify] close:', e?.reason ?? '-'); if (e?.reason === 'timedOut') n.close(); done() })
+  n.on('click',  () => {
+    done(); notifyCounts.clicked++; showWindow('notification')
+    if (win && !win.isDestroyed()) win.webContents.send('notification-click', toast.id)
+  })
+  n.show()
 })
 ipcMain.on('notification-skipped', e => { if (e.sender === win?.webContents) notifyCounts.skipped++ })
 ipcMain.on('notification-clicked', e => { if (e.sender === win?.webContents) { notifyCounts.clicked++; showWindow('notification') } })
@@ -1051,6 +1074,19 @@ function redact (text) {
   if (user.length >= 3) text = text.replace(new RegExp('\\b' + escapeRe(user) + '\\b', 'gi'), '<user>')
   return text
 }
+// Windows' own switches, which refuse a toast: all notifications (Settings → System →
+// Notifications) and Sharkord's. Not set means on. Do not disturb isn't readable
+function windowsToasts () {
+  const reg = (key, value) => {
+    try {
+      const out = execFileSync(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe'),
+        ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\' + key, '/v', value], { encoding: 'utf8', windowsHide: true, timeout: 2000 })
+      return /0x0\s*$/m.test(out) ? 'off' : 'on'
+    } catch { return 'on' }   // reg.exe fails on a missing value
+  }
+  return `all ${reg('PushNotifications', 'ToastEnabled')}, Sharkord ${reg('Notifications\\Settings\\' + APP_USER_MODEL_ID, 'Enabled')}`
+}
+
 // The page's side of a notifications report: permission, visibility, Sharkord's switches. Raced
 // against a timeout, so a hung page can't hang the save
 async function pageState () {
@@ -1098,7 +1134,8 @@ async function saveDiagnostics () {
       '', '== State ==',
       `window: ${winState()} | tray: ${!!tray} | open at login: ${openAtLogin()} | start minimized: ${!!settings.startMinimized}` +
         ` | minimize to tray: ${!!settings.minimizeToTray} | notifications supported: ${Notification.isSupported()}`,
-      `notifications this run: shown ${notifyCounts.shown}, skipped ${notifyCounts.skipped} (window focused), clicked ${notifyCounts.clicked} | badge ${badged ? 'on' : 'off'}`,
+      `notifications this run: shown ${notifyCounts.shown}, skipped ${notifyCounts.skipped} (window focused), clicked ${notifyCounts.clicked}, failed ${notifyCounts.failed} | badge ${badged ? 'on' : 'off'}`,
+      ...process.platform === 'win32' ? [`windows notifications: ${windowsToasts()}`] : [],
       `page: ${await pageState()}`,
       '', '== Settings ==', JSON.stringify(settings, null, 2),
       '', '== main.log ==', readLog('main.log'),
@@ -1135,8 +1172,7 @@ app.on('certificate-error', (_e, _wc, _url, error) => log('[load] certificate er
 
 app.whenReady().then(() => {
   if (!primaryInstance) return
-  // Windows toasts need an AppUserModelID (matches build.appId on the installer's shortcut)
-  if (process.platform === 'win32') app.setAppUserModelId('com.sharkord.client')
+  if (process.platform === 'win32') app.setAppUserModelId(APP_USER_MODEL_ID)
   createTray()   // before the [sys] lines, which say whether there is one
   sysLines().forEach(l => log('[sys]', l))
   if (TEST_DIAGNOSTICS) setTimeout(saveDiagnostics, 8000)   // after the GPU lines and the probe
@@ -1165,7 +1201,11 @@ app.whenReady().then(() => {
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────
 let quitting = false
-app.on('before-quit', () => { if (!quitting) log('[app] quitting'); quitting = true; tray?.destroy(); tray = null })
+app.on('before-quit', () => {
+  if (!quitting) log('[app] quitting')
+  quitting = true; tray?.destroy(); tray = null
+  for (const n of toasts) n.close()   // not left in the notification centre (above)
+})
 app.on('window-all-closed', () => {
   log('[app] all windows closed')
   venmicUnlink()
