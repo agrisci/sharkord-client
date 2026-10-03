@@ -631,6 +631,13 @@ function installNotificationHooks () {
       return N.requestPermission(...a).then(r => { console.log('[notify] permission request →', r); return r })
     }
     constructor (...a) {
+      // Not while Sharkord's window is focused (and shown: document.hidden false, from
+      // installVisibility): Sharkord would notify for any other channel, a browser tab's habit.
+      // Its sound and unread badge stay. A stand-in is returned, as Sharkord ignores the object
+      if (!document.hidden) {
+        console.log('[notify] skipped: the window is focused |', switches())
+        return Object.assign(new EventTarget(), { close () {} })
+      }
       super(...a)
       console.log('[notify] shown: permission', N.permission, '| hidden', document.hidden, '| focus', document.hasFocus(), '|', switches())
       for (const ev of ['show', 'error', 'close']) this.addEventListener(ev, () => console.log('[notify]', ev))

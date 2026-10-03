@@ -80,7 +80,10 @@ belongs to rather than adding files.
   `visibilityState` with it and fires `visibilitychange`. Hidden means hidden, minimized **or
   unfocused**: a minimize by the compositor never reaches Electron on Wayland (no event,
   `isMinimized()` false), focus does; so, like Discord, the open channel also notifies while
-  another app has focus. Sharkord reads it only for that (and its voice debug log). Logged on both ends: `[hook] notifications:` (permission
+  another app has focus. Sharkord reads it only for that (and its voice debug log). The other way
+  round, the hook skips a notification while the window is focused (Sharkord
+  would notify for any other channel): `[notify] skipped: the window is focused`, the sound and
+  unread badge stay. Logged on both ends: `[hook] notifications:` (permission
   and Sharkord's switches, from its localStorage keys `sharkord-browser-notifications*`) once per
   load, `[hook] switch …` on a change, `[notify] shown:` from the page (permission, hidden, focus,
   switches) and from main (window state, flash), the OS's `show`/`error`/`close`, and `[notify]
@@ -548,7 +551,8 @@ There are no automated tests. After a change, check what it touches:
   [window] page visibility: hidden`) and send a message into that channel: it notifies (`[page]
   [notify] shown: … hidden true`, `[notify] shown: window hidden, unfocused → flash true`, `[page]
   [notify] show`); the same minimized (on Wayland: no `[window] minimized` line, the blur is what
-  hides it) and with another app focused; with Sharkord focused on that channel, none. Clicking it logs `[notify] click: channel, item found, …` and
+  hides it) and with another app focused; with Sharkord focused, none, on that channel or another
+  (`[notify] skipped: the window is focused` for another). Clicking it logs `[notify] click: channel, item found, …` and
   `[window] show (notification)`; no line names the channel, the author or the message.
 - **Unreachable page**: stop the server → Retry and Change server both work. While connected, the
   log has `[page] [ws] connecting #1` / `open #1`; the network off gives `[ws] offline`, a `close #1:
