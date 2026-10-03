@@ -857,6 +857,8 @@ function setUpdate (changes) {
 function checkForUpdates (manual = false) {
   if (!updater || (!manual && !autoUpdateOn())) return
   if (['checking', 'downloading', 'ready'].includes(update.status)) return
+  // A 100 MB download would compete with a running native share: looked at again in 10 min
+  if (!manual && _nativeShare) { log('[update] check postponed: a native share is running'); setTimeout(() => checkForUpdates(), 10 * 60 * 1000); return }
   updater.checkForUpdates().catch(e => log('[update] check failed:', e.message))   // also reported as an error event
 }
 
@@ -915,9 +917,11 @@ app.whenReady().then(() => {
   probeNativeShare()
   watchSuspend()
   openApp()
-  // After the page is up; then every few hours for a long-running app
+  // After the page is up; then every few hours for a long-running app, and after a suspend (a laptop
+  // asleep most of the day rarely sees the interval), once the network is back
   setTimeout(() => checkForUpdates(), 15000)
   setInterval(() => checkForUpdates(), UPDATE_CHECK_EVERY)
+  powerMonitor.on('resume', () => setTimeout(() => checkForUpdates(), 30000))
 })
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────
