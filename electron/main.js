@@ -781,8 +781,10 @@ function loadUpdater () {
   if (process.platform === 'linux' && !process.env.APPIMAGE && !packageType()) { updateNote = 'Not started as an AppImage or installed from a package.'; log('[update] off:', updateNote); return }
   try { ({ autoUpdater: updater } = require('electron-updater')) }
   catch (e) { log('[update] electron-updater missing:', e.message); updateNote = 'This build can\'t update itself.'; return }
-  // (its `command -v` probes for zypper/gksudo/kdesudo report empty errors: skipped)
-  updater.logger = { info:m => log('[update]', m), warn:m => log('[update] warning:', m), error:m => { if (String(m ?? '').trim()) log('[update] error:', m) } }
+  // Errors come with a page of response headers and a stack: the first line says what happened (the
+  // `command -v` probes for zypper/gksudo/kdesudo report empty ones: skipped)
+  const line = m => String(m ?? '').split('\n')[0].trim()
+  updater.logger = { info:m => log('[update]', m), warn:m => log('[update] warning:', line(m)), error:m => { if (line(m)) log('[update] error:', line(m)) } }
   updater.autoDownload = true
   // deb/rpm: the package manager asks for the password, never behind the user's back at quit
   updater.autoInstallOnAppQuit = process.platform === 'win32' || !!process.env.APPIMAGE
