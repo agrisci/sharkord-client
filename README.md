@@ -40,7 +40,7 @@ On first launch Sharkord asks for your server's address (e.g. `https://sharkord.
 | **Hardware encoding for other shares** | **Settings → Desktop Client**: shares that don't use the native share are encoded on the graphics card too (after a restart). On by default on Windows, off on Linux, where some drivers produce streams viewers can't play |
 | **Screen share picker** | Choose a screen or window, then the audio. On Linux the system's own screen-sharing dialog picks the source first |
 | **Share audio** | Linux: single apps or the entire system. Windows: "Stream With Audio" shares the system's sound |
-| **Notifications** | Turn them on in Sharkord's **Settings → Notifications**. The taskbar flashes until you come back, and clicking a notification opens that channel or DM, even from the tray |
+| **Notifications** | Turn them on in Sharkord's **Settings → Notifications**. They also come while Sharkord is minimized or in the tray, for the channel you left open too. The taskbar flashes until you come back, and clicking a notification opens that channel or DM, even from the tray |
 | **Tray and startup** | **Settings → Desktop Client** (confirm with **Save Changes**), or the tray menu: **Open at login**, **Start minimized** (starts in the tray at login) and **Minimize to tray** (the X keeps Sharkord running; quit from the tray). Opening Sharkord again brings the running window to the front |
 | **Diagnostics** | **Settings → Desktop Client → Save diagnostics…** writes one text file for a bug report, with your server's address and user name left out (see *Reporting a problem*) |
 
@@ -71,9 +71,11 @@ please open an issue.
 
 Open **Settings → Desktop Client** and click **Save diagnostics…** in the Diagnostics card, then
 attach the saved `.txt` to your issue. It holds the versions of the client and its browser engine,
-your system and graphics hardware, the Desktop Client settings and the app's own log from this run
-and the previous one. Nothing in it identifies you: there are no usernames, messages or account
-data, and your server's address, home folder and user name are replaced with `<server>`, `<home>`
+your system and graphics hardware, the Desktop Client settings, the state of the window and of
+notifications, and the app's own log from this run and the previous one. The log follows what the
+app did: notifications shown and clicked, the connection to the server dropping and coming back,
+settings changed, the tray, screen shares and errors. Nothing in it identifies you: there are no
+usernames, messages, notification texts, channel names or account data, and your server's address, home folder and user name are replaced with `<server>`, `<home>`
 and `<user>`. It is plain text, so you can read it before attaching it.
 
 If the app won't start, the raw logs are `logs/main.log` (and `main.old.log`, the previous run) in

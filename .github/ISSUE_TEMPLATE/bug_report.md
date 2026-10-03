@@ -8,4 +8,4 @@ about: Something doesn't work
 **Steps to reproduce**
 
 **Diagnostics file**: in Sharkord open **Settings → Desktop Client → Save diagnostics…** and
-attach the saved `.txt` here. It contains no server address, user name or home folder.
+attach the saved `.txt` here. It contains no server address, user name, home folder or message content.

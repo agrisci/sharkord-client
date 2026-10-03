@@ -11,14 +11,14 @@ There is no build step, no TypeScript and no bundler: plain CommonJS JavaScript 
 
 Core principle: **no over-engineering**. Follow the existing pattern, add the smallest thing
 that works, and don't introduce abstractions or dependencies for a single use case. The Electron
-side is ~2500 lines and the native helper ~3300 (`native/`, `scripts/stage-native.js`, `scripts/deps/`), on purpose.
+side is ~3000 lines and the native helper ~3300 (`native/`, `scripts/stage-native.js`, `scripts/deps/`), on purpose.
 
 ## Architecture
 
 | Path                         | What it is                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------------- |
 | `electron/main.js`           | Main process: settings, Chromium flags, venmic, screen picker, native share helper (probe, spawn, frames), main window, server check, first launch / change server, open at login + tray, updates (electron-updater), diagnostics (the redacted report file), lifecycle |
-| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), injected "Change server" controls, a **Desktop Client** tab in the user settings (the options and a Diagnostics card with **Save diagnostics…**) and the update arrow in the header |
+| `electron/preload.js`        | Main window preload: `electronAPI` bridge, `getDisplayMedia` hooks (share audio; the native share's placeholder swap, frame worker and decoded preview), `Notification` hook (taskbar flash; click shows the window and opens the channel/DM), the page's visibility (`document.hidden` from the window, see *Notifications* below), the page-side log lines (`[notify]`, `[ws]`, `[hook]`, `[page] error:`), injected "Change server" controls, a **Desktop Client** tab in the user settings (the options and a Diagnostics card with **Save diagnostics…**) and the update arrow in the header |
 | `electron/picker.html`       | Screen share picker (source grid + audio step), styled like Sharkord                          |
 | `electron/picker-preload.js` | `pickerAPI` bridge for the picker window                                                      |
 | `electron/first-launch.html` | Server URL prompt (first run and Change server)                                               |
@@ -64,13 +64,25 @@ belongs to rather than adding files.
     into the page world with `window.postMessage`): helper frames and events one way,
     `keyframe`/`bitrate`/`stop` the other; `update-state` (the updater's `{ status, version,
     percent, needsPassword, note, notesUrl }` on every change; `notesUrl`, the release's page while
-    one downloads or is ready, is the *What's new* link in the tab and the arrow's dialog).
+    one downloads or is ready, is the *What's new* link in the tab and the arrow's dialog);
+    `window-visible` (a boolean on every show, hide, minimize, restore and page load, forwarded into
+    the page world with `window.postMessage`).
   - Picker → main: `virtmic-list`, `audio-settings-get`, `audio-settings-set`,
     `picker-go-live`, `picker-cancelled` (`send`).
   - Main → picker: `init` (sources, `skipPicker`, `platform`, `theme`).
 - **First-launch window** has no preload. It reports back through `console-message`:
   `cancel` or `form:{json}` (same channel Vesktop's first-launch view uses). Main answers
   with `executeJavaScript('setError(...)')`.
+- **Notifications**: Sharkord notifies (`new Notification`) only while the message's channel
+  isn't open or `document.hidden` is true. With `backgroundThrottling` off (voice keeps running in
+  the tray) Chromium never marks the page hidden, so in the tray the open channel never notified:
+  main sends `window-visible` and the page's `installVisibility` shadows `document.hidden` /
+  `visibilityState` with it and fires `visibilitychange` (Wayland doesn't always report a minimized
+  window, which then counts as visible). Logged on both ends: `[hook] notifications:` (permission
+  and Sharkord's switches, from its localStorage keys `sharkord-browser-notifications*`) once per
+  load, `[hook] switch …` on a change, `[notify] shown:` from the page (permission, hidden, focus,
+  switches) and from main (window state, flash), the OS's `show`/`error`/`close`, and `[notify]
+  click:` (dm or channel, item found, sidebar switched), never the title or body.
 - **Unreachable page** buttons are links to `sharkord://retry` and `sharkord://change-server`,
   intercepted by the main window's `will-navigate`.
 - **Local pages** get their state through `loadFile(..., { query })` (`theme`, `url`,
@@ -121,7 +133,11 @@ belongs to rather than adding files.
   `saveDiagnostics`): a save dialog, then one text file (default `sharkord-diagnostics-<date>-<time>.txt`
   in Downloads) with a header naming the replacements, the `[sys]` lines, `SHARKORD_*` env, the
   Chromium flags (read back from `app.commandLine`), GPU status, the helper's probe, the updater's
-  state, the settings without `serverUrl`, and `main.log` then `main.old.log` as they are on disk.
+  state, a State section (the window's state and tray, the startup options, Electron's
+  `Notification.isSupported()`, and `pageState()`: the page's notification permission,
+  `document.hidden`, focus, `navigator.onLine` and Sharkord's four notification switches, read with
+  `executeJavaScript` within 2 s), the settings without `serverUrl`, and `main.log` then
+  `main.old.log` as they are on disk.
   `redact()` is the safety net on top of what the log never gets (below): the server URL, its host
   and hostname → `<server>`, the paths again, and the user name as a whole word (3+ chars, any
   case) → `<user>`. The hostname is left alone (nothing logs it; `fedora` as a hostname would
@@ -406,7 +422,14 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
 - 2-space indent, no semicolons, single quotes, dense aligned one-liners like the surrounding
   code. `picker.html`'s inline script is ES5 (`var`, `function`) — match it there.
 - Short comments that explain *why* (platform quirks, Electron/Chromium behaviour), not what.
-- Log through `log()` with a `[tag]` prefix (`[venmic]`, `[load]`, `[check]`, `[gpu]`). It prints to
+- Log through `log()` with a `[tag]` prefix, one per area (`[window]`, `[tray]`, `[settings]`, `[app]`,
+  `[power]`, `[load]`, `[check]`, `[notify]`, `[screen-share]`, `[venmic]`, `[gpu]`, ...). The page logs with
+  `console.log` and our tag; main's `console-message` forwards only `[native-share]`, `[share]`,
+  `[notify]`, `[ws]` (Sharkord's WebSocket: connecting, open, close code), `[hook]` (our injected
+  controls added, or their anchor missing) and `[window]` lines as `[page] …`, and the page's uncaught
+  errors as `[page] error:` (first line, 300 chars, the script's file name, 50 per load), with the
+  server replaced (`scrubServer`) in the last two kinds. Every user-facing action and state change
+  leaves a line, so a diagnostics file answers a report. It prints to
   the console and appends to `userData/logs/main.log` (the previous run in `main.old.log`; each
   capped at 5 MB, rotated, so never more than two files). Only the primary instance writes;
   lines logged before the single-instance lock wait in memory. The helper's stderr (probe and
@@ -417,8 +440,9 @@ tiled DMA-BUF modifier VA couldn't import, and the GL read-back pinned a CPU cor
   the settings and home folders in every line (`<userData>`, `<home>`; any separators, any case
   on Windows), and no line carries the server or a page URL (`[check]`, `[load]` log only the
   error), window titles (a window share's `started.monitor` becomes `<window>` before it is
-  logged or sent to the page), the apps picked for share audio (a count), hostnames or
-  usernames. Log what helps (versions, hardware, states, errors), never what names someone.
+  logged or sent to the page), the apps picked for share audio (a count), notification titles or
+  bodies, channel, DM or user names, a WebSocket close's reason (a moderator's text: its length),
+  hostnames or usernames. Log what helps (versions, hardware, states, errors), never what names someone.
 - New dependencies need a real reason; the runtime dependencies are `@vencord/venmic`
   (optional, Linux-only; listed in `asarUnpack` because it's a native module) and
   `electron-updater` (updates; electron-builder's own, and it knows NSIS, AppImage, deb and rpm).
@@ -517,21 +541,33 @@ There are no automated tests. After a change, check what it touches:
   account while the channel isn't open (or the window is hidden) shows a native notification,
   flashes the taskbar until focused (X11; Wayland ignores it), and clicking it brings the window
   back (also from the tray) and opens that channel or DM — test from the channel list and from the
-  DM list. On Windows (installed build) the toast is labelled Sharkord.
-- **Unreachable page**: stop the server → Retry and Change server both work.
+  DM list. On Windows (installed build) the toast is labelled Sharkord. With *Minimize to tray* on,
+  leave a text channel open, close the window (`[window] close: hidden to the tray`, `[page]
+  [window] page visibility: hidden`) and send a message into that channel: it notifies (`[page]
+  [notify] shown: … hidden true`, `[notify] shown: window hidden, unfocused → flash true`, `[page]
+  [notify] show`); the same minimized. Clicking it logs `[notify] click: channel, item found, …` and
+  `[window] show (notification)`; no line names the channel, the author or the message.
+- **Unreachable page**: stop the server → Retry and Change server both work. While connected, the
+  log has `[page] [ws] connecting #1` / `open #1`; the network off gives `[ws] offline`, a `close #1:
+  code 1006, unclean` and `connecting #2`... (one per reconnect attempt), back on `[ws] online`.
 - **Log files**: launch from the menu (no terminal): `logs/main.log` in the settings folder has the
   `[sys]`, `[flags]`, probe and `[gpu]` lines; a restart moves it to `main.old.log`; a second launch while
   running leaves both untouched; a flood of helper output never leaves more than the two files,
   each <= 5 MB. Nothing in it names the user: `[log]` names the run's date and no path, the server down gives
   `[check] unreachable:` and `[load] failed: server page` without the URL, and an error with a
   path (rename `settings.json` to a directory, change a setting) reads `<userData>/settings.json`;
-  on Linux a per-app share audio link logs `[venmic] link 2 app(s)`.
+  on Linux a per-app share audio link logs `[venmic] link 2 app(s)`. A broken `settings.json` (`{`) logs
+  `[settings] unreadable:` once; a setting changed in the tab or the tray logs `[settings] <key>: false
+  → true (tab|tray)`; `[tray] created`, the second `[sys]` line ends `tray yes`; a second launch logs
+  `[app] second launch` and `[window] show (second instance)`; a `throw` in DevTools' console of the
+  page (`setTimeout(() => { throw new Error('x') })`) logs `[page] error: uncaught Error: x`.
 - **Diagnostics**: Settings → Desktop Client → the Diagnostics card describes the file; **Save
   diagnostics…** opens a save dialog in Downloads with `sharkord-diagnostics-<date>-<time>.txt`; Cancel
   leaves the note empty, Save shows `Saved to …`; the save bar never appears, the switches stay,
   and leaving the tab asks nothing; a double click opens one dialog. The file has the header, the
-  sections in order (System, Chromium flags, GPU, Native share, Updates, Settings, main.log,
-  main.old.log) and both logs; `grep` it for the server's host, `$HOME`, the settings folder and
+  sections in order (System, Chromium flags, GPU, Native share, Updates, State, Settings, main.log,
+  main.old.log) and both logs; State's `page:` line has the notification permission, `hidden` and
+  the four switches; `grep` it for the server's host, `$HOME`, the settings folder and
   the user name: no hits, only `<server>`, `<home>`, `<userData>`, `<user>`; the logs on disk
   are unchanged. With `logs/` deleted while running the sections say `(not available: ENOENT)`
   and the save still works. On Windows a JSON path in the probe reads `<home>` (the `\\` form).
