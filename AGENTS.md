@@ -73,21 +73,21 @@ belongs to rather than adding files.
 - **First-launch window** has no preload. It reports back through `console-message`:
   `cancel` or `form:{json}` (same channel Vesktop's first-launch view uses). Main answers
   with `executeJavaScript('setError(...)')`.
-- **Notifications**: Sharkord notifies (`new Notification`) only while the message's channel
-  isn't open or `document.hidden` is true. With `backgroundThrottling` off (voice keeps running in
-  the tray) Chromium never marks the page hidden, so in the tray the open channel never notified:
-  main sends `window-visible` and the page's `installVisibility` shadows `document.hidden` /
-  `visibilityState` with it and fires `visibilitychange`. Hidden means hidden, minimized **or
-  unfocused**: a minimize by the compositor never reaches Electron on Wayland (no event,
-  `isMinimized()` false), focus does; so, like Discord, the open channel also notifies while
-  another app has focus. Sharkord reads it only for that (and its voice debug log). The other way
-  round, the hook skips a notification while the window is focused (Sharkord
-  would notify for any other channel): `[notify] skipped: the window is focused`, the sound and
-  unread badge stay. Logged on both ends: `[hook] notifications:` (permission
-  and Sharkord's switches, from its localStorage keys `sharkord-browser-notifications*`) once per
-  load, `[hook] switch …` on a change, `[notify] shown:` from the page (permission, hidden, focus,
-  switches) and from main (window state, flash), the OS's `show`/`error`/`close`, and `[notify]
-  click:` (dm or channel, item found, sidebar switched), never the title or body.
+- **Notifications** show exactly when Sharkord's window isn't focused (hidden to the tray,
+  minimized, behind another app), the open channel included. Sharkord notifies (`new
+  Notification`) for a channel that isn't open, or any channel while `document.hidden` is true;
+  with `backgroundThrottling` off (voice keeps running in the tray) Chromium never marks the page
+  hidden, so main sends `window-visible` and the page's `installVisibility` shadows
+  `document.hidden` / `visibilityState` with it and fires `visibilitychange`. Hidden means hidden,
+  minimized **or unfocused**: a minimize by the compositor never reaches Electron on Wayland (no
+  event, `isMinimized()` false), focus does. Sharkord reads it only for notifications (and its voice
+  debug log). While the window is focused the hook skips the notification Sharkord makes for
+  another channel (`[notify] skipped: the window is focused`); its sound and unread badge stay.
+  Logged on both ends: `[hook] notifications:` (permission and Sharkord's switches, from its
+  localStorage keys `sharkord-browser-notifications*`) once per load, `[hook] switch …` on a
+  change, `[notify] shown:` from the page (permission, hidden, focus, switches) and from main
+  (window state, flash), the OS's `show`/`error`/`close`, and `[notify] click:` (dm or channel,
+  item found, sidebar switched), never the title or body.
 - **Unreachable page** buttons are links to `sharkord://retry` and `sharkord://change-server`,
   intercepted by the main window's `will-navigate`.
 - **Local pages** get their state through `loadFile(..., { query })` (`theme`, `url`,
@@ -543,7 +543,7 @@ There are no automated tests. After a change, check what it touches:
   the install go through (`NoNewPrivs: 0` in `/proc/<pid>/status` of the relaunched main process). With the switch off nothing is checked after a
   restart; the tray's *Check for updates…* still works.
 - **Notifications**: enable them in Sharkord → Settings → Notifications; a message from another
-  account while the channel isn't open (or the window is hidden) shows a native notification,
+  account while Sharkord's window isn't focused shows a native notification, in any channel,
   flashes the taskbar until focused (X11; Wayland ignores it), and clicking it brings the window
   back (also from the tray) and opens that channel or DM — test from the channel list and from the
   DM list. On Windows (installed build) the toast is labelled Sharkord. With *Minimize to tray* on,
