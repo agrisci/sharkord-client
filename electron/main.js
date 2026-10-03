@@ -362,7 +362,10 @@ const nativeShareOn = () => nativeShareSupported() &&
 // run; a share only goes native with a codec it found (native-share-pick / native-share-target).
 function probeNativeShare () {
   const exe = nativeShareExe()
-  if (!exe || (process.platform === 'linux' && !isWayland)) return
+  // Logged: a build without the helper (dist:* without the toolchain) otherwise shows only as a
+  // missing probe line
+  if (!exe) return log('[native-share] no helper in this build: shares stay Chromium\'s')
+  if (process.platform === 'linux' && !isWayland) return
   // spawn, not execFile: its stderr goes to the log as it comes (execFile buffers it and kills
   // the helper past 1 MB, which a chatty driver or FFmpeg's verbose logging reaches)
   const proc = spawn(exe, ['--check'], { windowsHide: true })
